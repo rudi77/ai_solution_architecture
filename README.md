@@ -1,1 +1,0 @@
-# ai_solution_architecture
