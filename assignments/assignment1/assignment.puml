@@ -1,0 +1,35 @@
+@startuml
+title GenAI Method – Detailed Steps with Primary Responsible Roles
+
+skinparam rectangle {
+  BackgroundColor #EEF3FF
+  BorderColor     #4A90E2
+  RoundCorner     15
+}
+left to right direction
+
+rectangle "Use Case Definition\n(Solution Architect,\nDomain Expert)" as S1
+rectangle "Design\n(Solution Architect,\nAI/ML Eng., Data Eng.)" as S2
+rectangle "Data\n(Data Engineer)" as S3
+rectangle "Model Selection\n(AI/ML Engineer)" as S4
+rectangle "Prompt Engineering\n(Prompt Engineer)" as S5
+rectangle "Agentic Design\n(Solution Architect)" as S6
+rectangle "Fine-Tuning\n(AI/ML Engineer)" as S7
+rectangle "Evaluation & Security\n(Ethics Specialist)" as S8
+rectangle "Application Development\n(Software Engineer)" as S9
+rectangle "Deployment\n(Software Engineer)" as S10
+rectangle "Monitoring\n(Ethics Specialist)" as S11
+
+S1  --> S2
+S2  --> S3
+S3  --> S4
+S4  --> S5
+S5  --> S6
+S6  --> S7
+S7  --> S8
+S8  --> S9
+S9  --> S10
+S10 --> S11
+S11 --> S1 : Feedback loop
+
+@enduml

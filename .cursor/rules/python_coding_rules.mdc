@@ -1,0 +1,21 @@
+---
+description:
+globs: ["*.py"]
+alwaysApply: false
+---
+
+
+- Schreibe ausschließlich PEP8-konformen Code.
+- Verwende sprechende, englische Variablennamen (z.B. `user_count`, `is_valid`).
+- Bevorzuge funktionale und deklarative Programmierung; vermeide Klassen, wenn möglich.
+- Schreibe kurze, modulare Funktionen mit maximal 30 Zeilen.
+- Vermeide Code-Duplikation durch Wiederverwendung und Modularisierung.
+- Jede Funktion und jedes Modul muss einen Docstring enthalten, der Zweck und Parameter beschreibt.
+- Kommentiere komplexe Logik ausführlich.
+- Nutze Typannotationen für alle Funktionssignaturen.
+- Nutze Black und Ruff für automatisches Code-Formatting und Linting.
+- Schreibe zu jeder neuen Funktion einen Unit-Test und platziere Tests in einem separaten `tests/`-Verzeichnis.
+- Fehlerbehandlung: Fange Ausnahmen gezielt ab und gib hilfreiche Fehlermeldungen aus.
+- Sensible Daten dürfen niemals im Klartext im Code stehen.
+- Halte die Projektstruktur klar: `src/` für Quellcode, `tests/` für Tests, `docs/` für Dokumentation, `config/` für Konfiguration.
+- Entferne nur Code der wirklich entfernt werden muss.

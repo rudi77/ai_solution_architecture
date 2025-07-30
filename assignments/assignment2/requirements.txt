@@ -1,0 +1,8 @@
+scikit-learn==1.7.0
+pandas
+matplotlib
+mlflow
+joblib
+
+fastapi
+uvicorn
