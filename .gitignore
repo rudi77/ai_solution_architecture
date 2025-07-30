@@ -277,9 +277,7 @@ jspm_packages/
 .yarn-integrity
 
 # Docker
-.dockerignore
-Dockerfile
-docker-compose*.yml
+
 
 # Database
 *.db
