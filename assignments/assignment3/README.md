@@ -43,8 +43,3 @@ uv pip install -r requirements.txt
 jupyter notebook notebooks/data_prep_heart.ipynb
 ```
 
-## ✅ Highlights
-
-- Handles missing values and duplicate rows
-- Feature engineering: age binning, one-hot encoding
-- MLflow logging of metrics and trained model
