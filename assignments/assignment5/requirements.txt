@@ -1,0 +1,15 @@
+# Data Science and Machine Learning dependencies for Assignment 5 - Comparative Analysis
+
+# Core data manipulation and numerical computing
+numpy>=1.21.0
+pandas>=1.3.0
+
+# Visualization
+matplotlib>=3.4.0
+
+# Machine Learning
+scikit-learn>=1.0.0
+
+# Jupyter notebook support (optional, if running in Jupyter)
+jupyter>=1.0.0
+ipykernel>=6.0.0
