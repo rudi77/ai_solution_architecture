@@ -10,6 +10,7 @@ import json
 from app.agent.runtime import registry
 from app.agent import adk_adapter
 from app.settings import settings
+from app.persistence.sqlite import cancel_run
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -82,6 +83,8 @@ class CancelRequest(BaseModel):
 @router.post("/cancel")
 async def cancel(payload: CancelRequest) -> dict:
 	success = registry.cancel(payload.run_id)
+	if success:
+		cancel_run(settings.sqlite_db_path, payload.run_id)
 	return {"ok": success}
 
 

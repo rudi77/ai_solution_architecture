@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from app.settings import settings
+from app.persistence import sqlite as sq
+
 
 @dataclass
 class Message:
@@ -17,24 +20,26 @@ class Conversation:
 	missing_fields: List[str] = field(default_factory=list)
 
 
-class InMemoryConversationStore:
-	def __init__(self) -> None:
-		self._conversations: Dict[str, Conversation] = {}
+class SQLiteConversationStore:
+	def __init__(self, db_path: str) -> None:
+		self._db_path = db_path
 
 	def create(self, conversation_id: str) -> Conversation:
-		conversation = Conversation(id=conversation_id)
-		self._conversations[conversation_id] = conversation
-		return conversation
+		sq.ensure_conversation(self._db_path, conversation_id)
+		return Conversation(id=conversation_id, messages=[])
 
 	def get(self, conversation_id: str) -> Optional[Conversation]:
-		return self._conversations.get(conversation_id)
+		if not sq.conversation_exists(self._db_path, conversation_id):
+			return None
+		msgs = sq.list_messages(self._db_path, conversation_id)
+		return Conversation(id=conversation_id, messages=[Message(**m) for m in msgs])
 
 	def add_message(self, conversation_id: str, role: str, content: str) -> Conversation:
-		conversation = self._conversations.setdefault(conversation_id, Conversation(id=conversation_id))
-		conversation.messages.append(Message(role=role, content=content))
-		return conversation
+		sq.add_message(self._db_path, conversation_id, role, content)
+		msgs = sq.list_messages(self._db_path, conversation_id)
+		return Conversation(id=conversation_id, messages=[Message(**m) for m in msgs])
 
 
-store = InMemoryConversationStore()
+store = SQLiteConversationStore(settings.sqlite_db_path)
 
 
