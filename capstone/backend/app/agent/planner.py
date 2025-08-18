@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 import re
+import json
 
 
 @dataclass
@@ -58,5 +59,64 @@ def plan_service_creation(
 		tasks.append(PlannedTask(id="t4", title="CI/CD Pipeline konfigurieren"))
 
 	return tasks
+
+
+
+def _adk_available() -> bool:
+	try:
+		__import__("google.adk")
+		return True
+	except Exception:
+		return False
+
+
+def generate_plan_with_agent(user_text: str) -> List[PlannedTask]:
+	"""Use an LLM agent (ADK if available) to produce a plan from the prompt.
+
+	Falls back to the deterministic plan if ADK is not available or parsing fails.
+	"""
+	if not _adk_available():
+		return plan_service_creation(user_text)
+
+	try:
+		from google.adk.agents import Agent  # type: ignore
+
+		system_instruction = (
+			"You are a planning assistant. Read the user's request and return a concise step-by-step "
+			"plan to create or modify a software service. Respond ONLY in JSON as an array named \"tasks\", "
+			"where each item has a \"title\" string. Example: {\"tasks\":[{\"title\":\"Initialize git repo\"}]}"
+		)
+		agent = Agent(
+			name="planner",
+			model="gemini-2.0-flash",
+			instruction=system_instruction,
+			description="Planning agent",
+			tools=[],
+		)
+		result = None
+		for method_name in ("run", "execute", "invoke"):
+			fn = getattr(agent, method_name, None)
+			if callable(fn):
+				result = fn(user_text)  # type: ignore[misc]
+				break
+		if result is None:
+			return plan_service_creation(user_text)
+
+		text = str(result)
+		start = text.find("{")
+		end = text.rfind("}")
+		payload = text if start == -1 or end == -1 else text[start : end + 1]
+		data = json.loads(payload)
+		raw_tasks = data["tasks"] if isinstance(data, dict) and "tasks" in data else data
+		titles = [t.get("title") if isinstance(t, dict) else str(t) for t in raw_tasks]
+		titles = [t for t in titles if isinstance(t, str) and t.strip()]
+		if not titles:
+			return plan_service_creation(user_text)
+		planned: List[PlannedTask] = []
+		for idx, title in enumerate(titles, start=1):
+			planned.append(PlannedTask(id=f"t{idx}", title=title.strip()))
+		return planned
+	except Exception:
+		return plan_service_creation(user_text)
 
 

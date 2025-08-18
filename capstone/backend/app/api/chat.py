@@ -3,7 +3,7 @@ import re
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
-from app.agent.planner import plan_service_creation
+from app.agent.planner import plan_service_creation, generate_plan_with_agent
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -93,14 +93,8 @@ async def chat(request: ChatRequest) -> ChatResponse:
 			fields=fields or None,
 		)
 
-	# Return a minimal, static plan for service creation with collected hints
-	tasks = plan_service_creation(
-		text,
-		repository_name=fields.get("repository_name"),
-		language=None,
-		template=None,
-		ci_provider=None,
-	)
+	# Prefer agent-based planning; it falls back to a deterministic plan if ADK is unavailable
+	tasks = generate_plan_with_agent(text)
 	return ChatResponse(
 		reply="Ich habe eine Taskliste für die Service-Erstellung geplant.",
 		clarification_needed=False,
