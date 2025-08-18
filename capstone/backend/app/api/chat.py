@@ -32,6 +32,7 @@ class ChatResponse(BaseModel):
 	clarification_needed: bool = False
 	missing_fields: Optional[List[str]] = None
 	tasks: Optional[List[PlannedTaskModel]] = None
+	fields: Optional[dict] = None
 
 
 _REPO_NAME_RE = re.compile(r"\b[a-z0-9]+(?:[-_][a-z0-9]+)*\b")
@@ -63,19 +64,48 @@ async def chat(request: ChatRequest) -> ChatResponse:
 		)
 
 	text = last_user.content.strip()
+	missing: List[str] = []
+	fields: dict = {}
+
+	# Repo name clarification
 	if _needs_repo_name_clarification(text):
+		missing.append("repository_name")
+	else:
+		fields["repository_name"] = None
+
+	# Language
+	if not any(lang in text.lower() for lang in ["go", "python", "java", "typescript", "node", "rust"]):
+		missing.append("language")
+
+	# Template
+	if "template" not in text.lower():
+		missing.append("template")
+
+	# CI provider
+	if not any(ci in text.lower() for ci in ["github actions", "gitlab ci", "azure pipelines", "circleci"]):
+		missing.append("ci_provider")
+
+	if missing:
 		return ChatResponse(
-			reply="Wie soll das Repository heißen? (z. B. go-payment-api)",
+			reply="Bitte bestätige bzw. gib die fehlenden Angaben an: repo-name, language, template, ci-provider.",
 			clarification_needed=True,
-			missing_fields=["repository_name"],
+			missing_fields=missing,
+			fields=fields or None,
 		)
 
-	# Return a minimal, static plan for service creation
-	tasks = plan_service_creation(text)
+	# Return a minimal, static plan for service creation with collected hints
+	tasks = plan_service_creation(
+		text,
+		repository_name=fields.get("repository_name"),
+		language=None,
+		template=None,
+		ci_provider=None,
+	)
 	return ChatResponse(
 		reply="Ich habe eine Taskliste für die Service-Erstellung geplant.",
 		clarification_needed=False,
 		tasks=[PlannedTaskModel(id=t.id, title=t.title, status=t.status) for t in tasks],
+		fields=fields or None,
 	)
 
 

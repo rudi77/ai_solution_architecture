@@ -40,38 +40,18 @@ class ExecuteResponse(BaseModel):
 
 @router.post("/execute", response_model=ExecuteResponse)
 async def execute(payload: ExecuteRequest) -> ExecuteResponse:
-	tasks: List[PlannedTask] = plan_service_creation(payload.prompt)
-	events = execute_tasks(tasks)
-	return ExecuteResponse(
-		tasks=[TaskModel(id=t.id, title=t.title, status=t.status) for t in tasks],
-		events=[EventModel(id=e.id, type=e.type, message=e.message) for e in events],
-	)
+	from fastapi import HTTPException
+
+	raise HTTPException(status_code=400, detail="Only ADK streaming is supported. Use /api/agent/execute/stream")
 
 
 @router.post("/execute/stream")
 async def execute_stream(payload: ExecuteRequest) -> StreamingResponse:
-	"""Server-Sent Events stream of agent execution."""
-	tasks: List[PlannedTask] = plan_service_creation(payload.prompt)
+	"""Server-Sent Events stream of agent execution using ADK only."""
 
 	async def event_generator():
-		# Engine selection: request overrides settings
-		selected = payload.engine if payload.engine != "auto" else settings.agent_engine
-		use_adk = (selected == "adk") or (selected == "auto" and adk_adapter.is_available())
-		if use_adk:
-			async for evt in adk_adapter.execute_stream(payload.prompt):
-				yield f"event: {evt.get('type','message')}\n" + f"data: {json.dumps(evt)}\n\n"
-			return
-		async for ev in execute_tasks_stream(tasks):
-			data = {
-				"id": ev.id,
-				"type": ev.type,
-				"message": ev.message,
-				"run_id": ev.run_id,
-				"timestamp": ev.timestamp,
-				"task_id": ev.task_id,
-				"data": ev.data,
-			}
-			yield f"event: {ev.type}\n" + f"data: {json.dumps(data)}\n\n"
+		async for evt in adk_adapter.execute_stream(payload.prompt):
+			yield f"event: {evt.get('type','message')}\n" + f"data: {json.dumps(evt)}\n\n"
 
 	return StreamingResponse(event_generator(), media_type="text/event-stream")
 
