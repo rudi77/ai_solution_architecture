@@ -34,6 +34,14 @@ class Settings:
 		# SQLite database path for persistence (conversations, runs, tasks, events)
 		self.sqlite_db_path: str = os.getenv("SQLITE_DB_PATH", str(Path.cwd().joinpath("data", "app.db")))
 
+		# MCP integration (optional)
+		# Enable by setting MCP_ENABLE=true and optionally configuring one or more servers.
+		self.mcp_enable: bool = os.getenv("MCP_ENABLE", "false").lower() in {"1", "true", "yes", "on"}
+		# Convenience: filesystem MCP server root. If set, will attempt to launch via npx stdio.
+		self.mcp_filesystem_dir: Optional[str] = os.getenv("MCP_FILESYSTEM_DIR")
+		# Generic stdio server specs as JSON array: [{"command":"npx","args":["pkg", "--flag"]}, ...]
+		self.mcp_stdio_json: Optional[str] = os.getenv("MCP_STDIO_JSON")
+
 
 settings = Settings()
 
