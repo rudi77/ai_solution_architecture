@@ -10,6 +10,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - CHROMA_DB_DIR=/app/chroma
       - DOCUMENTS_ROOT=/app/documents
+      - SQLITE_DB_PATH=/app/data/app.db
     develop:
       watch:
         - action: sync
@@ -20,7 +21,9 @@ services:
     volumes:
       - ./documents:/app/documents:ro
       - chroma_data:/app/chroma
+      - app_data:/app/data
 
 volumes:
   chroma_data:
+  app_data:
 
