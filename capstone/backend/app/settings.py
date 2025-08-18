@@ -31,6 +31,8 @@ class Settings:
 		self.chroma_persist_dir: str = os.getenv("CHROMA_DB_DIR", str(Path.cwd().joinpath("chroma")))
 		self.documents_root: str = os.getenv("DOCUMENTS_ROOT", str(Path.cwd().joinpath("documents")))
 		self.agent_engine: str = os.getenv("AGENT_ENGINE", "auto")  # auto | builtin | adk
+		# SQLite database path for persistence (conversations, runs, tasks, events)
+		self.sqlite_db_path: str = os.getenv("SQLITE_DB_PATH", str(Path.cwd().joinpath("data", "app.db")))
 
 
 settings = Settings()
