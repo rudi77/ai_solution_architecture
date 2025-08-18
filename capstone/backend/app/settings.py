@@ -30,6 +30,7 @@ class Settings:
 		self.openai_embeddings_model: str = os.getenv("OPENAI_EMBEDDINGS_MODEL", "text-embedding-3-small")
 		self.chroma_persist_dir: str = os.getenv("CHROMA_DB_DIR", str(Path.cwd().joinpath("chroma")))
 		self.documents_root: str = os.getenv("DOCUMENTS_ROOT", str(Path.cwd().joinpath("documents")))
+		self.agent_engine: str = os.getenv("AGENT_ENGINE", "auto")  # auto | builtin | adk
 
 
 settings = Settings()
