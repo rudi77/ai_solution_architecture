@@ -7,6 +7,9 @@ services:
       - "8000:8000"
     environment:
       - UV_SYSTEM_PYTHON=1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - CHROMA_DB_DIR=/app/chroma
+      - DOCUMENTS_ROOT=/app/documents
     develop:
       watch:
         - action: sync
@@ -14,4 +17,10 @@ services:
           target: /app/app
         - action: rebuild
           path: ./backend/pyproject.toml
+    volumes:
+      - ./documents:/app/documents:ro
+      - chroma_data:/app/chroma
+
+volumes:
+  chroma_data:
 
