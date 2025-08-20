@@ -15,6 +15,7 @@ from app.mcp.toolsets.git_operations import GitOperationsToolset
 from app.mcp.toolsets.filesystem_ops import FilesystemToolset
 from app.mcp.toolsets.template_engine import TemplateEngineToolset
 from app.mcp.toolsets.cicd_generator import CICDToolset
+from app.rag import chroma_store
 from app.settings import settings
 
 
@@ -65,8 +66,8 @@ AVAILABLE TOOLS:
 
 CORE WORKFLOW:
 1. UNDERSTAND user requirements through clarifying questions
-2. SEARCH company guidelines for relevant standards (if available)
-3. PLAN step-by-step service creation approach
+2. SEARCH company guidelines for relevant standards and apply them
+3. PLAN step-by-step service creation approach based on guidelines
 4. EXECUTE tools in logical sequence with clear progress updates
 5. VERIFY results and adapt plan if needed
 
@@ -353,6 +354,54 @@ Follow the workflow outlined in your instructions.
             conversation_id=conversation_id
         )
         
+        # Step 0: Search for company guidelines
+        yield create_agent_event(
+            AgentEventType.THINKING,
+            f"Searching company guidelines for {language} development standards...",
+            run_id=run_id,
+            conversation_id=conversation_id
+        )
+        
+        guidelines_query = f"{language} service standards development guidelines"
+        guidelines = await self._search_company_guidelines(guidelines_query, 5)
+        guidelines_summary = self._extract_guidelines_summary(guidelines, language)
+        
+        # Apply guidelines to parameters
+        original_params = params.copy()
+        params = self._apply_guidelines_to_params(params, guidelines)
+        
+        if guidelines:
+            changes = []
+            if params.get("framework") != original_params.get("framework"):
+                changes.append(f"framework: {params['framework']}")
+            if params.get("ci_provider") != original_params.get("ci_provider"):
+                changes.append(f"CI/CD: {params['ci_provider']}")
+            if set(params.get("features", [])) != set(original_params.get("features", [])):
+                new_features = set(params["features"]) - set(original_params.get("features", []))
+                if new_features:
+                    changes.append(f"added features: {', '.join(new_features)}")
+            
+            changes_text = f" (Applied: {', '.join(changes)})" if changes else ""
+            yield create_agent_event(
+                AgentEventType.MESSAGE,
+                f"Found {len(guidelines)} relevant company guidelines. Applying standards...{changes_text}",
+                run_id=run_id,
+                conversation_id=conversation_id,
+                data={"guidelines_summary": guidelines_summary}
+            )
+        else:
+            yield create_agent_event(
+                AgentEventType.MESSAGE,
+                "No company guidelines found. Using industry best practices.",
+                run_id=run_id,
+                conversation_id=conversation_id
+            )
+        
+        # Update variables with guidelines-adjusted values
+        framework = params.get("framework")
+        features = params.get("features", ["testing", "linting"])
+        ci_provider = params.get("ci_provider", "github-actions")
+        
         # Step 1: Initialize Git repository
         yield AgentToolCall(
             id=f"tool_call_{uuid.uuid4().hex[:8]}",
@@ -636,3 +685,92 @@ Follow the workflow outlined in your instructions.
             return "circleci"
         
         return "github-actions"  # Default
+    
+    async def _search_company_guidelines(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """Search company guidelines using RAG."""
+        try:
+            if chroma_store.is_enabled():
+                results = chroma_store.query(query, max_results)
+                return [{"path": path, "content": snippet, "source": "rag"} for path, snippet in results]
+            else:
+                # Fallback to simple search if ChromaDB not available
+                from app.rag.simple_store import search_documents
+                results = search_documents(settings.documents_root, query, max_results)
+                return [{"path": path, "content": snippet, "source": "simple"} for path, snippet in results]
+        except Exception as e:
+            # Return empty results on error, don't break the workflow
+            return []
+    
+    def _extract_guidelines_summary(self, guidelines: List[Dict[str, Any]], language: str) -> str:
+        """Extract relevant guidelines for the specified language."""
+        if not guidelines:
+            return "No specific company guidelines found. Using industry best practices."
+        
+        language_lower = language.lower()
+        relevant_guidelines = []
+        
+        for guideline in guidelines:
+            content = guideline["content"].lower()
+            path = guideline["path"].lower()
+            
+            # Check if guideline is relevant to the language
+            if (language_lower in content or language_lower in path or
+                (language_lower == "python" and "fastapi" in content) or
+                (language_lower == "go" and "gin" in content)):
+                relevant_guidelines.append(guideline["content"])
+        
+        if relevant_guidelines:
+            return f"Found {len(relevant_guidelines)} relevant company guidelines:\n\n" + "\n---\n".join(relevant_guidelines[:3])
+        else:
+            return f"Found {len(guidelines)} general guidelines that may apply."
+    
+    def _apply_guidelines_to_params(self, params: Dict[str, Any], guidelines: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Apply company guidelines to service parameters."""
+        if not guidelines:
+            return params
+        
+        language = params.get("language", "").lower()
+        updated_params = params.copy()
+        
+        # Extract framework preferences from guidelines
+        if not params.get("framework"):
+            for guideline in guidelines:
+                content = guideline["content"].lower()
+                if language == "python" and "fastapi" in content:
+                    updated_params["framework"] = "fastapi"
+                    break
+                elif language == "go" and "gin" in content:
+                    updated_params["framework"] = "gin"
+                    break
+                elif language in ["node", "typescript"] and "express" in content:
+                    updated_params["framework"] = "express"
+                    break
+        
+        # Extract CI/CD preferences from guidelines
+        if not params.get("ci_provider") or params["ci_provider"] == "github-actions":
+            for guideline in guidelines:
+                content = guideline["content"].lower()
+                if "github actions" in content:
+                    updated_params["ci_provider"] = "github-actions"
+                    break
+                elif "gitlab" in content:
+                    updated_params["ci_provider"] = "gitlab-ci"
+                    break
+                elif "azure pipelines" in content:
+                    updated_params["ci_provider"] = "azure-pipelines"
+                    break
+        
+        # Extract additional features from guidelines
+        features = set(params.get("features", ["testing", "linting"]))
+        for guideline in guidelines:
+            content = guideline["content"].lower()
+            if "security" in content:
+                features.add("security")
+            if "monitoring" in content or "metrics" in content:
+                features.add("metrics")
+            if "database" in content:
+                features.add("database")
+        
+        updated_params["features"] = list(features)
+        
+        return updated_params

@@ -36,9 +36,16 @@ async def rag_query(payload: RagQueryRequest) -> RagQueryResponse:
 
 @router.post("/reindex")
 async def rag_reindex() -> dict:
+	import os
+	print(f"API reindex - CWD: {os.getcwd()}")
+	print(f"API reindex - documents_root: {settings.documents_root}")
 	if not chroma_store.is_enabled():
 		return {"status": "skipped", "reason": "embeddings not configured"}
-	count = chroma_store.reindex_documents()
-	return {"status": "ok", "chunks": count}
+	try:
+		count = chroma_store.reindex_documents()
+		return {"status": "ok", "chunks": count}
+	except Exception as e:
+		print(f"Reindex error: {e}")
+		return {"status": "error", "message": str(e)}
 
 
