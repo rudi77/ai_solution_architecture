@@ -1,0 +1,1 @@
+"""MCP toolsets for various operations (Git, Filesystem, Templates, CI/CD)."""
