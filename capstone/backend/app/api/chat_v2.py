@@ -4,7 +4,7 @@ import json
 import uuid
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel, Field
 
 from app.agent.core_agent import IDPAgent
@@ -113,6 +113,18 @@ async def chat_message(request: ChatRequest) -> ChatResponse:
         events=events
     )
 
+
+@router.options("/stream")
+async def chat_stream_options():
+    """Handle OPTIONS request for stream endpoint."""
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 @router.post("/stream")
 async def chat_stream(request: ChatRequest):
