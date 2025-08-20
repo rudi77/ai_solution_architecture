@@ -44,7 +44,7 @@ def _read_file_safely(path: Path) -> str:
 		return ""
 
 
-def _chunk_text(text: str, max_tokens: int = 1200, overlap: int = 200) -> List[str]:
+def _chunk_text(text: str, max_tokens: int = 500, overlap: int = 100) -> List[str]:
 	"""Simple character-based chunking as a stand-in for token-based splitting."""
 	if not text:
 		return []
@@ -67,9 +67,13 @@ def reindex_documents() -> int:
 	"""
 	collection = _ensure_collection()
 	paths = _list_source_files(settings.documents_root)
+	total_chunks = 0
+	batch_size = 50  # Process documents in smaller batches
+	
 	ids: List[str] = []
 	docs: List[str] = []
 	metas: List[dict] = []
+	
 	for path in paths:
 		text = _read_file_safely(path)
 		for idx, chunk in enumerate(_chunk_text(text)):
@@ -77,9 +81,19 @@ def reindex_documents() -> int:
 			ids.append(id)
 			docs.append(chunk)
 			metas.append({"path": str(path), "chunk": idx})
+			
+			# Process in batches to avoid token limits
+			if len(ids) >= batch_size:
+				collection.upsert(ids=ids, documents=docs, metadatas=metas)
+				total_chunks += len(ids)
+				ids, docs, metas = [], [], []
+	
+	# Process remaining items
 	if ids:
 		collection.upsert(ids=ids, documents=docs, metadatas=metas)
-	return len(ids)
+		total_chunks += len(ids)
+	
+	return total_chunks
 
 
 def query(query: str, max_results: int = 5) -> List[Tuple[str, str]]:
