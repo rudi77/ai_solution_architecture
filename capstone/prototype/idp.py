@@ -1262,7 +1262,7 @@ Think step by step about what needs to be done."""
                     temperature=self.llm.temperature,
                     messages=[
                         {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": f"Context:\n{context_summary}\n\nChecklist status: {checklist_status}\nDecide the next action and call exactly one function."},
+                        {"role": "user", "content": f"Context:\n{context_summary}\n\nChecklist status: {checklist_status}\nDecide the next action and call exactly one function. If a checklist exists and a next executable item is available, you must call the function for exactly that item's tool. Do not select any other tool."},
                     ],
                     tools=all_tools,
                     tool_choice="auto",
@@ -1301,6 +1301,16 @@ Think step by step about what needs to be done."""
                             reasoning="No checklist yet; create it before executing tools",
                             confidence=0.9,
                         )
+                    # Enforce next-item-first to prevent drift when a checklist exists
+                    if self.current_checklist:
+                        next_item = self._get_next_executable_item()
+                        if next_item and decided.action_type == ActionType.TOOL_CALL:
+                            req = self.tools.resolve_tool_name(decided.action_name.strip().lower().replace("-", "_").replace(" ", "_"))
+                            exp = self.tools.resolve_tool_name((next_item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_"))
+                            if exp and req != exp:
+                                decided.action_name = next_item.tool_action
+                                decided.parameters = next_item.tool_params or {}
+                                decided.reasoning = "Enforced next checklist item to prevent drift"
                     return decided
                 # If no tool call returned, bootstrap checklist
                 return ActionDecision(
@@ -1568,6 +1578,14 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
                 current_item.id,
                 ChecklistItemStatus.IN_PROGRESS
             )
+
+        # Enforce executing the current checklist item's tool if there is a mismatch
+        if current_item and current_item.tool_action:
+            expected_tool = (current_item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_")
+            resolved_expected = self.tools.resolve_tool_name(expected_tool)
+            if resolved_expected and resolved_requested != resolved_expected:
+                normalized_tool_name = expected_tool
+                resolved_requested = resolved_expected
         
         # Enhance parameters with context
         enhanced_params = self._enhance_tool_parameters(normalized_tool_name, parameters)
@@ -1847,6 +1865,14 @@ Extract:
         
         if has_failed:
             return "Has failed items that need attention"
+
+        # Warn if we have pending/retrying items but no next executable due to dependency issues
+        has_pending_or_retrying = any(
+            item.status in [ChecklistItemStatus.PENDING, ChecklistItemStatus.RETRYING]
+            for item in self.current_checklist.items
+        )
+        if has_pending_or_retrying and next_item is None:
+            self.logger.warning("no_next_item_but_pending", session_id=self.session_id)
         
         return "Waiting for next action"
     
@@ -1891,11 +1917,32 @@ Extract:
             name_pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
             pn = enhanced.get("project_name")
             pt = enhanced.get("project_type")
+
+            # Helper: kebab-case normalization
+            def _kebab_case(value: str) -> str:
+                return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+
+            # If project_name is missing or equals a known type, repair from checklist
+            if (pn is None or (isinstance(pn, str) and pn.lower() in allowed_types)) and self.current_checklist:
+                enhanced["project_name"] = self.current_checklist.project_name
+                pn = enhanced["project_name"]
+
+            # If project_type is missing, take from checklist
+            if (pt is None or pt == "") and self.current_checklist:
+                enhanced["project_type"] = self.current_checklist.project_type
+                pt = enhanced["project_type"]
+
+            # Detect swapped name/type
             if isinstance(pn, str) and isinstance(pt, str):
                 looks_like_type = pn.lower() in allowed_types
                 looks_like_name = bool(name_pattern.match(pt))
                 if looks_like_type and looks_like_name:
                     enhanced["project_name"], enhanced["project_type"] = pt, pn
+                    pn, pt = enhanced["project_name"], enhanced["project_type"]
+
+            # Normalize kebab-case for project_name
+            if isinstance(enhanced.get("project_name"), str):
+                enhanced["project_name"] = _kebab_case(enhanced["project_name"]) or "unnamed"
         except Exception:
             pass
 
@@ -1912,6 +1959,14 @@ Extract:
                 enhanced["target_path"] = f"./{enhanced.get('project_name', 'project')}"
             if "template" not in enhanced or not enhanced.get("template"):
                 enhanced["template"] = "fastapi-microservice"
+        if tool_name == "validate_project_name_and_type":
+            # Ensure both fields present for robust validation
+            if not enhanced.get("project_type") and self.current_checklist:
+                enhanced["project_type"] = self.current_checklist.project_type
+        if tool_name == "generate_k8s_manifests" and "service_name" not in enhanced:
+            enhanced["service_name"] = enhanced.get("project_name", "service")
+        if tool_name == "setup_observability" and "project_name" not in enhanced:
+            enhanced["project_name"] = self.current_checklist.project_name if self.current_checklist else enhanced.get("project_name", "project")
         
         return enhanced
     
