@@ -1026,6 +1026,19 @@ class ProductionReActAgent:
                 self._restore_from_state(restored_state)
                 # Capture latest user message for reasoning context
                 self.context["recent_user_message"] = user_input
+                # If we were waiting for user input, consume this message as the answer and clear the flag
+                if self.context.get("awaiting_user_input"):
+                    awaiting = self.context.get("awaiting_user_input") or {}
+                    self.context.setdefault("user_inputs", []).append({
+                        "answer": user_input,
+                        "for_action": awaiting.get("action"),
+                        "questions": awaiting.get("questions", []),
+                        "provided_at": datetime.now().isoformat(),
+                    })
+                    # Clear awaiting flag and persist immediately
+                    self.context.pop("awaiting_user_input", None)
+                    await self._save_current_state()
+                    yield "📥 Received your input. Continuing with the workflow...\n"
             else:
                 yield f"🚀 Starting new workflow (Session: {self.session_id})\n"
                 self.context = {
@@ -1132,6 +1145,9 @@ Think step by step about what needs to be done."""
         context_summary = self._build_context_summary()
         checklist_status = self._get_checklist_status()
 
+        # Note: We allow ASK_USER even when no checklist exists to keep the CLI interactive.
+        # We'll prefer creating a checklist later if the model doesn't ask the user explicitly.
+
         # 1) Try vendor function-calling: expose all tools and meta-actions as callable functions
         try:
             from openai import APIConnectionError  # type: ignore
@@ -1207,7 +1223,17 @@ Think step by step about what needs to be done."""
                         return ActionDecision(action_type=ActionType.COMPLETE, action_name="complete", parameters=params, reasoning="Vendor function-called complete", confidence=0.9)
 
                     # Otherwise treat as a tool call
-                    return ActionDecision(action_type=ActionType.TOOL_CALL, action_name=name, parameters=params, reasoning="Vendor function-called tool", confidence=0.9)
+                    decided = ActionDecision(action_type=ActionType.TOOL_CALL, action_name=name, parameters=params, reasoning="Vendor function-called tool", confidence=0.9)
+                    # If no checklist exists yet and the model didn't ask the user, prefer creating one first
+                    if self.current_checklist is None:
+                        return ActionDecision(
+                            action_type=ActionType.UPDATE_CHECKLIST,
+                            action_name="create_checklist",
+                            parameters={},
+                            reasoning="No checklist yet; create it before executing tools",
+                            confidence=0.9,
+                        )
+                    return decided
         except Exception as e:
             self.logger.warning("vendor_action_selection_failed", error=str(e))
 
@@ -1233,6 +1259,15 @@ Determine the most appropriate next action with clear reasoning."""
                 ActionDecision,
                 system_prompt=self.system_prompt
             )
+            # Respect ASK_USER; otherwise, if no checklist exists, create it first
+            if action_decision.action_type != ActionType.ASK_USER and self.current_checklist is None:
+                return ActionDecision(
+                    action_type=ActionType.UPDATE_CHECKLIST,
+                    action_name="create_checklist",
+                    parameters={},
+                    reasoning="No checklist yet; create it before proceeding",
+                    confidence=action_decision.confidence,
+                )
             return action_decision
         except Exception as e:
             self.logger.error("action_determination_failed", error=str(e))
@@ -1426,6 +1461,7 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         
         # Normalize tool name to improve robustness
         normalized_tool_name = tool_name.strip().lower().replace("-", "_").replace(" ", "_")
+        resolved_requested = self.tools.resolve_tool_name(normalized_tool_name)
         
         # Find corresponding checklist item (exact or normalized match)
         current_item = None
@@ -1434,7 +1470,13 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
                 if item.status not in [ChecklistItemStatus.PENDING, ChecklistItemStatus.RETRYING]:
                     continue
                 item_name_normalized = (item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_")
-                if item.tool_action == tool_name or item_name_normalized == normalized_tool_name:
+                # Resolve both sides through alias map; match if they map to the same underlying tool
+                resolved_item = self.tools.resolve_tool_name(item_name_normalized) if item_name_normalized else ""
+                if (
+                    item.tool_action == tool_name
+                    or item_name_normalized == normalized_tool_name
+                    or (resolved_item and resolved_requested and resolved_item == resolved_requested)
+                ):
                     current_item = item
                     break
         
@@ -1459,7 +1501,10 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         if current_item:
             if result.get("success"):
                 status = ChecklistItemStatus.COMPLETED
-                result_text = json.dumps(result.get("result", {}))
+                try:
+                    result_text = json.dumps(result, ensure_ascii=False)
+                except Exception:
+                    result_text = str(result)
             else:
                 current_item.retry_count += 1
                 if current_item.retry_count < current_item.max_retries:
@@ -1498,7 +1543,7 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
                 interaction_msg += f"  {i}. {q}\n"
         
         # In production, this would trigger UI interaction
-        # For now, we'll save state and return message
+        # For CLI: Save state, then the next user message to process_request() will be consumed as the answer
         self.context["awaiting_user_input"] = {
             "action": action_name,
             "questions": questions,
@@ -1507,6 +1552,7 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         
         await self._save_current_state()
         
+        interaction_msg += "\nPlease type your answers (free-form).\n"
         return interaction_msg
     
     async def _handle_error_recovery(self, action_name: str, parameters: Dict) -> str:
