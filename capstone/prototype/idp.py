@@ -30,7 +30,7 @@ from prometheus_client import Counter, Histogram, Gauge, start_http_server
 from circuitbreaker import circuit
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
 # Configure structured logging
 structlog.configure(
@@ -53,7 +53,9 @@ structlog.configure(
 logger = structlog.get_logger()
 
 # Setup OpenTelemetry
-trace.set_tracer_provider(TracerProvider())
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
 
 # Prometheus Metrics
@@ -306,7 +308,8 @@ class AnthropicProvider(LLMProvider):
     async def generate_structured_response(self, prompt: str, response_model: BaseModel, **kwargs) -> BaseModel:
         import json
         
-        schema = response_model.schema()
+        model_cls = response_model if isinstance(response_model, type) else response_model.__class__
+        schema = model_cls.model_json_schema() if hasattr(model_cls, "model_json_schema") else model_cls.schema()  # type: ignore[attr-defined]
         structured_prompt = f"""{prompt}
 
 Respond with valid JSON matching this schema:
@@ -324,7 +327,7 @@ JSON Response:"""
                 json_str = json_str[:-3]
             
             data = json.loads(json_str.strip())
-            return response_model(**data)
+            return model_cls(**data)
         except Exception as e:
             self.logger.error("anthropic_structured_failed", error=str(e))
             raise
@@ -338,6 +341,7 @@ class EnhancedToolRegistry:
         self.tools = {}
         self.tool_aliases: Dict[str, str] = {}
         self.logger = structlog.get_logger()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
         self._register_default_tools()
     
     def register_tool(self, name: str, func: callable, description: str = "", timeout: int = 30):
@@ -413,10 +417,9 @@ class EnhancedToolRegistry:
         if asyncio.iscoroutinefunction(func):
             return await asyncio.wait_for(func(**params), timeout=timeout)
         
-        # For sync functions, run in executor
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = loop.run_in_executor(executor, partial(func, **params))
-            return await asyncio.wait_for(future, timeout=timeout)
+        # For sync functions, run in shared executor
+        future = loop.run_in_executor(self.executor, partial(func, **params))
+        return await asyncio.wait_for(future, timeout=timeout)
     
     def _register_default_tools(self):
         """Register default IDP tools"""
@@ -497,7 +500,7 @@ class EnhancedToolRegistry:
                 "required": ["project_name"],
                 "additionalProperties": False,
             },
-            "project-validator": {
+            "project_validator": {
                 "type": "object",
                 "properties": {
                     "project_name": {"type": "string"},
@@ -516,7 +519,7 @@ class EnhancedToolRegistry:
                 "required": ["template", "target_path"],
                 "additionalProperties": False,
             },
-            "template-applier": {
+            "template_applier": {
                 "type": "object",
                 "properties": {
                     "template": {"type": "string"},
@@ -534,7 +537,7 @@ class EnhancedToolRegistry:
                 "required": ["repo_path"],
                 "additionalProperties": False,
             },
-            "ci-cd-configurator": {
+            "ci_cd_configurator": {
                 "type": "object",
                 "properties": {
                     "repo_path": {"type": "string"},
@@ -544,7 +547,7 @@ class EnhancedToolRegistry:
                 "additionalProperties": False,
             },
         }
-        def build_def(name: str, func: callable, description: str) -> Dict[str, Any]:
+        def build_def(name: str, func: callable, description: str, target: Optional[str] = None) -> Dict[str, Any]:
             # Build a permissive JSON schema for parameters
             properties: Dict[str, Any] = {}
             required: List[str] = []
@@ -566,7 +569,8 @@ class EnhancedToolRegistry:
                 "additionalProperties": True,
             }
             # Apply strict overrides when available
-            parameters_schema = strict_schemas.get(name, parameters_schema)
+            alias_key = name
+            parameters_schema = strict_schemas.get(alias_key, strict_schemas.get(target or "", parameters_schema))
             if required and "required" not in parameters_schema:
                 parameters_schema["required"] = required
             return {
@@ -587,7 +591,7 @@ class EnhancedToolRegistry:
             if target in self.tools:
                 func = self.tools[target]["func"]
                 description = f"Alias of {target}"
-                tools.append(build_def(alias, func, description))
+                tools.append(build_def(alias, func, description, target=target))
         return tools
     
     # Async tool implementations
@@ -606,6 +610,7 @@ class EnhancedToolRegistry:
 
     async def _create_git_repository_with_branch_protection(self, repo_name: str = None, visibility: str = "private", **kwargs) -> Dict:
         """Create repository and apply branch protection rules in one step."""
+        visibility = kwargs.get("visibility", visibility)
         name = repo_name or kwargs.get("name") or kwargs.get("project_name") or "unnamed"
         create = await self._create_repository(name=name, visibility=visibility, **kwargs)
         if not create.get("success"):
@@ -635,9 +640,9 @@ class EnhancedToolRegistry:
         }
         
         if project_type and project_type in templates:
-            return {"success": True, "templates": templates[project_type]}
+            return {"success": True, "templates": {project_type: templates[project_type]}}
         
-        return {"success": True, "templates": list(templates.values())}
+        return {"success": True, "templates": templates}
     
     async def _apply_template(self, template: str, target_path: str, **kwargs) -> Dict:
         await asyncio.sleep(3)
@@ -1260,6 +1265,7 @@ Think step by step about what needs to be done."""
                         {"role": "user", "content": f"Context:\n{context_summary}\n\nChecklist status: {checklist_status}\nDecide the next action and call exactly one function."},
                     ],
                     tools=all_tools,
+                    tool_choice="auto",
                 )
                 choice = completion.choices[0]
                 tool_calls = getattr(choice.message, "tool_calls", None)
@@ -1296,6 +1302,14 @@ Think step by step about what needs to be done."""
                             confidence=0.9,
                         )
                     return decided
+                # If no tool call returned, bootstrap checklist
+                return ActionDecision(
+                    action_type=ActionType.UPDATE_CHECKLIST,
+                    action_name="create_checklist",
+                    parameters={},
+                    reasoning="No function call returned; bootstrap checklist",
+                    confidence=0.8,
+                )
         except Exception as e:
             self.logger.warning("vendor_action_selection_failed", error=str(e))
 
@@ -1769,6 +1783,10 @@ Extract:
             summary += f"Recent User Message: {self.context.get('recent_user_message')}\n"
         summary += f"Step: {self.step_counter}/{self.max_steps}\n"
         
+        kb = self.context.get("kb_guidelines_available")
+        if kb:
+            summary += f"KB Guidelines: {kb}\n"
+        
         if self.current_checklist:
             status_counts = defaultdict(int)
             for item in self.current_checklist.items:
@@ -2024,6 +2042,8 @@ IDP_COPILOT_SYSTEM_PROMPT = """You are an advanced Internal Developer Platform (
 - Collect structured feedback for continuous improvement
 - Update checklist status after every tool execution
 
+If KB Guidelines: no → use standard templates and default organizational policies.
+
 Remember: You are a production system. Prioritize reliability, observability, and user experience."""
 
 # ==================== MAIN EXECUTION ====================
@@ -2108,9 +2128,7 @@ async def main():
     print("\n" + "=" * 80)
     print("📊 Workflow Metrics:")
     print("=" * 80)
-    print(f"Workflows Started: {workflow_counter._value._value}")
-    print(f"Workflows Completed: {workflow_success._value._value}")
-    print(f"Workflows Failed: {workflow_failed._value._value}")
+    print("Prometheus metrics available at http://localhost:8070")
 
 if __name__ == "__main__":
     asyncio.run(main())
