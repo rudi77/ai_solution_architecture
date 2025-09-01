@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 import hashlib
 from collections import defaultdict
 import re
+from functools import partial
 
 # External dependencies (requirements.txt)
 # pip install pydantic langchain openai anthropic structlog prometheus-client circuitbreaker aiofiles
@@ -414,7 +415,7 @@ class EnhancedToolRegistry:
         
         # For sync functions, run in executor
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = loop.run_in_executor(executor, func, **params)
+            future = loop.run_in_executor(executor, partial(func, **params))
             return await asyncio.wait_for(future, timeout=timeout)
     
     def _register_default_tools(self):
@@ -484,6 +485,65 @@ class EnhancedToolRegistry:
         """
         import inspect
         tools: List[Dict[str, Any]] = []
+        # Strict schema overrides for critical tools and their aliases
+        strict_schemas: Dict[str, Dict[str, Any]] = {
+            "validate_project_name_and_type": {
+                "type": "object",
+                "properties": {
+                    "project_name": {"type": "string"},
+                    "project_type": {"type": "string"},
+                    "programming_language": {"type": "string"},
+                },
+                "required": ["project_name"],
+                "additionalProperties": False,
+            },
+            "project-validator": {
+                "type": "object",
+                "properties": {
+                    "project_name": {"type": "string"},
+                    "project_type": {"type": "string"},
+                    "programming_language": {"type": "string"},
+                },
+                "required": ["project_name"],
+                "additionalProperties": False,
+            },
+            "apply_template": {
+                "type": "object",
+                "properties": {
+                    "template": {"type": "string"},
+                    "target_path": {"type": "string"},
+                },
+                "required": ["template", "target_path"],
+                "additionalProperties": False,
+            },
+            "template-applier": {
+                "type": "object",
+                "properties": {
+                    "template": {"type": "string"},
+                    "target_path": {"type": "string"},
+                },
+                "required": ["template", "target_path"],
+                "additionalProperties": False,
+            },
+            "setup_cicd_pipeline": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string"},
+                    "pipeline_type": {"type": "string"},
+                },
+                "required": ["repo_path"],
+                "additionalProperties": False,
+            },
+            "ci-cd-configurator": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string"},
+                    "pipeline_type": {"type": "string"},
+                },
+                "required": ["repo_path"],
+                "additionalProperties": False,
+            },
+        }
         def build_def(name: str, func: callable, description: str) -> Dict[str, Any]:
             # Build a permissive JSON schema for parameters
             properties: Dict[str, Any] = {}
@@ -505,7 +565,9 @@ class EnhancedToolRegistry:
                 "properties": properties,
                 "additionalProperties": True,
             }
-            if required:
+            # Apply strict overrides when available
+            parameters_schema = strict_schemas.get(name, parameters_schema)
+            if required and "required" not in parameters_schema:
                 parameters_schema["required"] = required
             return {
                 "type": "function",
@@ -1459,6 +1521,11 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
     async def _execute_tool_call(self, tool_name: str, parameters: Dict) -> str:
         """Execute tool and update checklist"""
         
+        # Hard guard: ensure a checklist exists before any tool execution
+        if self.current_checklist is None:
+            checklist_msg = await self._handle_checklist_action("create_checklist", {})
+            return f"Checklist was missing. {checklist_msg}\nWill proceed with tool execution next."
+
         # Normalize tool name to improve robustness
         normalized_tool_name = tool_name.strip().lower().replace("-", "_").replace(" ", "_")
         resolved_requested = self.tools.resolve_tool_name(normalized_tool_name)
@@ -1496,6 +1563,16 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         # If not found, try original name as fallback (defensive)
         if not result.get("success") and isinstance(result.get("error"), str) and "not found" in result.get("error", ""):
             result = await self.tools.execute_tool_async(tool_name, enhanced_params)
+
+        # Knowledge Base handling: empty matches are non-blocker; set context flag
+        try:
+            if resolved_requested in ("search_knowledge_base_for_guidelines", "search_knowledge_base"):
+                matches = []
+                if isinstance(result, dict):
+                    matches = (result.get("result", {}) or {}).get("matches", []) or []
+                self.context["kb_guidelines_available"] = "yes" if matches else "no"
+        except Exception:
+            self.context["kb_guidelines_available"] = "no"
         
         # Update checklist based on result
         if current_item:
@@ -1790,9 +1867,33 @@ Extract:
             enhanced["project_type"] = self.current_checklist.project_type
             enhanced["session_id"] = self.session_id
         
+        # Parameter normalization: detect swapped project_name/project_type and set sane defaults
+        try:
+            allowed_types = {"microservice", "library", "application", "frontend", "backend", "generic"}
+            name_pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+            pn = enhanced.get("project_name")
+            pt = enhanced.get("project_type")
+            if isinstance(pn, str) and isinstance(pt, str):
+                looks_like_type = pn.lower() in allowed_types
+                looks_like_name = bool(name_pattern.match(pt))
+                if looks_like_type and looks_like_name:
+                    enhanced["project_name"], enhanced["project_type"] = pt, pn
+        except Exception:
+            pass
+
+        if not enhanced.get("project_name"):
+            enhanced["project_name"] = self.current_checklist.project_name if self.current_checklist else "unnamed"
+
         # Tool-specific enhancements
         if tool_name == "create_repository" and "name" not in enhanced:
             enhanced["name"] = self.current_checklist.project_name if self.current_checklist else "unnamed"
+        if tool_name in ("setup_cicd_pipeline", "setup_cicd") and "repo_path" not in enhanced:
+            enhanced["repo_path"] = f"./{enhanced.get('project_name', 'project')}"
+        if tool_name == "apply_template":
+            if "target_path" not in enhanced:
+                enhanced["target_path"] = f"./{enhanced.get('project_name', 'project')}"
+            if "template" not in enhanced or not enhanced.get("template"):
+                enhanced["template"] = "fastapi-microservice"
         
         return enhanced
     
