@@ -335,6 +335,7 @@ class EnhancedToolRegistry:
     
     def __init__(self):
         self.tools = {}
+        self.tool_aliases: Dict[str, str] = {}
         self.logger = structlog.get_logger()
         self._register_default_tools()
     
@@ -347,17 +348,24 @@ class EnhancedToolRegistry:
         }
         self.logger.info("tool_registered", tool_name=name)
     
+    def register_alias(self, alias_name: str, target_name: str):
+        """Register a human-friendly alias that maps to an existing tool name."""
+        normalized_alias = alias_name.strip().lower().replace("-", "_").replace(" ", "_")
+        self.tool_aliases[normalized_alias] = target_name
+        self.logger.info("tool_alias_registered", alias=normalized_alias, target=target_name)
+    
     @circuit(failure_threshold=5, recovery_timeout=60, expected_exception=Exception)
     async def execute_tool_async(self, name: str, params: Dict) -> Dict:
         """Async tool execution with circuit breaker"""
-        if name not in self.tools:
+        resolved_name = self.resolve_tool_name(name)
+        if resolved_name not in self.tools:
             return {"success": False, "error": f"Tool '{name}' not found"}
         
-        tool_info = self.tools[name]
+        tool_info = self.tools[resolved_name]
         start_time = time.time()
         
         try:
-            with tracer.start_as_current_span(f"tool_execution_{name}"):
+            with tracer.start_as_current_span(f"tool_execution_{resolved_name}"):
                 # Execute with timeout
                 result = await self._execute_with_timeout(
                     tool_info["func"],
@@ -366,26 +374,35 @@ class EnhancedToolRegistry:
                 )
                 
                 duration = time.time() - start_time
-                tool_execution_time.labels(tool_name=name).observe(duration)
-                tool_success_rate.labels(tool_name=name).inc()
+                tool_execution_time.labels(tool_name=resolved_name).observe(duration)
+                tool_success_rate.labels(tool_name=resolved_name).inc()
                 
                 self.logger.info("tool_executed", 
-                               tool_name=name, 
+                               tool_name=resolved_name, 
                                duration=duration,
                                success=result.get("success", True))
                 
                 return result
                 
         except asyncio.TimeoutError:
-            tool_failure_rate.labels(tool_name=name).inc()
-            error_msg = f"Tool '{name}' timed out after {tool_info['timeout']}s"
-            self.logger.error("tool_timeout", tool_name=name, timeout=tool_info["timeout"])
+            tool_failure_rate.labels(tool_name=resolved_name).inc()
+            error_msg = f"Tool '{resolved_name}' timed out after {tool_info['timeout']}s"
+            self.logger.error("tool_timeout", tool_name=resolved_name, timeout=tool_info["timeout"])
             return {"success": False, "error": error_msg}
             
         except Exception as e:
-            tool_failure_rate.labels(tool_name=name).inc()
-            self.logger.error("tool_execution_failed", tool_name=name, error=str(e))
+            tool_failure_rate.labels(tool_name=resolved_name).inc()
+            self.logger.error("tool_execution_failed", tool_name=resolved_name, error=str(e))
             return {"success": False, "error": str(e)}
+    
+    def resolve_tool_name(self, name: str) -> str:
+        """Resolve alias or normalized variants to a registered tool name."""
+        normalized = name.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in self.tools:
+            return normalized
+        if normalized in self.tool_aliases:
+            return self.tool_aliases[normalized]
+        return name
     
     async def _execute_with_timeout(self, func: callable, params: Dict, timeout: int):
         """Execute function with timeout"""
@@ -405,6 +422,13 @@ class EnhancedToolRegistry:
         # GitHub Tools
         self.register_tool("create_repository", self._create_repository, "Creates GitHub repository", 10)
         self.register_tool("setup_branch_protection", self._setup_branch_protection, "Setup branch rules", 5)
+        # Wrapper for convenience
+        self.register_tool(
+            "create_git_repository_with_branch_protection",
+            self._create_git_repository_with_branch_protection,
+            "Create repo then apply standard branch protection",
+            20,
+        )
         # Validation Tools
         self.register_tool("validate_project_name_and_type", self._validate_project_name_and_type, "Validate project name and type", 5)
         
@@ -420,6 +444,39 @@ class EnhancedToolRegistry:
         self.register_tool("create_k8s_namespace", self._create_k8s_namespace, "Create K8s namespace", 10)
         self.register_tool("deploy_to_staging", self._deploy_staging, "Deploy to staging", 45)
 
+        # Knowledge Base Tools (aliases included for robustness)
+        self.register_tool(
+            "search_knowledge_base_for_guidelines",
+            self._search_knowledge_base_for_guidelines,
+            "Searches local knowledge base for guidelines relevant to the project",
+            10,
+        )
+        self.register_tool(
+            "search_knowledge_base",
+            self._search_knowledge_base_for_guidelines,
+            "Alias of search_knowledge_base_for_guidelines",
+            10,
+        )
+
+        # Observability/Docs/K8s artifacts (lightweight stubs for workflow continuity)
+        self.register_tool("setup_observability", self._setup_observability, "Setup monitoring & logging", 10)
+        self.register_tool("generate_k8s_manifests", self._generate_k8s_manifests, "Generate K8s manifests", 10)
+        self.register_tool("generate_documentation", self._generate_documentation, "Generate documentation", 10)
+
+        # Aliases to match checklist/tool naming variants
+        self.register_alias("project-validator", "validate_project_name_and_type")
+        self.register_alias("kb-search", "search_knowledge_base_for_guidelines")
+        self.register_alias("search-guidelines", "search_knowledge_base_for_guidelines")
+        self.register_alias("git-repo-creator", "create_git_repository_with_branch_protection")
+        self.register_alias("create-git-repo", "create_git_repository_with_branch_protection")
+        self.register_alias("template-applier", "apply_template")
+        self.register_alias("ci-cd-configurator", "setup_cicd_pipeline")
+        self.register_alias("observability-integrator", "setup_observability")
+        self.register_alias("k8s-manifest-generator", "generate_k8s_manifests")
+        self.register_alias("k8s-deployer", "deploy_to_staging")
+        self.register_alias("test-runner", "run_initial_tests")
+        self.register_alias("doc-generator", "generate_documentation")
+
     def export_openai_tools(self) -> List[Dict[str, Any]]:
         """Export registered tools as OpenAI tool definitions.
         
@@ -427,9 +484,7 @@ class EnhancedToolRegistry:
         """
         import inspect
         tools: List[Dict[str, Any]] = []
-        for name, info in self.tools.items():
-            func = info.get("func")
-            description = info.get("description", "")
+        def build_def(name: str, func: callable, description: str) -> Dict[str, Any]:
             # Build a permissive JSON schema for parameters
             properties: Dict[str, Any] = {}
             required: List[str] = []
@@ -443,24 +498,34 @@ class EnhancedToolRegistry:
                     if param.default is inspect._empty:
                         required.append(param_name)
             except Exception:
-                # Fall back to open parameter bag
                 properties = {}
                 required = []
-            parameters_schema = {
+            parameters_schema: Dict[str, Any] = {
                 "type": "object",
                 "properties": properties,
                 "additionalProperties": True,
             }
             if required:
                 parameters_schema["required"] = required
-            tools.append({
+            return {
                 "type": "function",
                 "function": {
                     "name": name,
                     "description": description,
                     "parameters": parameters_schema,
                 },
-            })
+            }
+
+        # Real tools
+        for name, info in self.tools.items():
+            tools.append(build_def(name, info.get("func"), info.get("description", "")))
+
+        # Aliases exported as separate callable names
+        for alias, target in self.tool_aliases.items():
+            if target in self.tools:
+                func = self.tools[target]["func"]
+                description = f"Alias of {target}"
+                tools.append(build_def(alias, func, description))
         return tools
     
     # Async tool implementations
@@ -475,6 +540,21 @@ class EnhancedToolRegistry:
             "success": True,
             "repo_url": f"https://github.com/company/{name}",
             "clone_url": f"git@github.com:company/{name}.git"
+        }
+
+    async def _create_git_repository_with_branch_protection(self, repo_name: str = None, visibility: str = "private", **kwargs) -> Dict:
+        """Create repository and apply branch protection rules in one step."""
+        name = repo_name or kwargs.get("name") or kwargs.get("project_name") or "unnamed"
+        create = await self._create_repository(name=name, visibility=visibility, **kwargs)
+        if not create.get("success"):
+            return create
+        protection = await self._setup_branch_protection(repo_name=name, **kwargs)
+        if not protection.get("success"):
+            return protection
+        return {
+            "success": True,
+            "repo": create,
+            "branch_protection": protection,
         }
     
     async def _setup_branch_protection(self, repo_name: str, **kwargs) -> Dict:
@@ -512,6 +592,14 @@ class EnhancedToolRegistry:
             "pipeline_file": f".github/workflows/ci.yml",
             "stages": ["lint", "test", "build", "security-scan"]
         }
+
+    async def _setup_observability(self, project_name: str = None, **kwargs) -> Dict:
+        await asyncio.sleep(1)
+        return {
+            "success": True,
+            "stack": ["prometheus", "grafana", "otel"],
+            "notes": "Integrated default dashboards and traces",
+        }
     
     async def _run_tests(self, project_path: str, **kwargs) -> Dict:
         await asyncio.sleep(5)
@@ -520,6 +608,18 @@ class EnhancedToolRegistry:
             "tests_run": 42,
             "tests_passed": 42,
             "coverage": "87%"
+        }
+
+    async def _generate_k8s_manifests(self, service_name: str = None, **kwargs) -> Dict:
+        await asyncio.sleep(1)
+        name = service_name or kwargs.get("project_name") or "service"
+        return {
+            "success": True,
+            "files": [
+                f"k8s/{name}-deployment.yaml",
+                f"k8s/{name}-service.yaml",
+                f"k8s/{name}-configmap.yaml",
+            ],
         }
     
     async def _create_k8s_namespace(self, name: str, **kwargs) -> Dict:
@@ -537,6 +637,14 @@ class EnhancedToolRegistry:
             "environment": "staging",
             "url": f"https://{project}-staging.company.io",
             "version": version
+        }
+
+    async def _generate_documentation(self, project_name: str = None, **kwargs) -> Dict:
+        await asyncio.sleep(1)
+        name = project_name or "project"
+        return {
+            "success": True,
+            "artifacts": [f"docs/{name}-api.md", f"docs/{name}-operations.md"],
         }
 
     async def _validate_project_name_and_type(self, project_name: str = None, project_type: str = None,
@@ -563,6 +671,108 @@ class EnhancedToolRegistry:
             "policy_checks": ["kebab-case", "allowed_type"],
         }
         return {"success": True, "result": details}
+
+    async def _search_knowledge_base_for_guidelines(self, project_type: str = None, language: str = None,
+                                                    project_name: str = None, **kwargs) -> Dict:
+        """Search simple local knowledge base for relevant guidelines.
+
+        Minimal, dependency-free implementation that scans known docs directories
+        for markdown files and returns matches based on project_type/language.
+        """
+        try:
+            # Resolve relative to repo root if possible
+            repo_root = Path.cwd()
+            base_paths = [
+                repo_root / "capstone" / "backend" / "documents" / "guidelines",
+                repo_root / "capstone" / "documents" / "guidelines",
+                repo_root / "capstone" / "backend" / "documents",
+            ]
+
+            keywords: List[str] = []
+            if project_type:
+                keywords.append(str(project_type).lower())
+            if language:
+                keywords.append(str(language).lower())
+            if project_name:
+                # project name is often too specific; include but low priority
+                keywords.append(str(project_name).lower())
+            # broaden
+            keywords.extend(["service", "microservice", "standards", "guidelines", "ci/cd", "cicd"])
+
+            matched: List[Dict[str, Any]] = []
+            scanned_files: List[str] = []
+
+            for base in base_paths:
+                if not base.exists() or not base.is_dir():
+                    continue
+                for file in base.glob("**/*.md"):
+                    scanned_files.append(str(file))
+                    try:
+                        text = file.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        continue
+
+                    text_lower = text.lower()
+                    filename_lower = file.name.lower()
+                    score = 0
+                    for kw in keywords:
+                        if kw and (kw in text_lower or kw in filename_lower):
+                            score += 1
+
+                    # Extract first heading as title, and up to 2 relevant lines
+                    title = None
+                    for line in text.splitlines():
+                        if line.strip().startswith("#"):
+                            title = line.strip().lstrip("# ")
+                            break
+                    if score > 0 or (not keywords and title):
+                        # pick small snippets containing keywords
+                        snippets: List[str] = []
+                        if keywords:
+                            for line in text.splitlines():
+                                line_l = line.lower()
+                                if any(kw in line_l for kw in keywords) and line.strip():
+                                    snippets.append(line.strip())
+                                    if len(snippets) >= 3:
+                                        break
+                        matched.append({
+                            "file": str(file),
+                            "title": title or file.name,
+                            "score": score,
+                            "snippets": snippets,
+                        })
+
+            # Sort by score descending, then title
+            matched.sort(key=lambda m: (-m.get("score", 0), m.get("title") or ""))
+
+            # Fallback: if nothing matched, return top-level known guidelines if present
+            if not matched:
+                defaults = []
+                for default_name in [
+                    "python-service-standards.md",
+                    "cicd-pipeline-standards.md",
+                    "go-service-standards.md",
+                ]:
+                    for base in base_paths:
+                        candidate = base / default_name
+                        if candidate.exists():
+                            defaults.append({
+                                "file": str(candidate),
+                                "title": default_name.replace("-", " ").replace(".md", "").title(),
+                                "score": 0,
+                                "snippets": [],
+                            })
+                matched = defaults
+
+            return {
+                "success": True,
+                "result": {
+                    "searched_files": scanned_files,
+                    "matches": matched[:10],
+                },
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 # ==================== STATE MANAGEMENT ====================
 
@@ -814,6 +1024,8 @@ class ProductionReActAgent:
             if restored_state:
                 yield f"🔄 Restoring previous session {self.session_id}\n"
                 self._restore_from_state(restored_state)
+                # Capture latest user message for reasoning context
+                self.context["recent_user_message"] = user_input
             else:
                 yield f"🚀 Starting new workflow (Session: {self.session_id})\n"
                 self.context = {
@@ -821,6 +1033,8 @@ class ProductionReActAgent:
                     "session_id": self.session_id,
                     "started_at": datetime.now().isoformat()
                 }
+                # Capture latest user message for reasoning context
+                self.context["recent_user_message"] = user_input
             
             yield f"📝 Processing: {user_input}\n\n"
             
@@ -1428,6 +1642,8 @@ Extract:
         
         summary = f"Session: {self.session_id}\n"
         summary += f"User Request: {self.context.get('user_request', 'None')}\n"
+        if self.context.get("recent_user_message"):
+            summary += f"Recent User Message: {self.context.get('recent_user_message')}\n"
         summary += f"Step: {self.step_counter}/{self.max_steps}\n"
         
         if self.current_checklist:
@@ -1671,22 +1887,17 @@ async def main():
     # Start Prometheus metrics server
     start_http_server(8070)
     
-    # Initialize LLM provider (choose one)
-    # For OpenAI:
-    llm_provider = OpenAIProvider(api_key=os.getenv("OPENAI_API_KEY"))
+    # Initialize LLM provider with fallback to mock if no API key
+    openai_key = os.getenv("OPENAI_API_KEY")
     
-    # For Anthropic:
-    # llm_provider = AnthropicProvider(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    
-    # For demo, using a mock provider
+    # For demo, using a mock provider if no key present
     class MockLLMProvider(LLMProvider):
         async def generate_response(self, prompt: str, **kwargs) -> str:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
             return "I should analyze the request and create a microservice workflow."
         
         async def generate_structured_response(self, prompt: str, response_model: BaseModel, **kwargs):
-            await asyncio.sleep(0.5)
-            
+            await asyncio.sleep(0.2)
             if response_model == ActionDecision:
                 return ActionDecision(
                     action_type=ActionType.UPDATE_CHECKLIST,
@@ -1695,61 +1906,61 @@ async def main():
                     reasoning="Need to create initial checklist",
                     confidence=0.9
                 )
-            elif response_model == ProjectInfo:
+            if response_model == ProjectInfo:
                 return ProjectInfo(
                     project_name="payment-processor",
                     project_type="microservice",
                     programming_language="python"
                 )
-            elif response_model == ChecklistGeneration:
+            if response_model == ChecklistGeneration:
                 return ChecklistGeneration(
                     items=[
-                        {
-                            "title": "Create Repository",
-                            "description": "Create GitHub repository",
-                            "dependencies": [],
-                            "tool": "create_repository"
-                        },
-                        {
-                            "title": "Apply Template",
-                            "description": "Apply microservice template",
-                            "dependencies": ["1"],
-                            "tool": "apply_template"
-                        },
-                        {
-                            "title": "Setup CI/CD",
-                            "description": "Configure pipeline",
-                            "dependencies": ["2"],
-                            "tool": "setup_cicd_pipeline"
-                        }
+                        {"title": "Create Repository", "description": "Create GitHub repository", "dependencies": [], "tool": "create_repository"},
+                        {"title": "Apply Template", "description": "Apply microservice template", "dependencies": ["1"], "tool": "apply_template"},
+                        {"title": "Setup CI/CD", "description": "Configure pipeline", "dependencies": ["2"], "tool": "setup_cicd_pipeline"},
                     ],
                     estimated_duration=30,
-                    risk_level="low"
+                    risk_level="low",
                 )
     
-    # llm_provider = MockLLMProvider()
+    if openai_key:
+        llm_provider = OpenAIProvider(api_key=openai_key)
+    else:
+        llm_provider = MockLLMProvider()
     
     # Initialize agent
     agent = ProductionReActAgent(
         system_prompt=IDP_COPILOT_SYSTEM_PROMPT,
-        llm_provider=llm_provider
+        llm_provider=llm_provider,
     )
     
-    # Process request with streaming
+    # Interactive chat loop
     print("=" * 80)
-    print("🚀 Production IDP Copilot - Starting")
+    print("🚀 Production IDP Copilot - Interactive CLI")
+    print("Type 'exit' to quit.")
     print("=" * 80)
     
-    async for update in agent.process_request(
-        "Create a new Python microservice called payment-processor"
-    ):
-        print(update, end="", flush=True)
+    session_id: Optional[str] = None
+    while True:
+        try:
+            user_msg = input("You: ").strip()
+        except EOFError:
+            break
+        if user_msg.lower() in ("exit", "quit", "q", ""):
+            break
+        async for update in agent.process_request(user_msg, session_id=session_id):
+            print(update, end="", flush=True)
+        # Keep session across turns
+        session_id = agent.session_id
+        # If agent requested user input, continue loop to capture it
+        if agent.context.get("awaiting_user_input"):
+            continue
+        print("")
     
+    # Print simple metrics snapshot on exit
     print("\n" + "=" * 80)
     print("📊 Workflow Metrics:")
     print("=" * 80)
-    
-    # In production, these would be exposed via /metrics endpoint
     print(f"Workflows Started: {workflow_counter._value._value}")
     print(f"Workflows Completed: {workflow_success._value._value}")
     print(f"Workflows Failed: {workflow_failed._value._value}")
