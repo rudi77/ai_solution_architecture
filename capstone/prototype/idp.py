@@ -1222,40 +1222,46 @@ Think step by step about what needs to be done."""
             if isinstance(self.llm, OpenAIProvider):
                 tools = self.tools.export_openai_tools()
                 # Also expose meta-actions as functions with no/loose params
-                meta_actions = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "update_checklist",
-                            "description": "Create or modify the workflow checklist.",
-                            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+                # Gate meta-actions when a next executable checklist step exists to prevent drift
+                meta_actions = []
+                next_item_available = False
+                if self.current_checklist:
+                    next_item_available = self._get_next_executable_item() is not None
+                if not next_item_available:
+                    meta_actions = [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "update_checklist",
+                                "description": "Create or modify the workflow checklist.",
+                                "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+                            },
                         },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "ask_user",
-                            "description": "Request information from the user.",
-                            "parameters": {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": True},
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "ask_user",
+                                "description": "Request information from the user.",
+                                "parameters": {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": True},
+                            },
                         },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "error_recovery",
-                            "description": "Handle errors and retry failed operations.",
-                            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "error_recovery",
+                                "description": "Handle errors and retry failed operations.",
+                                "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+                            },
                         },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "complete",
-                            "description": "Finish the workflow with an optional summary.",
-                            "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "additionalProperties": True},
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "complete",
+                                "description": "Finish the workflow with an optional summary.",
+                                "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "additionalProperties": True},
+                            },
                         },
-                    },
-                ]
+                    ]
                 all_tools = tools + meta_actions
                 completion = await self.llm.client.chat.completions.create(
                     model=self.llm.model,
@@ -1311,6 +1317,7 @@ Think step by step about what needs to be done."""
                                 decided.action_name = next_item.tool_action
                                 decided.parameters = next_item.tool_params or {}
                                 decided.reasoning = "Enforced next checklist item to prevent drift"
+                                return decided
                     return decided
                 # If no tool call returned, bootstrap checklist
                 return ActionDecision(
@@ -1943,6 +1950,14 @@ Extract:
             # Normalize kebab-case for project_name
             if isinstance(enhanced.get("project_name"), str):
                 enhanced["project_name"] = _kebab_case(enhanced["project_name"]) or "unnamed"
+
+            # Prevent generic placeholders from leaking to tools by repairing from checklist
+            generic_names = {"service", "microservice", "application", "app", "project"}
+            if isinstance(enhanced.get("project_name"), str) and enhanced["project_name"].lower() in generic_names:
+                if self.current_checklist and self.current_checklist.project_name:
+                    enhanced["project_name"] = self.current_checklist.project_name
+                else:
+                    enhanced["project_name"] = "unnamed"
         except Exception:
             pass
 
@@ -1950,8 +1965,9 @@ Extract:
             enhanced["project_name"] = self.current_checklist.project_name if self.current_checklist else "unnamed"
 
         # Tool-specific enhancements
-        if tool_name == "create_repository" and "name" not in enhanced:
-            enhanced["name"] = self.current_checklist.project_name if self.current_checklist else "unnamed"
+        if tool_name == "create_repository":
+            # Ensure repo name reflects resolved project_name
+            enhanced["name"] = enhanced.get("name") or enhanced.get("project_name") or (self.current_checklist.project_name if self.current_checklist else "unnamed")
         if tool_name in ("setup_cicd_pipeline", "setup_cicd") and "repo_path" not in enhanced:
             enhanced["repo_path"] = f"./{enhanced.get('project_name', 'project')}"
         if tool_name == "apply_template":
