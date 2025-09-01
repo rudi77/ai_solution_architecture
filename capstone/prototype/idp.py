@@ -30,7 +30,6 @@ from prometheus_client import Counter, Histogram, Gauge, start_http_server
 from circuitbreaker import circuit
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
 # Configure structured logging
 structlog.configure(
@@ -54,7 +53,9 @@ logger = structlog.get_logger()
 
 # Setup OpenTelemetry
 provider = TracerProvider()
-provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+if os.getenv("IDP_ENABLE_OTEL_CONSOLE", "false").lower() in {"1", "true", "yes", "on"}:
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+    provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
 
