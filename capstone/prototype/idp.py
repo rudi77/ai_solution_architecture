@@ -23,16 +23,10 @@ import re
 from functools import partial
 try:
     from .tools import ToolSpec, export_openai_tools, find_tool, execute_tool_by_name
-    from .tools_builtin import BUILTIN_TOOLS
 except Exception:
     from tools import ToolSpec, export_openai_tools, find_tool, execute_tool_by_name  # type: ignore
-    from tools_builtin import BUILTIN_TOOLS  # type: ignore
 
-# System prompt import
-try:
-    from .prompt import IDP_COPILOT_SYSTEM_PROMPT, IDP_COPILOT_SYSTEM_PROMPT_GIT
-except Exception:
-    from prompt import IDP_COPILOT_SYSTEM_PROMPT, IDP_COPILOT_SYSTEM_PROMPT_GIT  # type: ignore
+# No built-in prompt imports; the caller must provide a system prompt
 
 # External dependencies (requirements.txt)
 # pip install pydantic langchain openai anthropic structlog prometheus-client circuitbreaker aiofiles
@@ -87,7 +81,7 @@ class ActionType(Enum):
     TOOL_CALL = "tool_call"
     ASK_USER = "ask_user"
     COMPLETE = "complete"
-    UPDATE_CHECKLIST = "update_checklist"
+    UPDATE_TODOLIST = "update_todolist"
     ERROR_RECOVERY = "error_recovery"
 
 CHECKLIST_STATUS_PENDING = "⏳ Pending"
@@ -113,7 +107,11 @@ class ActionDecision(BaseModel):
     @validator('action_type', pre=True)
     def validate_action_type(cls, v):
         if isinstance(v, str):
-            return ActionType(v.lower())
+            # Back-compat: map old UPDATE_CHECKLIST string to UPDATE_TODOLIST
+            norm = v.lower()
+            if norm == "update_checklist":
+                norm = "update_todolist"
+            return ActionType(norm)
         return v
 
 ## Legacy structured output for checklist generation removed (Markdown-only flow)
@@ -137,6 +135,14 @@ class LLMProvider(ABC):
     
     @abstractmethod
     async def generate_structured_response(self, prompt: str, response_model: BaseModel, **kwargs) -> BaseModel:
+        pass
+
+    @abstractmethod
+    async def call_tools(self, *, system_prompt: str, messages: List[Dict[str, str]], tools: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Invoke vendor tool-calling if available.
+
+        Returns a dict like {"name": str, "arguments": dict} when a tool is selected, otherwise None.
+        """
         pass
 
 class OpenAIProvider(LLMProvider):
@@ -227,6 +233,33 @@ class OpenAIProvider(LLMProvider):
             self.logger.error("structured_generation_failed", error=str(e), model=model_cls.__name__)
             raise
 
+    async def call_tools(self, *, system_prompt: str, messages: List[Dict[str, str]], tools: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Call OpenAI function/tool calling and return the chosen tool call if any."""
+        try:
+            completion = await self.client.chat.completions.create(
+                model=self.model,
+                temperature=self.temperature,
+                messages=[{"role": "system", "content": system_prompt}] + messages,
+                tools=tools,
+                tool_choice="auto",
+            )
+            choice = completion.choices[0]
+            tool_calls = getattr(choice.message, "tool_calls", None)
+            if tool_calls and len(tool_calls) > 0:
+                tool_call = tool_calls[0]
+                name = tool_call.function.name
+                import json as _json
+                args = {}
+                try:
+                    args = _json.loads(tool_call.function.arguments or "{}")
+                except Exception:
+                    args = {}
+                return {"name": name, "arguments": args}
+            return None
+        except Exception as e:
+            self.logger.warning("openai_call_tools_failed", error=str(e))
+            return None
+
 class AnthropicProvider(LLMProvider):
     """Anthropic/Claude implementation"""
     
@@ -277,6 +310,10 @@ JSON Response:"""
         except Exception as e:
             self.logger.error("anthropic_structured_failed", error=str(e))
             raise
+
+    async def call_tools(self, *, system_prompt: str, messages: List[Dict[str, str]], tools: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Anthropic provider does not use function calling here; return None."""
+        return None
 
 # ==================== STATE MANAGEMENT ====================
 
@@ -436,7 +473,8 @@ class ProductionReActAgent:
     def __init__(self, system_prompt: str, llm_provider: LLMProvider, tools: Optional[List[ToolSpec]] = None):
         self.system_prompt = system_prompt
         self.llm = llm_provider
-        self.tools: List[ToolSpec] = tools or BUILTIN_TOOLS
+        # Do not default to built-in tools; require explicit tools list
+        self.tools: List[ToolSpec] = tools or []
         self.state_manager = StateManager()
         self.feedback_collector = FeedbackCollector()
         
@@ -592,128 +630,75 @@ Think step by step about what needs to be done."""
         # Note: We allow ASK_USER even when no checklist exists to keep the CLI interactive.
         # We'll prefer creating a checklist later if the model doesn't ask the user explicitly.
 
-        # 1) Try vendor function-calling: expose all tools and meta-actions as callable functions
+        # 1) Try provider tool-calling: expose all tools and meta-actions via provider
         try:
-            from openai import APIConnectionError  # type: ignore
-            # Only attempt if our LLM provider supports OpenAI function calling
-            if isinstance(self.llm, OpenAIProvider):
-                tools = export_openai_tools(self.tools)
-                # Also expose meta-actions as functions with no/loose params
-                meta_actions = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "update_checklist",
-                            "description": "Create or modify the workflow checklist.",
-                            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
-                        },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "ask_user",
-                            "description": "Request information from the user.",
-                            "parameters": {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"}}, "context": {"type": "string"}}, "additionalProperties": True},
-                        },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "error_recovery",
-                            "description": "Handle errors and retry failed operations.",
-                            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
-                        },
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "complete",
-                            "description": "Finish the workflow with an optional summary.",
-                            "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "additionalProperties": True},
-                        },
-                    },
-                ]
-                all_tools = tools + meta_actions
-                completion = await self.llm.client.chat.completions.create(
-                    model=self.llm.model,
-                    temperature=self.llm.temperature,
-                    messages=[
-                        {"role": "system", "content": self.system_prompt_full},
-                        {"role": "user", "content": f"Context:\n{context_summary}\n\nChecklist status: {checklist_status}\nRecent reasoning: {self.context.get('last_thought', '')}\nDecide the next action and call exactly one function. If a checklist exists and a next executable item is available, you must call the function for exactly that item's tool. Do not select any other tool."},
-                    ],
-                    tools=all_tools,
-                    tool_choice="auto",
-                )
-                choice = completion.choices[0]
-                tool_calls = getattr(choice.message, "tool_calls", None)
-                if tool_calls and len(tool_calls) > 0:
-                    tool_call = tool_calls[0]
-                    name = tool_call.function.name
-                    import json as _json
-                    params = {}
-                    try:
-                        params = _json.loads(tool_call.function.arguments or "{}")
-                    except Exception:
-                        params = {}
-
-                    # Map meta-actions to ActionType, others are TOOL_CALL
-                    name_norm = name.strip().lower()
-                    if name_norm == "update_checklist":
-                        return ActionDecision(action_type=ActionType.UPDATE_CHECKLIST, action_name="create_checklist", parameters=params, reasoning="Vendor function-called update_checklist", confidence=0.9)
-                    if name_norm == "ask_user":
-                        return ActionDecision(action_type=ActionType.ASK_USER, action_name="ask_user", parameters=params, reasoning="Vendor function-called ask_user", confidence=0.9)
-                    if name_norm == "error_recovery":
-                        return ActionDecision(action_type=ActionType.ERROR_RECOVERY, action_name="retry_failed_items", parameters=params, reasoning="Vendor function-called error_recovery", confidence=0.9)
-                    if name_norm == "complete":
-                        return ActionDecision(action_type=ActionType.COMPLETE, action_name="complete", parameters=params, reasoning="Vendor function-called complete", confidence=0.9)
-
-                    # Otherwise treat as a tool call
-                    decided = ActionDecision(action_type=ActionType.TOOL_CALL, action_name=name, parameters=params, reasoning="Vendor function-called tool", confidence=0.9)
-                    # If a blocker exists in context, force ASK_USER to avoid loops
-                    if isinstance(self.context.get("blocker"), dict):
-                        return ActionDecision(
-                            action_type=ActionType.ASK_USER,
-                            action_name="ask_user",
-                            parameters={
-                                "questions": [
-                                    f"{self.context['blocker'].get('message', 'A blocking issue occurred.')}",
-                                    f"{self.context['blocker'].get('suggestion', 'Please advise next steps.')}",
-                                ],
-                                "context": "Blocking error encountered. Provide next steps."
-                            },
-                            reasoning="Blocking error present; asking user instead of retrying tools",
-                            confidence=0.9,
-                        )
-                    # If no checklist exists yet (Markdown flag) and the model didn't ask the user, prefer creating one first
-                    if not self.context.get("checklist_created"):
-                        return ActionDecision(
-                            action_type=ActionType.UPDATE_CHECKLIST,
-                            action_name="create_checklist",
-                            parameters={},
-                            reasoning="No checklist yet; create it before executing tools",
-                            confidence=0.9,
-                        )
-                    # Markdown mode: we do not enforce next-item order based on in-memory checklist
-                    return decided
-                # If no tool call returned, bootstrap checklist if not created yet
-                if not self.context.get("checklist_created"):
+            tools = export_openai_tools(self.tools)
+            meta_actions = [
+                {"type": "function", "function": {"name": "update_todolist", "description": "Create or modify the workflow Todo List.", "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}},
+                {"type": "function", "function": {"name": "ask_user", "description": "Request information from the user.", "parameters": {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"}}, "context": {"type": "string"}}, "additionalProperties": True}}},
+                {"type": "function", "function": {"name": "error_recovery", "description": "Handle errors and retry failed operations.", "parameters": {"type": "object", "properties": {}, "additionalProperties": True}}},
+                {"type": "function", "function": {"name": "complete", "description": "Finish the workflow with an optional summary.", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "additionalProperties": True}}},
+            ]
+            all_tools = tools + meta_actions
+            tool_decision = await self.llm.call_tools(
+                system_prompt=self.system_prompt_full,
+                messages=[
+                    {"role": "user", "content": f"Context:\n{context_summary}\n\nTodo List status: {checklist_status}\nRecent reasoning: {self.context.get('last_thought', '')}\nDecide the next action and call exactly one function. If a Todo List exists and a next executable item is available, you must call the function for exactly that item's tool. Do not select any other tool."}
+                ],
+                tools=all_tools,
+            )
+            if tool_decision:
+                name = (tool_decision.get("name") or "").strip().lower()
+                params = tool_decision.get("arguments") or {}
+                if name == "update_todolist":
+                    return ActionDecision(action_type=ActionType.UPDATE_TODOLIST, action_name="create_todolist", parameters=params, reasoning="Provider called update_todolist", confidence=0.9)
+                if name == "ask_user":
+                    return ActionDecision(action_type=ActionType.ASK_USER, action_name="ask_user", parameters=params, reasoning="Provider called ask_user", confidence=0.9)
+                if name == "error_recovery":
+                    return ActionDecision(action_type=ActionType.ERROR_RECOVERY, action_name="retry_failed_items", parameters=params, reasoning="Provider called error_recovery", confidence=0.9)
+                if name == "complete":
+                    return ActionDecision(action_type=ActionType.COMPLETE, action_name="complete", parameters=params, reasoning="Provider called complete", confidence=0.9)
+                decided = ActionDecision(action_type=ActionType.TOOL_CALL, action_name=name, parameters=params, reasoning="Provider called tool", confidence=0.9)
+                if isinstance(self.context.get("blocker"), dict):
                     return ActionDecision(
-                        action_type=ActionType.UPDATE_CHECKLIST,
-                        action_name="create_checklist",
-                        parameters={},
-                        reasoning="No function call returned; bootstrap checklist",
-                        confidence=0.8,
+                        action_type=ActionType.ASK_USER,
+                        action_name="ask_user",
+                        parameters={
+                            "questions": [
+                                f"{self.context['blocker'].get('message', 'A blocking issue occurred.')}",
+                                f"{self.context['blocker'].get('suggestion', 'Please advise next steps.')}",
+                            ],
+                            "context": "Blocking error encountered. Provide next steps."
+                        },
+                        reasoning="Blocking error present; asking user instead of retrying tools",
+                        confidence=0.9,
                     )
-                # Otherwise, ask the user
+                if not self.context.get("checklist_created") and not self.context.get("todolist_created"):
+                    return ActionDecision(
+                        action_type=ActionType.UPDATE_TODOLIST,
+                        action_name="create_todolist",
+                        parameters={},
+                        reasoning="No Todo List yet; create it before executing tools",
+                        confidence=0.9,
+                    )
+                return decided
+            if not self.context.get("checklist_created") and not self.context.get("todolist_created"):
                 return ActionDecision(
-                    action_type=ActionType.ASK_USER,
-                    action_name="ask_user",
-                    parameters={"questions": ["What should we do next?"], "context": "No decisive action from model."},
-                    reasoning="No function call returned; checklist exists",
-                    confidence=0.6,
+                    action_type=ActionType.UPDATE_TODOLIST,
+                    action_name="create_todolist",
+                    parameters={},
+                    reasoning="No function call returned; bootstrap Todo List",
+                    confidence=0.8,
                 )
+            return ActionDecision(
+                action_type=ActionType.ASK_USER,
+                action_name="ask_user",
+                parameters={"questions": ["What should we do next?"], "context": "No decisive action from model."},
+                reasoning="No function call returned; Todo List exists",
+                confidence=0.6,
+            )
         except Exception as e:
-            self.logger.warning("vendor_action_selection_failed", error=str(e))
+            self.logger.warning("provider_action_selection_failed", error=str(e))
 
         # 2) Fallback to schema-guided JSON decision
         context_summary = self._build_context_summary()
@@ -721,12 +706,12 @@ Think step by step about what needs to be done."""
         prompt = f"""Current context:
 {context_summary}
 
-Checklist status: {checklist_status}
+Todo List status: {checklist_status}
 
 Recent reasoning: {self.context.get('last_thought', '')}
 
 Available actions:
-- UPDATE_CHECKLIST: Create or modify the workflow checklist
+- UPDATE_TODOLIST: Create or modify the workflow Todo List
 - TOOL_CALL: Execute a specific tool
 - ASK_USER: Request information from the user
 - ERROR_RECOVERY: Handle errors and retry failed operations
@@ -739,13 +724,13 @@ Determine the most appropriate next action with clear reasoning."""
                 ActionDecision,
                 system_prompt=self.system_prompt_full
             )
-            # Respect ASK_USER; otherwise, if no checklist exists (Markdown flag), create it first
-            if action_decision.action_type != ActionType.ASK_USER and not self.context.get("checklist_created"):
+            # Respect ASK_USER; otherwise, if no Todo List exists (Markdown flag), create it first
+            if action_decision.action_type != ActionType.ASK_USER and not self.context.get("checklist_created") and not self.context.get("todolist_created"):
                 return ActionDecision(
-                    action_type=ActionType.UPDATE_CHECKLIST,
-                    action_name="create_checklist",
+                    action_type=ActionType.UPDATE_TODOLIST,
+                    action_name="create_todolist",
                     parameters={},
-                    reasoning="No checklist yet; create it before proceeding",
+                    reasoning="No Todo List yet; create it before proceeding",
                     confidence=action_decision.confidence,
                 )
             return action_decision
@@ -819,7 +804,7 @@ Determine the most appropriate next action with clear reasoning."""
                              parameters: Dict) -> str:
         """Execute the determined action"""
         
-        if action_type == ActionType.UPDATE_CHECKLIST:
+        if action_type == ActionType.UPDATE_TODOLIST:
             return await self._handle_checklist_action(action_name, parameters)
         
         elif action_type == ActionType.TOOL_CALL:
@@ -841,7 +826,7 @@ Determine the most appropriate next action with clear reasoning."""
         
         # Normalize common variants from LLM outputs (e.g., "Create Microservice Checklist")
         normalized = action_name.strip().lower().replace("-", "_").replace(" ", "_")
-        if normalized in ("create_checklist", "create_microservice_checklist", "create_a_microservice_checklist"):
+        if normalized in ("create_todolist", "create_checklist", "create_microservice_checklist", "create_a_microservice_checklist"):
             action_name = "create_checklist"
 
         if action_name == "create_checklist":
@@ -865,13 +850,16 @@ Determine the most appropriate next action with clear reasoning."""
                 )
                 self.context["checklist_created"] = True
                 self.context["checklist_file"] = filepath
+                # Also set Todo List keys for forward naming
+                self.context["todolist_created"] = True
+                self.context["todolist_file"] = filepath
                 # Store project identification in context for later Markdown updates
                 self.context["project_name"] = project_info.project_name
                 self.context["project_type"] = project_info.project_type
-                return f"Created checklist (saved to {filepath})"
+                return f"Created Todo List (saved to {filepath})"
                 
             except Exception as e:
-                self.logger.error("checklist_creation_failed", error=str(e))
+                self.logger.error("todolist_creation_failed", error=str(e))
                 # Fallback: create a minimal viable checklist so the workflow can proceed
                 try:
                     # Simple fallback: create a minimal Markdown checklist directly
@@ -890,12 +878,14 @@ Determine the most appropriate next action with clear reasoning."""
                     )
                     self.context["checklist_created"] = True
                     self.context["checklist_file"] = filepath
+                    self.context["todolist_created"] = True
+                    self.context["todolist_file"] = filepath
                     return (
-                        f"Created minimal checklist (saved to {filepath}). Original error: {e}"
+                        f"Created minimal Todo List (saved to {filepath}). Original error: {e}"
                     )
                 except Exception as inner_e:
-                    self.logger.error("checklist_fallback_failed", error=str(inner_e))
-                    return f"Failed to create checklist: {e}"
+                    self.logger.error("todolist_fallback_failed", error=str(inner_e))
+                    return f"Failed to create Todo List: {e}"
         
         elif action_name == "update_item_status":
             # Update via Markdown helper using instruction text
@@ -926,22 +916,23 @@ Determine the most appropriate next action with clear reasoning."""
                 session_id=self.session_id,
             )
             self.context["checklist_file"] = filepath
-            return f"Updated checklist (saved to {filepath})"
+            self.context["todolist_file"] = filepath
+            return f"Updated Todo List (saved to {filepath})"
         
         elif action_name == "get_next_executable_item":
             # Markdown-only flow: cannot infer next item; guide via file reference
-            path = self.context.get("checklist_file")
-            return f"Open and follow the checklist: {path}" if path else "No checklist created"
+            path = self.context.get("todolist_file") or self.context.get("checklist_file")
+            return f"Open and follow the Todo List: {path}" if path else "No Todo List created"
         
-        return f"Checklist action '{action_name}' completed"
+        return f"Todo List action '{action_name}' completed"
     
     async def _execute_tool_call(self, tool_name: str, parameters: Dict) -> str:
         """Execute tool and update checklist"""
         
         # Hard guard (Markdown flow): ensure a checklist file exists before tool execution
-        if not self.context.get("checklist_created"):
+        if not self.context.get("checklist_created") and not self.context.get("todolist_created"):
             checklist_msg = await self._handle_checklist_action("create_checklist", {})
-            return f"Checklist was missing. {checklist_msg}\nWill proceed with tool execution next."
+            return f"Todo List was missing. {checklist_msg}\nWill proceed with tool execution next."
 
         # Normalize tool name and resolve via ToolSpec list
         normalized_tool_name = tool_name.strip().lower().replace("-", "_").replace(" ", "_")
@@ -1065,20 +1056,20 @@ Determine the most appropriate next action with clear reasoning."""
             except Exception:
                 pass
 
-        # Detect blocking errors and set context flags to steer next step to ASK_USER
+        # Detect blocking errors generically and set context to steer next step to ASK_USER
         try:
-            err_text = str(result.get("error", ""))
-            if "already exists and is not empty" in err_text.lower():
+            err_text = str(result.get("error", "")).strip()
+            if err_text:
+                suggestion = "Review the error and provide next steps or corrected parameters."
+                if "not found" in err_text.lower():
+                    suggestion = "Verify tool availability and parameters; consider selecting a different tool."
+                if "permission" in err_text.lower() or "unauthorized" in err_text.lower():
+                    suggestion = "Check credentials/permissions and retry after fixing access."
+                if "already exists" in err_text.lower():
+                    suggestion = "Choose a different name or remove/empty the existing target."
                 self.context["blocker"] = {
-                    "type": "dir_conflict",
                     "message": err_text,
-                    "suggestion": "Choose a different project name or remove/empty the existing directory."
-                }
-            elif "github_token is not set" in err_text.lower():
-                self.context["blocker"] = {
-                    "type": "missing_github_token",
-                    "message": err_text,
-                    "suggestion": "Set GITHUB_TOKEN and optionally GITHUB_ORG/OWNER, then retry."
+                    "suggestion": suggestion,
                 }
         except Exception:
             pass
@@ -1170,7 +1161,7 @@ Determine the most appropriate next action with clear reasoning."""
         
         summary = parameters.get("summary", "Workflow completed successfully")
         
-        if self.context.get("checklist_created"):
+        if self.context.get("checklist_created") or self.context.get("todolist_created"):
             return f"Workflow completed. Summary: {summary}"
         
         return summary
@@ -1221,10 +1212,10 @@ Extract:
         if kb:
             summary += f"KB Guidelines: {kb}\n"
         
-        if self.context.get("checklist_file"):
-            summary += f"Checklist File: {self.context.get('checklist_file')}\n"
+        if self.context.get("todolist_file") or self.context.get("checklist_file"):
+            summary += f"Todo List File: {self.context.get('todolist_file') or self.context.get('checklist_file')}\n"
         else:
-            summary += "Checklist: Not created yet\n"
+            summary += "Todo List: Not created yet\n"
         
         # Recent history
         if self.react_history:
@@ -1235,15 +1226,15 @@ Extract:
         return summary
     
     def _get_checklist_status(self) -> str:
-        """Get current checklist status"""
+        """Get current Todo List status (back-compat name)."""
         
-        if not self.context.get("checklist_created"):
-            return "No checklist created"
+        if not self.context.get("checklist_created") and not self.context.get("todolist_created"):
+            return "No Todo List created"
         
         # When using Markdown-only checklist, we cannot compute next item reliably here.
         # Provide a generic status based on existence of the file.
-        if self.context.get("checklist_file"):
-            return f"Checklist ready at {self.context.get('checklist_file')}"
+        if self.context.get("todolist_file") or self.context.get("checklist_file"):
+            return f"Todo List ready at {self.context.get('todolist_file') or self.context.get('checklist_file')}"
         
         # No deeper introspection in Markdown-only mode
 
@@ -1263,7 +1254,7 @@ Extract:
                 lines.append(f"- {spec.name}: {spec.description}")
                 if required:
                     lines.append(f"  required: {', '.join(required)}")
-            lines.append("\nUsage rules:\n- Use only listed tools.\n- Checklist items must include 'tool' exactly matching a tool name.\n- After each tool run, update the checklist.\n- On blocking errors (directory conflict, missing GITHUB_TOKEN), ASK_USER with concrete next steps.\n- Limit retries for create_repository to 1.")
+            lines.append("\nUsage rules:\n- Use only listed tools.\n- After each tool run, update the Todo List with status/result.\n- If a blocking error occurs, consider ASK_USER with suggested next steps.")
             return "\n".join(lines)
         except Exception:
             return base_prompt
@@ -1335,9 +1326,15 @@ async def main():
         raise ValueError("OPENAI_API_KEY is not set")
     
     # Initialize agent
+    # Minimal, generic system prompt — callers should pass a mission-specific prompt
+    generic_prompt = (
+        "You are a generic ReAct agent. Use only provided tools, "
+        "update the Todo List after each step, and ask the user on blocking errors."
+    )
     agent = ProductionReActAgent(
-        system_prompt=IDP_COPILOT_SYSTEM_PROMPT_GIT,
+        system_prompt=generic_prompt,
         llm_provider=llm_provider,
+        tools=[],
     )
     
     # Interactive chat loop
