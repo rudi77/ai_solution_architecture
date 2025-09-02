@@ -90,78 +90,15 @@ class ActionType(Enum):
     UPDATE_CHECKLIST = "update_checklist"
     ERROR_RECOVERY = "error_recovery"
 
-class ChecklistItemStatus(Enum):
-    PENDING = "⏳ Pending"
-    IN_PROGRESS = "🔄 In Progress"
-    COMPLETED = "✅ Completed"
-    FAILED = "❌ Failed"
-    BLOCKED = "🚫 Blocked"
-    SKIPPED = "⏭️ Skipped"
-    RETRYING = "🔁 Retrying"
+CHECKLIST_STATUS_PENDING = "⏳ Pending"
+CHECKLIST_STATUS_IN_PROGRESS = "🔄 In Progress"
+CHECKLIST_STATUS_COMPLETED = "✅ Completed"
+CHECKLIST_STATUS_FAILED = "❌ Failed"
+CHECKLIST_STATUS_BLOCKED = "🚫 Blocked"
+CHECKLIST_STATUS_SKIPPED = "⏭️ Skipped"
+CHECKLIST_STATUS_RETRYING = "🔁 Retrying"
 
-@dataclass
-class ChecklistItem:
-    id: str
-    title: str
-    description: str
-    dependencies: List[str]
-    tool_action: Optional[str] = None
-    tool_params: Optional[Dict] = None
-    status: ChecklistItemStatus = ChecklistItemStatus.PENDING
-    result: Optional[str] = None
-    notes: Optional[str] = None
-    updated_at: Optional[str] = None
-    retry_count: int = 0
-    max_retries: int = 3
-    error_details: Optional[Dict] = None
-
-@dataclass
-class ProjectChecklist:
-    project_name: str
-    project_type: str
-    user_request: str
-    created_at: str
-    items: List[ChecklistItem]
-    current_step: int = 0
-    session_id: str = field(default_factory=lambda: hashlib.md5(str(time.time()).encode()).hexdigest())
-    
-    def to_markdown(self) -> str:
-        """Konvertiert zu Markdown"""
-        completed = sum(1 for item in self.items if item.status == ChecklistItemStatus.COMPLETED)
-        total = len(self.items)
-        progress_chars = "█" * completed + "░" * (total - completed)
-        
-        md = f"""# IDP Copilot Checklist: {self.project_name}
-
-**Session ID:** {self.session_id}
-**Project Type:** {self.project_type}
-**Created:** {self.created_at}
-**User Request:** "{self.user_request}"
-**Progress:** [{progress_chars}] {completed}/{total} ({completed/total*100:.1f}%)
-
-## Checklist Items
-
-"""
-        for item in self.items:
-            deps = f" (requires: {', '.join(item.dependencies)})" if item.dependencies else ""
-            md += f"""### {item.status.value} {item.id}. {item.title}
-
-{item.description}{deps}
-
-"""
-            if item.tool_action:
-                md += f"**Tool:** `{item.tool_action}`\n"
-            if item.result:
-                md += f"**Result:** {item.result}\n"
-            if item.notes:
-                md += f"**Notes:** {item.notes}\n"
-            if item.retry_count > 0:
-                md += f"**Retries:** {item.retry_count}/{item.max_retries}\n"
-            if item.error_details:
-                md += f"**Last Error:** {item.error_details.get('error', 'Unknown')}\n"
-            md += "\n---\n"
-        
-        return md
+## Legacy Checklist classes removed (Markdown-only flow)
 
 # ==================== PYDANTIC MODELS FOR STRUCTURED OUTPUT ====================
 
@@ -179,11 +116,7 @@ class ActionDecision(BaseModel):
             return ActionType(v.lower())
         return v
 
-class ChecklistGeneration(BaseModel):
-    """Structured output for checklist generation"""
-    items: List[Dict[str, Any]]
-    estimated_duration: int  # in minutes
-    risk_level: str = Field(default="low", pattern="^(low|medium|high)$")
+## Legacy structured output for checklist generation removed (Markdown-only flow)
     
 class ProjectInfo(BaseModel):
     """Structured project information extraction"""
@@ -345,515 +278,6 @@ JSON Response:"""
             self.logger.error("anthropic_structured_failed", error=str(e))
             raise
 
-# ==================== ENHANCED TOOL REGISTRY WITH CIRCUIT BREAKER ====================
-
-class EnhancedToolRegistry:
-    """Production-ready tool registry with timeout and circuit breaker"""
-    
-    def __init__(self):
-        self.tools = {}
-        self.tool_aliases: Dict[str, str] = {}
-        self.logger = structlog.get_logger()
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
-        self._register_default_tools()
-    
-    def register_tool(self, name: str, func: callable, description: str = "", timeout: int = 30):
-        """Registriert Tool mit Timeout"""
-        self.tools[name] = {
-            "func": func,
-            "description": description,
-            "timeout": timeout
-        }
-        self.logger.info("tool_registered", tool_name=name)
-    
-    def register_alias(self, alias_name: str, target_name: str):
-        """Register a human-friendly alias that maps to an existing tool name."""
-        normalized_alias = alias_name.strip().lower().replace("-", "_").replace(" ", "_")
-        self.tool_aliases[normalized_alias] = target_name
-        self.logger.info("tool_alias_registered", alias=normalized_alias, target=target_name)
-    
-    @circuit(failure_threshold=5, recovery_timeout=60, expected_exception=Exception)
-    async def execute_tool_async(self, name: str, params: Dict) -> Dict:
-        """Async tool execution with circuit breaker"""
-        resolved_name = self.resolve_tool_name(name)
-        if resolved_name not in self.tools:
-            return {"success": False, "error": f"Tool '{name}' not found"}
-        
-        tool_info = self.tools[resolved_name]
-        start_time = time.time()
-        
-        try:
-            with tracer.start_as_current_span(f"tool_execution_{resolved_name}"):
-                # Execute with timeout
-                result = await self._execute_with_timeout(
-                    tool_info["func"],
-                    params,
-                    tool_info["timeout"]
-                )
-                
-                duration = time.time() - start_time
-                tool_execution_time.labels(tool_name=resolved_name).observe(duration)
-                tool_success_rate.labels(tool_name=resolved_name).inc()
-                
-                self.logger.info("tool_executed", 
-                               tool_name=resolved_name, 
-                               duration=duration,
-                               success=result.get("success", True))
-                
-                return result
-                
-        except asyncio.TimeoutError:
-            tool_failure_rate.labels(tool_name=resolved_name).inc()
-            error_msg = f"Tool '{resolved_name}' timed out after {tool_info['timeout']}s"
-            self.logger.error("tool_timeout", tool_name=resolved_name, timeout=tool_info["timeout"])
-            return {"success": False, "error": error_msg}
-            
-        except Exception as e:
-            tool_failure_rate.labels(tool_name=resolved_name).inc()
-            self.logger.error("tool_execution_failed", tool_name=resolved_name, error=str(e))
-            return {"success": False, "error": str(e)}
-    
-    def resolve_tool_name(self, name: str) -> str:
-        """Resolve alias or normalized variants to a registered tool name."""
-        normalized = name.strip().lower().replace("-", "_").replace(" ", "_")
-        if normalized in self.tools:
-            return normalized
-        if normalized in self.tool_aliases:
-            return self.tool_aliases[normalized]
-        return name
-    
-    async def _execute_with_timeout(self, func: callable, params: Dict, timeout: int):
-        """Execute function with timeout"""
-        loop = asyncio.get_event_loop()
-        
-        # If function is async, await it directly
-        if asyncio.iscoroutinefunction(func):
-            return await asyncio.wait_for(func(**params), timeout=timeout)
-        
-        # For sync functions, run in shared executor
-        future = loop.run_in_executor(self.executor, partial(func, **params))
-        return await asyncio.wait_for(future, timeout=timeout)
-    
-    def _register_default_tools(self):
-        """Register default IDP tools"""
-        # GitHub Tools
-        self.register_tool("create_repository", self._create_repository, "Creates GitHub repository", 10)
-        self.register_tool("setup_branch_protection", self._setup_branch_protection, "Setup branch rules", 5)
-        # Wrapper for convenience
-        self.register_tool(
-            "create_git_repository_with_branch_protection",
-            self._create_git_repository_with_branch_protection,
-            "Create repo then apply standard branch protection",
-            20,
-        )
-        # Validation Tools
-        self.register_tool("validate_project_name_and_type", self._validate_project_name_and_type, "Validate project name and type", 5)
-        
-        # Template Tools
-        self.register_tool("list_templates", self._list_templates, "List available templates", 5)
-        self.register_tool("apply_template", self._apply_template, "Apply project template", 15)
-        
-        # CI/CD Tools
-        self.register_tool("setup_cicd_pipeline", self._setup_cicd, "Setup CI/CD pipeline", 20)
-        self.register_tool("run_initial_tests", self._run_tests, "Run initial test suite", 30)
-        
-        # Infrastructure Tools
-        self.register_tool("create_k8s_namespace", self._create_k8s_namespace, "Create K8s namespace", 10)
-        self.register_tool("deploy_to_staging", self._deploy_staging, "Deploy to staging", 45)
-
-        # Knowledge Base Tools (aliases included for robustness)
-        self.register_tool(
-            "search_knowledge_base_for_guidelines",
-            self._search_knowledge_base_for_guidelines,
-            "Searches local knowledge base for guidelines relevant to the project",
-            10,
-        )
-        self.register_tool(
-            "search_knowledge_base",
-            self._search_knowledge_base_for_guidelines,
-            "Alias of search_knowledge_base_for_guidelines",
-            10,
-        )
-
-        # Observability/Docs/K8s artifacts (lightweight stubs for workflow continuity)
-        self.register_tool("setup_observability", self._setup_observability, "Setup monitoring & logging", 10)
-        self.register_tool("generate_k8s_manifests", self._generate_k8s_manifests, "Generate K8s manifests", 10)
-        self.register_tool("generate_documentation", self._generate_documentation, "Generate documentation", 10)
-
-        # Aliases to match checklist/tool naming variants
-        self.register_alias("project-validator", "validate_project_name_and_type")
-        self.register_alias("kb-search", "search_knowledge_base_for_guidelines")
-        self.register_alias("search-guidelines", "search_knowledge_base_for_guidelines")
-        self.register_alias("git-repo-creator", "create_git_repository_with_branch_protection")
-        self.register_alias("create-git-repo", "create_git_repository_with_branch_protection")
-        self.register_alias("template-applier", "apply_template")
-        self.register_alias("ci-cd-configurator", "setup_cicd_pipeline")
-        self.register_alias("observability-integrator", "setup_observability")
-        self.register_alias("k8s-manifest-generator", "generate_k8s_manifests")
-        self.register_alias("k8s-deployer", "deploy_to_staging")
-        self.register_alias("test-runner", "run_initial_tests")
-        self.register_alias("doc-generator", "generate_documentation")
-
-    def export_openai_tools(self) -> List[Dict[str, Any]]:
-        """Export registered tools as OpenAI tool definitions.
-        
-        Note: Parameter schemas are approximated from call signatures. Types default to string when unknown.
-        """
-        import inspect
-        tools: List[Dict[str, Any]] = []
-        # Strict schema overrides for critical tools and their aliases
-        strict_schemas: Dict[str, Dict[str, Any]] = {
-            "validate_project_name_and_type": {
-                "type": "object",
-                "properties": {
-                    "project_name": {"type": "string"},
-                    "project_type": {"type": "string"},
-                    "programming_language": {"type": "string"},
-                },
-                "required": ["project_name"],
-                "additionalProperties": False,
-            },
-            "project_validator": {
-                "type": "object",
-                "properties": {
-                    "project_name": {"type": "string"},
-                    "project_type": {"type": "string"},
-                    "programming_language": {"type": "string"},
-                },
-                "required": ["project_name"],
-                "additionalProperties": False,
-            },
-            "apply_template": {
-                "type": "object",
-                "properties": {
-                    "template": {"type": "string"},
-                    "target_path": {"type": "string"},
-                },
-                "required": ["template", "target_path"],
-                "additionalProperties": False,
-            },
-            "template_applier": {
-                "type": "object",
-                "properties": {
-                    "template": {"type": "string"},
-                    "target_path": {"type": "string"},
-                },
-                "required": ["template", "target_path"],
-                "additionalProperties": False,
-            },
-            "setup_cicd_pipeline": {
-                "type": "object",
-                "properties": {
-                    "repo_path": {"type": "string"},
-                    "pipeline_type": {"type": "string"},
-                },
-                "required": ["repo_path"],
-                "additionalProperties": False,
-            },
-            "ci_cd_configurator": {
-                "type": "object",
-                "properties": {
-                    "repo_path": {"type": "string"},
-                    "pipeline_type": {"type": "string"},
-                },
-                "required": ["repo_path"],
-                "additionalProperties": False,
-            },
-        }
-        def build_def(name: str, func: callable, description: str, target: Optional[str] = None) -> Dict[str, Any]:
-            # Build a permissive JSON schema for parameters
-            properties: Dict[str, Any] = {}
-            required: List[str] = []
-            try:
-                sig = inspect.signature(func)
-                for param_name, param in sig.parameters.items():
-                    if param_name == "self":
-                        continue
-                    # Heuristic typing: keep simple and robust
-                    properties[param_name] = {"type": "string"}
-                    if param.default is inspect._empty:
-                        required.append(param_name)
-            except Exception:
-                properties = {}
-                required = []
-            parameters_schema: Dict[str, Any] = {
-                "type": "object",
-                "properties": properties,
-                "additionalProperties": True,
-            }
-            # Apply strict overrides when available
-            alias_key = name
-            parameters_schema = strict_schemas.get(alias_key, strict_schemas.get(target or "", parameters_schema))
-            if required and "required" not in parameters_schema:
-                parameters_schema["required"] = required
-            return {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description,
-                    "parameters": parameters_schema,
-                },
-            }
-
-        # Real tools
-        for name, info in self.tools.items():
-            tools.append(build_def(name, info.get("func"), info.get("description", "")))
-
-        # Aliases exported as separate callable names
-        for alias, target in self.tool_aliases.items():
-            if target in self.tools:
-                func = self.tools[target]["func"]
-                description = f"Alias of {target}"
-                tools.append(build_def(alias, func, description, target=target))
-        return tools
-    
-    # Async tool implementations
-    async def _create_repository(self, name: str, visibility: str = "private", **kwargs) -> Dict:
-        """Creates GitHub repository (async)"""
-        await asyncio.sleep(2)  # Simulate API call
-        
-        if any(char in name for char in "@!#$%^&*()"):
-            return {"success": False, "error": "Invalid repository name"}
-        
-        return {
-            "success": True,
-            "repo_url": f"https://github.com/company/{name}",
-            "clone_url": f"git@github.com:company/{name}.git"
-        }
-
-    async def _create_git_repository_with_branch_protection(self, repo_name: str = None, visibility: str = "private", **kwargs) -> Dict:
-        """Create repository and apply branch protection rules in one step."""
-        visibility = kwargs.get("visibility", visibility)
-        name = repo_name or kwargs.get("name") or kwargs.get("project_name") or "unnamed"
-        create = await self._create_repository(name=name, visibility=visibility, **kwargs)
-        if not create.get("success"):
-            return create
-        protection = await self._setup_branch_protection(repo_name=name, **kwargs)
-        if not protection.get("success"):
-            return protection
-        return {
-            "success": True,
-            "repo": create,
-            "branch_protection": protection,
-        }
-    
-    async def _setup_branch_protection(self, repo_name: str, **kwargs) -> Dict:
-        await asyncio.sleep(1)
-        return {
-            "success": True,
-            "rules": ["require-pr-reviews", "dismiss-stale-reviews", "require-status-checks"]
-        }
-    
-    async def _list_templates(self, project_type: str = None, **kwargs) -> Dict:
-        await asyncio.sleep(0.5)
-        templates = {
-            "microservice": ["fastapi-microservice", "spring-boot-service", "go-microservice"],
-            "library": ["python-library", "typescript-library", "java-library"],
-            "frontend": ["nextjs-app", "react-spa", "vue-app"]
-        }
-        
-        if project_type and project_type in templates:
-            return {"success": True, "templates": {project_type: templates[project_type]}}
-        
-        return {"success": True, "templates": templates}
-    
-    async def _apply_template(self, template: str, target_path: str, **kwargs) -> Dict:
-        await asyncio.sleep(3)
-        return {
-            "success": True,
-            "files_created": ["src/main.py", "tests/test_main.py", "README.md", "Dockerfile"],
-            "next_steps": ["Configure environment variables", "Update README"]
-        }
-    
-    async def _setup_cicd(self, repo_path: str, pipeline_type: str = "github-actions", **kwargs) -> Dict:
-        await asyncio.sleep(2)
-        return {
-            "success": True,
-            "pipeline_file": f".github/workflows/ci.yml",
-            "stages": ["lint", "test", "build", "security-scan"]
-        }
-
-    async def _setup_observability(self, project_name: str = None, **kwargs) -> Dict:
-        await asyncio.sleep(1)
-        return {
-            "success": True,
-            "stack": ["prometheus", "grafana", "otel"],
-            "notes": "Integrated default dashboards and traces",
-        }
-    
-    async def _run_tests(self, project_path: str, **kwargs) -> Dict:
-        await asyncio.sleep(5)
-        return {
-            "success": True,
-            "tests_run": 42,
-            "tests_passed": 42,
-            "coverage": "87%"
-        }
-
-    async def _generate_k8s_manifests(self, service_name: str = None, **kwargs) -> Dict:
-        await asyncio.sleep(1)
-        name = service_name or kwargs.get("project_name") or "service"
-        return {
-            "success": True,
-            "files": [
-                f"k8s/{name}-deployment.yaml",
-                f"k8s/{name}-service.yaml",
-                f"k8s/{name}-configmap.yaml",
-            ],
-        }
-    
-    async def _create_k8s_namespace(self, name: str, **kwargs) -> Dict:
-        await asyncio.sleep(1)
-        return {
-            "success": True,
-            "namespace": name,
-            "resources": ["namespace", "resource-quota", "network-policy"]
-        }
-    
-    async def _deploy_staging(self, project: str, version: str = "latest", **kwargs) -> Dict:
-        await asyncio.sleep(8)
-        return {
-            "success": True,
-            "environment": "staging",
-            "url": f"https://{project}-staging.company.io",
-            "version": version
-        }
-
-    async def _generate_documentation(self, project_name: str = None, **kwargs) -> Dict:
-        await asyncio.sleep(1)
-        name = project_name or "project"
-        return {
-            "success": True,
-            "artifacts": [f"docs/{name}-api.md", f"docs/{name}-operations.md"],
-        }
-
-    async def _validate_project_name_and_type(self, project_name: str = None, project_type: str = None,
-                                             programming_language: str = None, **kwargs) -> Dict:
-        """Validate project name and type against simple conventions."""
-        await asyncio.sleep(0)  # keep async signature predictable
-
-        if not project_name or not isinstance(project_name, str):
-            return {"success": False, "error": "Missing required parameter: project_name"}
-
-        # kebab-case, lowercase letters, numbers and single dashes between segments
-        name_pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-        if not name_pattern.match(project_name):
-            return {"success": False, "error": "Invalid project name. Use kebab-case: lowercase letters, numbers, and single dashes."}
-
-        allowed_types = {"microservice", "library", "application", "frontend", "backend", "generic"}
-        if project_type and project_type not in allowed_types:
-            return {"success": False, "error": f"Unsupported project_type '{project_type}'. Allowed: {sorted(allowed_types)}"}
-
-        details = {
-            "project_name": project_name,
-            "project_type": project_type or "microservice",
-            "programming_language": programming_language or "python",
-            "policy_checks": ["kebab-case", "allowed_type"],
-        }
-        return {"success": True, "result": details}
-
-    async def _search_knowledge_base_for_guidelines(self, project_type: str = None, language: str = None,
-                                                    project_name: str = None, **kwargs) -> Dict:
-        """Search simple local knowledge base for relevant guidelines.
-
-        Minimal, dependency-free implementation that scans known docs directories
-        for markdown files and returns matches based on project_type/language.
-        """
-        try:
-            # Resolve relative to repo root if possible
-            repo_root = Path.cwd()
-            base_paths = [
-                repo_root / "capstone" / "backend" / "documents" / "guidelines",
-                repo_root / "capstone" / "documents" / "guidelines",
-                repo_root / "capstone" / "backend" / "documents",
-            ]
-
-            keywords: List[str] = []
-            if project_type:
-                keywords.append(str(project_type).lower())
-            if language:
-                keywords.append(str(language).lower())
-            if project_name:
-                # project name is often too specific; include but low priority
-                keywords.append(str(project_name).lower())
-            # broaden
-            keywords.extend(["service", "microservice", "standards", "guidelines", "ci/cd", "cicd"])
-
-            matched: List[Dict[str, Any]] = []
-            scanned_files: List[str] = []
-
-            for base in base_paths:
-                if not base.exists() or not base.is_dir():
-                    continue
-                for file in base.glob("**/*.md"):
-                    scanned_files.append(str(file))
-                    try:
-                        text = file.read_text(encoding="utf-8", errors="ignore")
-                    except Exception:
-                        continue
-
-                    text_lower = text.lower()
-                    filename_lower = file.name.lower()
-                    score = 0
-                    for kw in keywords:
-                        if kw and (kw in text_lower or kw in filename_lower):
-                            score += 1
-
-                    # Extract first heading as title, and up to 2 relevant lines
-                    title = None
-                    for line in text.splitlines():
-                        if line.strip().startswith("#"):
-                            title = line.strip().lstrip("# ")
-                            break
-                    if score > 0 or (not keywords and title):
-                        # pick small snippets containing keywords
-                        snippets: List[str] = []
-                        if keywords:
-                            for line in text.splitlines():
-                                line_l = line.lower()
-                                if any(kw in line_l for kw in keywords) and line.strip():
-                                    snippets.append(line.strip())
-                                    if len(snippets) >= 3:
-                                        break
-                        matched.append({
-                            "file": str(file),
-                            "title": title or file.name,
-                            "score": score,
-                            "snippets": snippets,
-                        })
-
-            # Sort by score descending, then title
-            matched.sort(key=lambda m: (-m.get("score", 0), m.get("title") or ""))
-
-            # Fallback: if nothing matched, return top-level known guidelines if present
-            if not matched:
-                defaults = []
-                for default_name in [
-                    "python-service-standards.md",
-                    "cicd-pipeline-standards.md",
-                    "go-service-standards.md",
-                ]:
-                    for base in base_paths:
-                        candidate = base / default_name
-                        if candidate.exists():
-                            defaults.append({
-                                "file": str(candidate),
-                                "title": default_name.replace("-", " ").replace(".md", "").title(),
-                                "score": 0,
-                                "snippets": [],
-                            })
-                matched = defaults
-
-            return {
-                "success": True,
-                "result": {
-                    "searched_files": scanned_files,
-                    "matches": matched[:10],
-                },
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
 # ==================== STATE MANAGEMENT ====================
 
 class StateManager:
@@ -1002,70 +426,7 @@ class FeedbackCollector:
         
         return analysis
 
-# ==================== ENHANCED CHECKLIST MANAGER ====================
-
-class EnhancedChecklistManager:
-    """Enhanced checklist manager with async operations"""
-    
-    def __init__(self, checklist_dir: str = "./checklists"):
-        self.checklist_dir = Path(checklist_dir)
-        self.checklist_dir.mkdir(exist_ok=True)
-        self.logger = structlog.get_logger()
-    
-    async def save_checklist(self, checklist: ProjectChecklist) -> str:
-        """Save checklist asynchronously"""
-        filename = f"{checklist.project_name}_{checklist.session_id}.md"
-        filepath = self.checklist_dir / filename
-        
-        try:
-            import aiofiles
-            async with aiofiles.open(filepath, 'w', encoding='utf-8') as f:
-                await f.write(checklist.to_markdown())
-            
-            self.logger.info("checklist_saved", 
-                           project=checklist.project_name,
-                           session_id=checklist.session_id)
-            return str(filepath)
-            
-        except Exception as e:
-            self.logger.error("checklist_save_failed", error=str(e))
-            raise
-    
-    async def update_item_status(self, checklist: ProjectChecklist, item_id: str,
-                                status: ChecklistItemStatus, result: str = None, 
-                                notes: str = None, error_details: Dict = None):
-        """Update checklist item status"""
-        for item in checklist.items:
-            if item.id == item_id:
-                item.status = status
-                item.updated_at = datetime.now().isoformat()
-                
-                if result:
-                    item.result = result
-                if notes:
-                    item.notes = notes
-                if error_details:
-                    item.error_details = error_details
-                
-                self.logger.info("checklist_item_updated",
-                               item_id=item_id,
-                               status=status.value)
-                break
-        
-        await self.save_checklist(checklist)
-    
-    async def mark_dependent_items_blocked(self, checklist: ProjectChecklist, failed_item_id: str):
-        """Mark items that depend on failed item as blocked"""
-        for item in checklist.items:
-            if failed_item_id in item.dependencies and item.status == ChecklistItemStatus.PENDING:
-                item.status = ChecklistItemStatus.BLOCKED
-                item.notes = f"Blocked due to failure of item {failed_item_id}"
-                
-                self.logger.info("item_blocked",
-                               item_id=item.id,
-                               blocked_by=failed_item_id)
-        
-        await self.save_checklist(checklist)
+## Legacy EnhancedChecklistManager removed (Markdown-only flow)
 
 # ==================== PRODUCTION REACT AGENT ====================
 
@@ -1076,12 +437,11 @@ class ProductionReActAgent:
         self.system_prompt = system_prompt
         self.llm = llm_provider
         self.tools: List[ToolSpec] = tools or BUILTIN_TOOLS
-        self.checklist_manager = EnhancedChecklistManager()
         self.state_manager = StateManager()
         self.feedback_collector = FeedbackCollector()
         
         self.context = {}
-        self.current_checklist: Optional[ProjectChecklist] = None
+        # Markdown-only checklist flow; no in-memory checklist object
         self.react_history = []
         self.step_counter = 0
         self.max_steps = 50
@@ -1237,46 +597,40 @@ Think step by step about what needs to be done."""
             if isinstance(self.llm, OpenAIProvider):
                 tools = export_openai_tools(self.tools)
                 # Also expose meta-actions as functions with no/loose params
-                # Gate meta-actions when a next executable checklist step exists to prevent drift
-                meta_actions = []
-                next_item_available = False
-                if self.current_checklist:
-                    next_item_available = self._get_next_executable_item() is not None
-                if not next_item_available:
-                    meta_actions = [
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": "update_checklist",
-                                "description": "Create or modify the workflow checklist.",
-                                "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
-                            },
+                meta_actions = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "update_checklist",
+                            "description": "Create or modify the workflow checklist.",
+                            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
                         },
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": "ask_user",
-                                "description": "Request information from the user.",
-                                "parameters": {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": True},
-                            },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_user",
+                            "description": "Request information from the user.",
+                            "parameters": {"type": "object", "properties": {"questions": {"type": "array", "items": {"type": "string"}}, "context": {"type": "string"}}, "additionalProperties": True},
                         },
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": "error_recovery",
-                                "description": "Handle errors and retry failed operations.",
-                                "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
-                            },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "error_recovery",
+                            "description": "Handle errors and retry failed operations.",
+                            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
                         },
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": "complete",
-                                "description": "Finish the workflow with an optional summary.",
-                                "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "additionalProperties": True},
-                            },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "complete",
+                            "description": "Finish the workflow with an optional summary.",
+                            "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "additionalProperties": True},
                         },
-                    ]
+                    },
+                ]
                 all_tools = tools + meta_actions
                 completion = await self.llm.client.chat.completions.create(
                     model=self.llm.model,
@@ -1313,8 +667,23 @@ Think step by step about what needs to be done."""
 
                     # Otherwise treat as a tool call
                     decided = ActionDecision(action_type=ActionType.TOOL_CALL, action_name=name, parameters=params, reasoning="Vendor function-called tool", confidence=0.9)
-                    # If no checklist exists yet and the model didn't ask the user, prefer creating one first
-                    if self.current_checklist is None:
+                    # If a blocker exists in context, force ASK_USER to avoid loops
+                    if isinstance(self.context.get("blocker"), dict):
+                        return ActionDecision(
+                            action_type=ActionType.ASK_USER,
+                            action_name="ask_user",
+                            parameters={
+                                "questions": [
+                                    f"{self.context['blocker'].get('message', 'A blocking issue occurred.')}",
+                                    f"{self.context['blocker'].get('suggestion', 'Please advise next steps.')}",
+                                ],
+                                "context": "Blocking error encountered. Provide next steps."
+                            },
+                            reasoning="Blocking error present; asking user instead of retrying tools",
+                            confidence=0.9,
+                        )
+                    # If no checklist exists yet (Markdown flag) and the model didn't ask the user, prefer creating one first
+                    if not self.context.get("checklist_created"):
                         return ActionDecision(
                             action_type=ActionType.UPDATE_CHECKLIST,
                             action_name="create_checklist",
@@ -1322,25 +691,24 @@ Think step by step about what needs to be done."""
                             reasoning="No checklist yet; create it before executing tools",
                             confidence=0.9,
                         )
-                    # Enforce next-item-first to prevent drift when a checklist exists
-                    if self.current_checklist:
-                        next_item = self._get_next_executable_item()
-                        if next_item and decided.action_type == ActionType.TOOL_CALL:
-                            req_spec = find_tool(self.tools, decided.action_name.strip().lower().replace("-", "_").replace(" ", "_"))
-                            exp_spec = find_tool(self.tools, (next_item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_"))
-                            if exp_spec and (not req_spec or req_spec.name != exp_spec.name):
-                                decided.action_name = next_item.tool_action
-                                decided.parameters = next_item.tool_params or {}
-                                decided.reasoning = "Enforced next checklist item to prevent drift"
-                                return decided
+                    # Markdown mode: we do not enforce next-item order based on in-memory checklist
                     return decided
-                # If no tool call returned, bootstrap checklist
+                # If no tool call returned, bootstrap checklist if not created yet
+                if not self.context.get("checklist_created"):
+                    return ActionDecision(
+                        action_type=ActionType.UPDATE_CHECKLIST,
+                        action_name="create_checklist",
+                        parameters={},
+                        reasoning="No function call returned; bootstrap checklist",
+                        confidence=0.8,
+                    )
+                # Otherwise, ask the user
                 return ActionDecision(
-                    action_type=ActionType.UPDATE_CHECKLIST,
-                    action_name="create_checklist",
-                    parameters={},
-                    reasoning="No function call returned; bootstrap checklist",
-                    confidence=0.8,
+                    action_type=ActionType.ASK_USER,
+                    action_name="ask_user",
+                    parameters={"questions": ["What should we do next?"], "context": "No decisive action from model."},
+                    reasoning="No function call returned; checklist exists",
+                    confidence=0.6,
                 )
         except Exception as e:
             self.logger.warning("vendor_action_selection_failed", error=str(e))
@@ -1367,8 +735,8 @@ Determine the most appropriate next action with clear reasoning."""
                 ActionDecision,
                 system_prompt=self.system_prompt_full
             )
-            # Respect ASK_USER; otherwise, if no checklist exists, create it first
-            if action_decision.action_type != ActionType.ASK_USER and self.current_checklist is None:
+            # Respect ASK_USER; otherwise, if no checklist exists (Markdown flag), create it first
+            if action_decision.action_type != ActionType.ASK_USER and not self.context.get("checklist_created"):
                 return ActionDecision(
                     action_type=ActionType.UPDATE_CHECKLIST,
                     action_name="create_checklist",
@@ -1436,9 +804,7 @@ Determine the most appropriate next action with clear reasoning."""
                         }
                     )
                     
-                    # Mark checklist item as failed if applicable
-                    if self.current_checklist:
-                        await self._mark_current_item_failed(str(e))
+                    # Markdown mode: no in-memory item to mark failed
                     
                     return f"Action failed after {max_retries} attempts: {e}"
                 
@@ -1478,97 +844,98 @@ Determine the most appropriate next action with clear reasoning."""
             # Extract project info first
             project_info = await self._extract_project_info()
             
-            # Generate checklist using LLM
-            checklist_prompt = f"""Create a detailed implementation checklist for:
-Project Type: {project_info.project_type}
-Project Name: {project_info.project_name}
-Requirements: {json.dumps(project_info.requirements)}
-
-Generate a comprehensive checklist with all necessary steps, dependencies, and required tools. Each item must include a 'tool' field set to one of the allowed tools for this iteration and should reflect the Git-only scope when applicable."""
-            
             try:
-                checklist_data = await self.llm.generate_structured_response(
-                    checklist_prompt,
-                    ChecklistGeneration,
-                    system_prompt=self.system_prompt_full
+                # New simple Markdown-based checklist generation
+                try:
+                    from .checklists_simple import create_checklist_md  # type: ignore
+                except Exception:
+                    from checklists_simple import create_checklist_md  # type: ignore
+                filepath = await create_checklist_md(
+                    self.llm,
+                    project_name=project_info.project_name,
+                    project_type=project_info.project_type,
+                    user_request=self.context.get("user_request", ""),
+                    requirements=project_info.requirements,
+                    system_prompt=self.system_prompt_full,
+                    session_id=self.session_id,
                 )
-                
-                # Build checklist object
-                self.current_checklist = await self._build_checklist(project_info, checklist_data)
-                
-                # Save checklist
-                filepath = await self.checklist_manager.save_checklist(self.current_checklist)
-                
                 self.context["checklist_created"] = True
                 self.context["checklist_file"] = filepath
-                
-                return f"Created checklist with {len(self.current_checklist.items)} items (saved to {filepath})"
+                # Store project identification in context for later Markdown updates
+                self.context["project_name"] = project_info.project_name
+                self.context["project_type"] = project_info.project_type
+                return f"Created checklist (saved to {filepath})"
                 
             except Exception as e:
                 self.logger.error("checklist_creation_failed", error=str(e))
                 # Fallback: create a minimal viable checklist so the workflow can proceed
                 try:
-                    # Strict Git-scope fallback: two steps only
-                    fallback_data = ChecklistGeneration(
-                        items=[
-                            {
-                                "title": "Validate project name",
-                                "description": "Validate project name and type",
-                                "dependencies": [],
-                                "tool": "validate_project_name_and_type"
-                            },
-                            {
-                                "title": "Create repository",
-                                "description": "Create local Git repo, initial commit, create/push remote if possible",
-                                "dependencies": ["1"],
-                                "tool": "create_repository"
-                            }
-                        ],
-                        estimated_duration=10,
-                        risk_level="low"
+                    # Simple fallback: create a minimal Markdown checklist directly
+                    try:
+                        from .checklists_simple import create_checklist_md  # type: ignore
+                    except Exception:
+                        from checklists_simple import create_checklist_md  # type: ignore
+                    filepath = await create_checklist_md(
+                        self.llm,
+                        project_name=project_info.project_name,
+                        project_type=project_info.project_type,
+                        user_request=self.context.get("user_request", ""),
+                        requirements=project_info.requirements,
+                        system_prompt=self.system_prompt_full,
+                        session_id=self.session_id,
                     )
-                    self.current_checklist = await self._build_checklist(project_info, fallback_data)
-                    filepath = await self.checklist_manager.save_checklist(self.current_checklist)
                     self.context["checklist_created"] = True
                     self.context["checklist_file"] = filepath
                     return (
-                        f"Created checklist with {len(self.current_checklist.items)} items using fallback "
-                        f"(saved to {filepath}). Original error: {e}"
+                        f"Created minimal checklist (saved to {filepath}). Original error: {e}"
                     )
                 except Exception as inner_e:
                     self.logger.error("checklist_fallback_failed", error=str(inner_e))
                     return f"Failed to create checklist: {e}"
         
         elif action_name == "update_item_status":
-            if not self.current_checklist:
-                return "No active checklist to update"
-            
+            # Update via Markdown helper using instruction text
+            try:
+                from .checklists_simple import update_checklist_md  # type: ignore
+            except Exception:
+                from checklists_simple import update_checklist_md  # type: ignore
+            # Determine project_name for Markdown checklist
+            project_name = self.context.get("project_name")
+            if not project_name:
+                info = await self._extract_project_info()
+                project_name = info.project_name
             item_id = parameters.get("item_id")
-            status = ChecklistItemStatus(parameters.get("status"))
-            
-            await self.checklist_manager.update_item_status(
-                self.current_checklist,
-                item_id,
-                status,
-                parameters.get("result"),
-                parameters.get("notes")
+            status_text = parameters.get("status")
+            notes = parameters.get("notes")
+            result_txt = parameters.get("result")
+            instruction_parts = [f"Set task {item_id} status to {status_text}."]
+            if notes:
+                instruction_parts.append(f"Add note to task {item_id}: {notes}.")
+            if result_txt:
+                instruction_parts.append(f"Record result for task {item_id}: {result_txt}.")
+            instruction = " ".join(instruction_parts)
+            filepath = await update_checklist_md(
+                self.llm,
+                project_name=project_name,
+                instruction=instruction,
+                system_prompt=self.system_prompt_full,
+                session_id=self.session_id,
             )
-            
-            return f"Updated item {item_id} to {status.value}"
+            self.context["checklist_file"] = filepath
+            return f"Updated checklist (saved to {filepath})"
         
         elif action_name == "get_next_executable_item":
-            next_item = self._get_next_executable_item()
-            if next_item:
-                return f"Next item: {next_item.id} - {next_item.title}"
-            return "No executable items available"
+            # Markdown-only flow: cannot infer next item; guide via file reference
+            path = self.context.get("checklist_file")
+            return f"Open and follow the checklist: {path}" if path else "No checklist created"
         
         return f"Checklist action '{action_name}' completed"
     
     async def _execute_tool_call(self, tool_name: str, parameters: Dict) -> str:
         """Execute tool and update checklist"""
         
-        # Hard guard: ensure a checklist exists before any tool execution
-        if self.current_checklist is None:
+        # Hard guard (Markdown flow): ensure a checklist file exists before tool execution
+        if not self.context.get("checklist_created"):
             checklist_msg = await self._handle_checklist_action("create_checklist", {})
             return f"Checklist was missing. {checklist_msg}\nWill proceed with tool execution next."
 
@@ -1577,28 +944,44 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         requested_spec = find_tool(self.tools, normalized_tool_name)
         
         # Find corresponding checklist item (exact or normalized match)
-        current_item = None
-        if self.current_checklist:
-            for item in self.current_checklist.items:
-                if item.status not in [ChecklistItemStatus.PENDING, ChecklistItemStatus.RETRYING]:
-                    continue
-                item_name_normalized = (item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_")
-                item_spec = find_tool(self.tools, item_name_normalized) if item_name_normalized else None
-                if (
-                    item.tool_action == tool_name
-                    or item_name_normalized == normalized_tool_name
-                    or (item_spec and requested_spec and item_spec.name == requested_spec.name)
-                ):
-                    current_item = item
-                    break
+        current_item = None  # Markdown-only flow: we no longer track items in memory
         
-        # Mark item as in progress
+        # Mark item as in progress in Markdown (best-effort)
         if current_item:
-            await self.checklist_manager.update_item_status(
-                self.current_checklist,
-                current_item.id,
-                ChecklistItemStatus.IN_PROGRESS
-            )
+            try:
+                from .checklists_simple import update_checklist_md  # type: ignore
+            except Exception:
+                from checklists_simple import update_checklist_md  # type: ignore
+            try:
+                project_name = self.context.get("project_name")
+                if project_name:
+                    await update_checklist_md(
+                        self.llm,
+                        project_name=project_name,
+                        instruction=f"Set task {current_item.id} status to IN_PROGRESS.",
+                        system_prompt=self.system_prompt_full,
+                        session_id=self.session_id,
+                    )
+            except Exception:
+                pass
+        else:
+            # No in-memory item; best-effort by tool name
+            try:
+                try:
+                    from .checklists_simple import update_checklist_md  # type: ignore
+                except Exception:
+                    from checklists_simple import update_checklist_md  # type: ignore
+                project_name = self.context.get("project_name")
+                if project_name:
+                    await update_checklist_md(
+                        self.llm,
+                        project_name=project_name,
+                        instruction=f"Find the task that corresponds to tool '{normalized_tool_name}' and mark it IN_PROGRESS.",
+                        system_prompt=self.system_prompt_full,
+                        session_id=self.session_id,
+                    )
+            except Exception:
+                pass
 
         # Enforce executing the current checklist item's tool if there is a mismatch
         if current_item and current_item.tool_action:
@@ -1626,34 +1009,57 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         except Exception:
             self.context["kb_guidelines_available"] = "no"
         
-        # Update checklist based on result
+        # Update checklist based on result in Markdown
         if current_item:
-            if result.get("success"):
-                status = ChecklistItemStatus.COMPLETED
-                try:
-                    result_text = json.dumps(result, ensure_ascii=False)
-                except Exception:
-                    result_text = str(result)
-            else:
-                current_item.retry_count += 1
-                if current_item.retry_count < current_item.max_retries:
-                    status = ChecklistItemStatus.RETRYING
-                else:
-                    status = ChecklistItemStatus.FAILED
-                    # Mark dependent items as blocked
-                    await self.checklist_manager.mark_dependent_items_blocked(
-                        self.current_checklist,
-                        current_item.id
+            try:
+                from .checklists_simple import update_checklist_md  # type: ignore
+            except Exception:
+                from checklists_simple import update_checklist_md  # type: ignore
+            success = bool(result.get("success"))
+            status_text = "COMPLETED" if success else "RETRYING"
+            if not success:
+                # If it repeatedly fails, mark as FAILED; we don't track retry_count in Markdown, so keep it simple
+                status_text = "FAILED"
+            try:
+                project_name = self.context.get("project_name")
+                if project_name:
+                    result_text = json.dumps(result, ensure_ascii=False) if success else (result.get("error", "Unknown error"))
+                    await update_checklist_md(
+                        self.llm,
+                        project_name=project_name,
+                        instruction=(
+                            f"Set task {current_item.id} status to {status_text}. "
+                            f"Record result for task {current_item.id}: {result_text}."
+                        ),
+                        system_prompt=self.system_prompt_full,
+                        session_id=self.session_id,
                     )
-                result_text = result.get("error", "Unknown error")
-            
-            await self.checklist_manager.update_item_status(
-                self.current_checklist,
-                current_item.id,
-                status,
-                result_text,
-                error_details={"error": result.get("error")} if not result.get("success") else None
-            )
+            except Exception:
+                pass
+        else:
+            # No in-memory item; update by tool name
+            try:
+                try:
+                    from .checklists_simple import update_checklist_md  # type: ignore
+                except Exception:
+                    from checklists_simple import update_checklist_md  # type: ignore
+                project_name = self.context.get("project_name")
+                if project_name:
+                    success = bool(result.get("success"))
+                    status_text = "COMPLETED" if success else "FAILED"
+                    result_text = json.dumps(result, ensure_ascii=False) if success else (result.get("error", "Unknown error"))
+                    await update_checklist_md(
+                        self.llm,
+                        project_name=project_name,
+                        instruction=(
+                            f"Find the task that corresponds to tool '{normalized_tool_name}' and set its status to {status_text}. "
+                            f"Record result: {result_text}."
+                        ),
+                        system_prompt=self.system_prompt_full,
+                        session_id=self.session_id,
+                    )
+            except Exception:
+                pass
 
         # Detect blocking errors and set context flags to steer next step to ASK_USER
         try:
@@ -1696,6 +1102,8 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
             "questions": questions,
             "requested_at": datetime.now().isoformat()
         }
+        # Once we ask the user, clear any blocker to avoid re-triggering forced ASK_USER
+        self.context.pop("blocker", None)
         
         await self._save_current_state()
         
@@ -1706,40 +1114,50 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         """Handle error recovery strategies"""
         
         if action_name == "retry_failed_items":
-            # Find failed items that can be retried
-            failed_items = [
-                item for item in self.current_checklist.items
-                if item.status == ChecklistItemStatus.FAILED and item.retry_count < item.max_retries
-            ]
-            
-            if failed_items:
-                # Reset first failed item for retry
-                item = failed_items[0]
-                item.status = ChecklistItemStatus.RETRYING
-                item.retry_count += 1
-                
-                await self.checklist_manager.save_checklist(self.current_checklist)
-                
-                return f"Retrying failed item: {item.id} - {item.title} (attempt {item.retry_count})"
-            
-            return "No failed items available for retry"
+            # Markdown-only flow: instruct LLM to mark the first FAILED task as RETRYING
+            try:
+                try:
+                    from .checklists_simple import update_checklist_md  # type: ignore
+                except Exception:
+                    from checklists_simple import update_checklist_md  # type: ignore
+                project_name = self.context.get("project_name")
+                if not project_name:
+                    info = await self._extract_project_info()
+                    project_name = info.project_name
+                filepath = await update_checklist_md(
+                    self.llm,
+                    project_name=project_name,
+                    instruction="Find the first FAILED task and set its status to RETRYING (increment attempt if present).",
+                    system_prompt=self.system_prompt_full,
+                    session_id=self.session_id,
+                )
+                self.context["checklist_file"] = filepath
+                return "Retrying first failed task"
+            except Exception:
+                return "No failed items available for retry"
         
         elif action_name == "skip_blocked_items":
-            # Mark blocked items as skipped
-            blocked_items = [
-                item for item in self.current_checklist.items
-                if item.status == ChecklistItemStatus.BLOCKED
-            ]
-            
-            for item in blocked_items:
-                item.status = ChecklistItemStatus.SKIPPED
-                item.notes = "Skipped due to dependency failure"
-            
-            if blocked_items:
-                await self.checklist_manager.save_checklist(self.current_checklist)
-                return f"Skipped {len(blocked_items)} blocked items"
-            
-            return "No blocked items to skip"
+            # Markdown flow: emit instruction to mark blocked items as skipped
+            try:
+                try:
+                    from .checklists_simple import update_checklist_md  # type: ignore
+                except Exception:
+                    from checklists_simple import update_checklist_md  # type: ignore
+                project_name = self.context.get("project_name")
+                if not project_name:
+                    info = await self._extract_project_info()
+                    project_name = info.project_name
+                filepath = await update_checklist_md(
+                    self.llm,
+                    project_name=project_name,
+                    instruction="Mark all tasks that are blocked due to unmet dependencies as SKIPPED and add note 'Skipped due to dependency failure'.",
+                    system_prompt=self.system_prompt_full,
+                    session_id=self.session_id,
+                )
+                self.context["checklist_file"] = filepath
+                return "Skipped blocked items in checklist"
+            except Exception:
+                return "No blocked items to skip"
         
         return f"Error recovery action '{action_name}' completed"
     
@@ -1748,30 +1166,8 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         
         summary = parameters.get("summary", "Workflow completed successfully")
         
-        if self.current_checklist:
-            # Generate completion report
-            completed = sum(1 for item in self.current_checklist.items 
-                          if item.status == ChecklistItemStatus.COMPLETED)
-            failed = sum(1 for item in self.current_checklist.items 
-                       if item.status == ChecklistItemStatus.FAILED)
-            skipped = sum(1 for item in self.current_checklist.items 
-                        if item.status == ChecklistItemStatus.SKIPPED)
-            
-            report = f"""
-Workflow Completion Report:
-- Total Items: {len(self.current_checklist.items)}
-- Completed: {completed}
-- Failed: {failed}
-- Skipped: {skipped}
-- Success Rate: {completed/len(self.current_checklist.items)*100:.1f}%
-
-Summary: {summary}
-"""
-            
-            # Save final checklist state
-            await self.checklist_manager.save_checklist(self.current_checklist)
-            
-            return report
+        if self.context.get("checklist_created"):
+            return f"Workflow completed. Summary: {summary}"
         
         return summary
     
@@ -1806,29 +1202,7 @@ Extract:
                 missing_info=["project_name", "project_type"]
             )
     
-    async def _build_checklist(self, project_info: ProjectInfo, 
-                              checklist_data: ChecklistGeneration) -> ProjectChecklist:
-        """Build checklist from LLM response"""
-        
-        items = []
-        for idx, item_data in enumerate(checklist_data.items, 1):
-            items.append(ChecklistItem(
-                id=str(idx),
-                title=item_data.get("title", f"Step {idx}"),
-                description=item_data.get("description", ""),
-                dependencies=[str(d) for d in item_data.get("dependencies", [])],
-                tool_action=item_data.get("tool"),
-                tool_params=item_data.get("params", {})
-            ))
-        
-        return ProjectChecklist(
-            project_name=project_info.project_name,
-            project_type=project_info.project_type,
-            user_request=self.context.get("user_request", ""),
-            created_at=datetime.now().isoformat(),
-            items=items,
-            session_id=self.session_id
-        )
+    ## Legacy builder removed (Markdown-only flow)
     
     def _build_context_summary(self) -> str:
         """Build context summary for LLM"""
@@ -1843,30 +1217,8 @@ Extract:
         if kb:
             summary += f"KB Guidelines: {kb}\n"
         
-        if self.current_checklist:
-            status_counts = defaultdict(int)
-            for item in self.current_checklist.items:
-                status_counts[item.status.value] += 1
-            
-            summary += f"Checklist Status:\n"
-            for status, count in status_counts.items():
-                summary += f"  - {status}: {count}\n"
-            
-            # Include concise checklist snapshot for LLM
-            summary += "Checklist Items (id, status, title, tool, deps):\n"
-            for item in self.current_checklist.items[:15]:
-                deps = ",".join(item.dependencies) if item.dependencies else "-"
-                tool = item.tool_action or "-"
-                summary += f"  - {item.id} | {item.status.value} | {item.title} | tool: {tool} | deps: {deps}\n"
-            if len(self.current_checklist.items) > 15:
-                summary += f"  ... and {len(self.current_checklist.items) - 15} more\n"
-
-            # Current/next item
-            next_item = self._get_next_executable_item()
-            if next_item:
-                summary += f"Next Item: {next_item.id} - {next_item.title}\n"
-            if self.context.get("checklist_file"):
-                summary += f"Checklist File: {self.context.get('checklist_file')}\n"
+        if self.context.get("checklist_file"):
+            summary += f"Checklist File: {self.context.get('checklist_file')}\n"
         else:
             summary += "Checklist: Not created yet\n"
         
@@ -1881,48 +1233,16 @@ Extract:
     def _get_checklist_status(self) -> str:
         """Get current checklist status"""
         
-        if not self.current_checklist:
+        if not self.context.get("checklist_created"):
             return "No checklist created"
         
-        next_item = self._get_next_executable_item()
-        if next_item:
-            return f"Ready to execute: {next_item.id} - {next_item.title}"
+        # When using Markdown-only checklist, we cannot compute next item reliably here.
+        # Provide a generic status based on existence of the file.
+        if self.context.get("checklist_file"):
+            return f"Checklist ready at {self.context.get('checklist_file')}"
         
-        # Check for completion
-        all_done = all(
-            item.status in [ChecklistItemStatus.COMPLETED, ChecklistItemStatus.SKIPPED]
-            for item in self.current_checklist.items
-        )
-        
-        if all_done:
-            return "All items completed or skipped"
-        
-        # Check for blocked items
-        has_blocked = any(
-            item.status == ChecklistItemStatus.BLOCKED
-            for item in self.current_checklist.items
-        )
-        
-        if has_blocked:
-            return "Items blocked due to dependencies"
-        
-        # Check for failed items
-        has_failed = any(
-            item.status == ChecklistItemStatus.FAILED
-            for item in self.current_checklist.items
-        )
-        
-        if has_failed:
-            return "Has failed items that need attention"
+        # No deeper introspection in Markdown-only mode
 
-        # Warn if we have pending/retrying items but no next executable due to dependency issues
-        has_pending_or_retrying = any(
-            item.status in [ChecklistItemStatus.PENDING, ChecklistItemStatus.RETRYING]
-            for item in self.current_checklist.items
-        )
-        if has_pending_or_retrying and next_item is None:
-            self.logger.warning("no_next_item_but_pending", session_id=self.session_id)
-        
         return "Waiting for next action"
 
     def _compose_system_prompt(self, base_prompt: str) -> str:
@@ -1944,40 +1264,19 @@ Extract:
         except Exception:
             return base_prompt
     
-    def _get_next_executable_item(self) -> Optional[ChecklistItem]:
-        """Get next item that can be executed"""
-        
-        if not self.current_checklist:
-            return None
-        
-        for item in self.current_checklist.items:
-            # Skip non-pending items
-            if item.status != ChecklistItemStatus.PENDING:
-                continue
-            
-            # Check dependencies
-            deps_satisfied = all(
-                any(dep_item.id == dep_id and 
-                   dep_item.status == ChecklistItemStatus.COMPLETED
-                   for dep_item in self.current_checklist.items)
-                for dep_id in item.dependencies
-            )
-            
-            if deps_satisfied:
-                return item
-        
-        return None
+    ## Legacy next-executable resolver removed (Markdown-only flow)
     
     def _enhance_tool_parameters(self, tool_name: str, parameters: Dict) -> Dict:
         """Enhance tool parameters with context"""
         
         enhanced = parameters.copy()
         
-        if self.current_checklist:
-            # Add project context
-            enhanced["project_name"] = self.current_checklist.project_name
-            enhanced["project_type"] = self.current_checklist.project_type
-            enhanced["session_id"] = self.session_id
+        # Add project context from Markdown-based context
+        if self.context.get("project_name"):
+            enhanced["project_name"] = self.context.get("project_name")
+        if self.context.get("project_type"):
+            enhanced["project_type"] = self.context.get("project_type")
+        enhanced["session_id"] = self.session_id
         
         # Parameter normalization: detect swapped project_name/project_type and set sane defaults
         try:
@@ -1991,13 +1290,13 @@ Extract:
                 return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
 
             # If project_name is missing or equals a known type, repair from checklist
-            if (pn is None or (isinstance(pn, str) and pn.lower() in allowed_types)) and self.current_checklist:
-                enhanced["project_name"] = self.current_checklist.project_name
+            if (pn is None or (isinstance(pn, str) and pn.lower() in allowed_types)) and self.context.get("project_name"):
+                enhanced["project_name"] = self.context.get("project_name")
                 pn = enhanced["project_name"]
 
             # If project_type is missing, take from checklist
-            if (pt is None or pt == "") and self.current_checklist:
-                enhanced["project_type"] = self.current_checklist.project_type
+            if (pt is None or pt == "") and self.context.get("project_type"):
+                enhanced["project_type"] = self.context.get("project_type")
                 pt = enhanced["project_type"]
 
             # Detect swapped name/type
@@ -2015,20 +1314,17 @@ Extract:
             # Prevent generic placeholders from leaking to tools by repairing from checklist
             generic_names = {"service", "microservice", "application", "app", "project"}
             if isinstance(enhanced.get("project_name"), str) and enhanced["project_name"].lower() in generic_names:
-                if self.current_checklist and self.current_checklist.project_name:
-                    enhanced["project_name"] = self.current_checklist.project_name
-                else:
-                    enhanced["project_name"] = "unnamed"
+                enhanced["project_name"] = self.context.get("project_name") or "unnamed"
         except Exception:
             pass
 
         if not enhanced.get("project_name"):
-            enhanced["project_name"] = self.current_checklist.project_name if self.current_checklist else "unnamed"
+            enhanced["project_name"] = self.context.get("project_name") or "unnamed"
 
         # Tool-specific enhancements
         if tool_name == "create_repository":
             # Ensure repo name reflects resolved project_name
-            enhanced["name"] = enhanced.get("name") or enhanced.get("project_name") or (self.current_checklist.project_name if self.current_checklist else "unnamed")
+            enhanced["name"] = enhanced.get("name") or enhanced.get("project_name") or "unnamed"
         if tool_name in ("setup_cicd_pipeline", "setup_cicd") and "repo_path" not in enhanced:
             enhanced["repo_path"] = f"./{enhanced.get('project_name', 'project')}"
         if tool_name == "apply_template":
@@ -2038,12 +1334,12 @@ Extract:
                 enhanced["template"] = "fastapi-microservice"
         if tool_name == "validate_project_name_and_type":
             # Ensure both fields present for robust validation
-            if not enhanced.get("project_type") and self.current_checklist:
-                enhanced["project_type"] = self.current_checklist.project_type
+            if not enhanced.get("project_type"):
+                enhanced["project_type"] = self.context.get("project_type")
         if tool_name == "generate_k8s_manifests" and "service_name" not in enhanced:
             enhanced["service_name"] = enhanced.get("project_name", "service")
         if tool_name == "setup_observability" and "project_name" not in enhanced:
-            enhanced["project_name"] = self.current_checklist.project_name if self.current_checklist else enhanced.get("project_name", "project")
+            enhanced["project_name"] = enhanced.get("project_name", self.context.get("project_name", "project"))
         
         return enhanced
     
@@ -2069,7 +1365,6 @@ Extract:
         
         state_data = {
             "context": self.context,
-            "checklist": self.current_checklist,
             "react_history": self.react_history,
             "step_counter": self.step_counter
         }
@@ -2080,7 +1375,6 @@ Extract:
         """Restore agent from saved state"""
         
         self.context = state_data.get("context", {})
-        self.current_checklist = state_data.get("checklist")
         self.react_history = state_data.get("react_history", [])
         self.step_counter = state_data.get("step_counter", 0)
         
@@ -2088,22 +1382,7 @@ Extract:
                         session_id=self.session_id,
                         step=self.step_counter)
     
-    async def _mark_current_item_failed(self, error: str):
-        """Mark current in-progress item as failed"""
-        
-        if not self.current_checklist:
-            return
-        
-        for item in self.current_checklist.items:
-            if item.status == ChecklistItemStatus.IN_PROGRESS:
-                await self.checklist_manager.update_item_status(
-                    self.current_checklist,
-                    item.id,
-                    ChecklistItemStatus.FAILED,
-                    result=f"Failed: {error}",
-                    error_details={"error": error}
-                )
-                break
+    ## Legacy mark-current-item-failed removed (Markdown-only flow)
 
 # ==================== SYSTEM PROMPTS ====================
 # Imported from capstone/prototype/prompt.py
