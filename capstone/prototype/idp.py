@@ -28,6 +28,12 @@ except Exception:
     from tools import ToolSpec, export_openai_tools, find_tool, execute_tool_by_name  # type: ignore
     from tools_builtin import BUILTIN_TOOLS  # type: ignore
 
+# System prompt import
+try:
+    from .prompt import IDP_COPILOT_SYSTEM_PROMPT, IDP_COPILOT_SYSTEM_PROMPT_GIT
+except Exception:
+    from prompt import IDP_COPILOT_SYSTEM_PROMPT, IDP_COPILOT_SYSTEM_PROMPT_GIT  # type: ignore
+
 # External dependencies (requirements.txt)
 # pip install pydantic langchain openai anthropic structlog prometheus-client circuitbreaker aiofiles
 
@@ -1082,6 +1088,8 @@ class ProductionReActAgent:
         self.session_id = None
         
         self.logger = structlog.get_logger()
+        # Compose dynamic tools documentation into the system prompt for better LLM guidance
+        self.system_prompt_full = self._compose_system_prompt(system_prompt)
     
     async def process_request(self, user_input: str, session_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """Process user request with streaming progress"""
@@ -1207,7 +1215,7 @@ Think step by step about what needs to be done."""
         try:
             thought = await self.llm.generate_response(
                 prompt, 
-                system_prompt=self.system_prompt
+                system_prompt=self.system_prompt_full
             )
             return thought
         except Exception as e:
@@ -1274,7 +1282,7 @@ Think step by step about what needs to be done."""
                     model=self.llm.model,
                     temperature=self.llm.temperature,
                     messages=[
-                        {"role": "system", "content": self.system_prompt},
+                        {"role": "system", "content": self.system_prompt_full},
                         {"role": "user", "content": f"Context:\n{context_summary}\n\nChecklist status: {checklist_status}\nDecide the next action and call exactly one function. If a checklist exists and a next executable item is available, you must call the function for exactly that item's tool. Do not select any other tool."},
                     ],
                     tools=all_tools,
@@ -1357,7 +1365,7 @@ Determine the most appropriate next action with clear reasoning."""
             action_decision = await self.llm.generate_structured_response(
                 prompt,
                 ActionDecision,
-                system_prompt=self.system_prompt
+                system_prompt=self.system_prompt_full
             )
             # Respect ASK_USER; otherwise, if no checklist exists, create it first
             if action_decision.action_type != ActionType.ASK_USER and self.current_checklist is None:
@@ -1382,7 +1390,12 @@ Determine the most appropriate next action with clear reasoning."""
     async def _execute_action_with_retry(self, action_decision: ActionDecision, 
                                         max_retries: int = 3) -> str:
         """Execute action with retry logic"""
-        
+        # Limit retries for repository creation in Git iteration
+        if action_decision.action_type == ActionType.TOOL_CALL and action_decision.action_name:
+            name_norm = action_decision.action_name.strip().lower().replace("-", "_").replace(" ", "_")
+            if name_norm == "create_repository":
+                max_retries = 1
+
         for attempt in range(max_retries):
             try:
                 result = await self._execute_action(
@@ -1471,13 +1484,13 @@ Project Type: {project_info.project_type}
 Project Name: {project_info.project_name}
 Requirements: {json.dumps(project_info.requirements)}
 
-Generate a comprehensive checklist with all necessary steps, dependencies, and required tools."""
+Generate a comprehensive checklist with all necessary steps, dependencies, and required tools. Each item must include a 'tool' field set to one of the allowed tools for this iteration and should reflect the Git-only scope when applicable."""
             
             try:
                 checklist_data = await self.llm.generate_structured_response(
                     checklist_prompt,
                     ChecklistGeneration,
-                    system_prompt=self.system_prompt
+                    system_prompt=self.system_prompt_full
                 )
                 
                 # Build checklist object
@@ -1495,28 +1508,23 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
                 self.logger.error("checklist_creation_failed", error=str(e))
                 # Fallback: create a minimal viable checklist so the workflow can proceed
                 try:
+                    # Strict Git-scope fallback: two steps only
                     fallback_data = ChecklistGeneration(
                         items=[
                             {
-                                "title": "Create Repository",
-                                "description": "Create GitHub repository",
+                                "title": "Validate project name",
+                                "description": "Validate project name and type",
                                 "dependencies": [],
-                                "tool": "create_repository"
+                                "tool": "validate_project_name_and_type"
                             },
                             {
-                                "title": "Apply Template",
-                                "description": "Apply microservice template",
+                                "title": "Create repository",
+                                "description": "Create local Git repo, initial commit, create/push remote if possible",
                                 "dependencies": ["1"],
-                                "tool": "apply_template"
-                            },
-                            {
-                                "title": "Setup CI/CD",
-                                "description": "Configure pipeline",
-                                "dependencies": ["2"],
-                                "tool": "setup_cicd_pipeline"
+                                "tool": "create_repository"
                             }
                         ],
-                        estimated_duration=30,
+                        estimated_duration=10,
                         risk_level="low"
                     )
                     self.current_checklist = await self._build_checklist(project_info, fallback_data)
@@ -1646,6 +1654,24 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
                 result_text,
                 error_details={"error": result.get("error")} if not result.get("success") else None
             )
+
+        # Detect blocking errors and set context flags to steer next step to ASK_USER
+        try:
+            err_text = str(result.get("error", ""))
+            if "already exists and is not empty" in err_text.lower():
+                self.context["blocker"] = {
+                    "type": "dir_conflict",
+                    "message": err_text,
+                    "suggestion": "Choose a different project name or remove/empty the existing directory."
+                }
+            elif "github_token is not set" in err_text.lower():
+                self.context["blocker"] = {
+                    "type": "missing_github_token",
+                    "message": err_text,
+                    "suggestion": "Set GITHUB_TOKEN and optionally GITHUB_ORG/OWNER, then retry."
+                }
+        except Exception:
+            pass
         
         return f"Tool '{tool_name}' execution: {json.dumps(result, indent=2)}"
     
@@ -1826,17 +1852,28 @@ Extract:
             for status, count in status_counts.items():
                 summary += f"  - {status}: {count}\n"
             
+            # Include concise checklist snapshot for LLM
+            summary += "Checklist Items (id, status, title, tool, deps):\n"
+            for item in self.current_checklist.items[:15]:
+                deps = ",".join(item.dependencies) if item.dependencies else "-"
+                tool = item.tool_action or "-"
+                summary += f"  - {item.id} | {item.status.value} | {item.title} | tool: {tool} | deps: {deps}\n"
+            if len(self.current_checklist.items) > 15:
+                summary += f"  ... and {len(self.current_checklist.items) - 15} more\n"
+
             # Current/next item
             next_item = self._get_next_executable_item()
             if next_item:
                 summary += f"Next Item: {next_item.id} - {next_item.title}\n"
+            if self.context.get("checklist_file"):
+                summary += f"Checklist File: {self.context.get('checklist_file')}\n"
         else:
             summary += "Checklist: Not created yet\n"
         
         # Recent history
         if self.react_history:
-            summary += f"Recent Actions:\n"
-            for action in self.react_history[-3:]:
+            summary += f"Recent Actions (last 10):\n"
+            for action in self.react_history[-10:]:
                 summary += f"  - {action}\n"
         
         return summary
@@ -1887,6 +1924,25 @@ Extract:
             self.logger.warning("no_next_item_but_pending", session_id=self.session_id)
         
         return "Waiting for next action"
+
+    def _compose_system_prompt(self, base_prompt: str) -> str:
+        """Append dynamic tools documentation to the base system prompt."""
+        try:
+            lines = [base_prompt.strip(), "\n## TOOLS (dynamic)\nList of available tools with input requirements:\n"]
+            for spec in self.tools:
+                # Derive required keys from input_schema
+                required = []
+                try:
+                    required = list((spec.input_schema or {}).get("required", []))
+                except Exception:
+                    required = []
+                lines.append(f"- {spec.name}: {spec.description}")
+                if required:
+                    lines.append(f"  required: {', '.join(required)}")
+            lines.append("\nUsage rules:\n- Use only listed tools.\n- Checklist items must include 'tool' exactly matching a tool name.\n- After each tool run, update the checklist.\n- On blocking errors (directory conflict, missing GITHUB_TOKEN), ASK_USER with concrete next steps.\n- Limit retries for create_repository to 1.")
+            return "\n".join(lines)
+        except Exception:
+            return base_prompt
     
     def _get_next_executable_item(self) -> Optional[ChecklistItem]:
         """Get next item that can be executed"""
@@ -2050,77 +2106,7 @@ Extract:
                 break
 
 # ==================== SYSTEM PROMPTS ====================
-
-IDP_COPILOT_SYSTEM_PROMPT = """You are an advanced Internal Developer Platform (IDP) Copilot Agent with production-grade capabilities.
-
-## CORE RESPONSIBILITIES:
-1. Analyze developer requests for creating development projects (microservices, libraries, applications)
-2. Create detailed, executable checklists with proper dependency management
-3. Execute automation tools with retry logic and error handling
-4. Maintain persistent state for workflow recovery
-5. Provide real-time progress updates and handle failures gracefully
-
-## WORKFLOW PRINCIPLES:
-- **Reliability First**: Always handle errors gracefully and provide recovery options
-- **Transparency**: Keep users informed of progress and any issues
-- **Automation**: Maximize automation while maintaining quality
-- **Best Practices**: Apply industry standards and organizational guidelines
-- **Idempotency**: Ensure operations can be safely retried
-
-## PROJECT TYPE WORKFLOWS:
-
-### Microservice:
-1. Validate project requirements and naming
-2. Search knowledge base for guidelines
-3. Create Git repository with branch protection
-4. Apply microservice template
-5. Configure CI/CD pipeline
-6. Set up monitoring and logging
-7. Create Kubernetes manifests
-8. Deploy to staging environment
-9. Run integration tests
-10. Generate documentation
-
-### Library:
-1. Validate library name and purpose
-2. Create repository with library template
-3. Set up package configuration
-4. Configure testing framework
-5. Set up publishing pipeline
-6. Create example usage
-7. Generate API documentation
-
-### Frontend Application:
-1. Validate application requirements
-2. Create repository
-3. Apply frontend framework template
-4. Set up build system
-5. Configure CDN and deployment
-6. Set up E2E testing
-7. Create staging deployment
-
-## DECISION FRAMEWORK:
-- Missing critical information → ASK_USER with specific questions
-- No checklist exists → CREATE_CHECKLIST based on project type
-- Checklist has executable items → TOOL_CALL for next item
-- Tool execution failed → ERROR_RECOVERY with retry or skip
-- All items complete/skipped → COMPLETE with summary
-
-## ERROR HANDLING STRATEGY:
-1. **Retry with backoff**: For transient failures (network, timeouts)
-2. **Parameter adjustment**: For validation failures (invalid names, missing params)
-3. **Skip and continue**: For non-critical failures with blocked dependencies
-4. **Escalate to user**: For critical failures requiring manual intervention
-
-## TOOL INTERACTION:
-- Always validate tool parameters before execution
-- Use appropriate timeouts based on operation type
-- Collect structured feedback for continuous improvement
-- Update checklist status after every tool execution
-
-If KB Guidelines: no → use standard templates and default organizational policies.
-
-Remember: You are a production system. Prioritize reliability, observability, and user experience."""
+# Imported from capstone/prototype/prompt.py
 
 # ==================== MAIN EXECUTION ====================
 
@@ -2133,47 +2119,14 @@ async def main():
     # Initialize LLM provider with fallback to mock if no API key
     openai_key = os.getenv("OPENAI_API_KEY")
     
-    # For demo, using a mock provider if no key present
-    class MockLLMProvider(LLMProvider):
-        async def generate_response(self, prompt: str, **kwargs) -> str:
-            await asyncio.sleep(0.2)
-            return "I should analyze the request and create a microservice workflow."
-        
-        async def generate_structured_response(self, prompt: str, response_model: BaseModel, **kwargs):
-            await asyncio.sleep(0.2)
-            if response_model == ActionDecision:
-                return ActionDecision(
-                    action_type=ActionType.UPDATE_CHECKLIST,
-                    action_name="create_checklist",
-                    parameters={},
-                    reasoning="Need to create initial checklist",
-                    confidence=0.9
-                )
-            if response_model == ProjectInfo:
-                return ProjectInfo(
-                    project_name="payment-processor",
-                    project_type="microservice",
-                    programming_language="python"
-                )
-            if response_model == ChecklistGeneration:
-                return ChecklistGeneration(
-                    items=[
-                        {"title": "Create Repository", "description": "Create GitHub repository", "dependencies": [], "tool": "create_repository"},
-                        {"title": "Apply Template", "description": "Apply microservice template", "dependencies": ["1"], "tool": "apply_template"},
-                        {"title": "Setup CI/CD", "description": "Configure pipeline", "dependencies": ["2"], "tool": "setup_cicd_pipeline"},
-                    ],
-                    estimated_duration=30,
-                    risk_level="low",
-                )
-    
     if openai_key:
         llm_provider = OpenAIProvider(api_key=openai_key)
     else:
-        llm_provider = MockLLMProvider()
+        raise ValueError("OPENAI_API_KEY is not set")
     
     # Initialize agent
     agent = ProductionReActAgent(
-        system_prompt=IDP_COPILOT_SYSTEM_PROMPT,
+        system_prompt=IDP_COPILOT_SYSTEM_PROMPT_GIT,
         llm_provider=llm_provider,
     )
     
