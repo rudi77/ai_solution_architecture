@@ -531,6 +531,8 @@ class ProductionReActAgent:
                 # Generate thought
                 thought = await self._generate_thought()
                 yield f"💭 Thinking: {thought}\n"
+                # Make thought available to action selection
+                self.context["last_thought"] = thought
                 
                 # Determine action
                 action_decision = await self._determine_action()
@@ -637,7 +639,7 @@ Think step by step about what needs to be done."""
                     temperature=self.llm.temperature,
                     messages=[
                         {"role": "system", "content": self.system_prompt_full},
-                        {"role": "user", "content": f"Context:\n{context_summary}\n\nChecklist status: {checklist_status}\nDecide the next action and call exactly one function. If a checklist exists and a next executable item is available, you must call the function for exactly that item's tool. Do not select any other tool."},
+                        {"role": "user", "content": f"Context:\n{context_summary}\n\nChecklist status: {checklist_status}\nRecent reasoning: {self.context.get('last_thought', '')}\nDecide the next action and call exactly one function. If a checklist exists and a next executable item is available, you must call the function for exactly that item's tool. Do not select any other tool."},
                     ],
                     tools=all_tools,
                     tool_choice="auto",
@@ -720,6 +722,8 @@ Think step by step about what needs to be done."""
 {context_summary}
 
 Checklist status: {checklist_status}
+
+Recent reasoning: {self.context.get('last_thought', '')}
 
 Available actions:
 - UPDATE_CHECKLIST: Create or modify the workflow checklist
@@ -1267,81 +1271,8 @@ Extract:
     ## Legacy next-executable resolver removed (Markdown-only flow)
     
     def _enhance_tool_parameters(self, tool_name: str, parameters: Dict) -> Dict:
-        """Enhance tool parameters with context"""
-        
-        enhanced = parameters.copy()
-        
-        # Add project context from Markdown-based context
-        if self.context.get("project_name"):
-            enhanced["project_name"] = self.context.get("project_name")
-        if self.context.get("project_type"):
-            enhanced["project_type"] = self.context.get("project_type")
-        enhanced["session_id"] = self.session_id
-        
-        # Parameter normalization: detect swapped project_name/project_type and set sane defaults
-        try:
-            allowed_types = {"microservice", "library", "application", "frontend", "backend", "generic"}
-            name_pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-            pn = enhanced.get("project_name")
-            pt = enhanced.get("project_type")
-
-            # Helper: kebab-case normalization
-            def _kebab_case(value: str) -> str:
-                return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
-
-            # If project_name is missing or equals a known type, repair from checklist
-            if (pn is None or (isinstance(pn, str) and pn.lower() in allowed_types)) and self.context.get("project_name"):
-                enhanced["project_name"] = self.context.get("project_name")
-                pn = enhanced["project_name"]
-
-            # If project_type is missing, take from checklist
-            if (pt is None or pt == "") and self.context.get("project_type"):
-                enhanced["project_type"] = self.context.get("project_type")
-                pt = enhanced["project_type"]
-
-            # Detect swapped name/type
-            if isinstance(pn, str) and isinstance(pt, str):
-                looks_like_type = pn.lower() in allowed_types
-                looks_like_name = bool(name_pattern.match(pt))
-                if looks_like_type and looks_like_name:
-                    enhanced["project_name"], enhanced["project_type"] = pt, pn
-                    pn, pt = enhanced["project_name"], enhanced["project_type"]
-
-            # Normalize kebab-case for project_name
-            if isinstance(enhanced.get("project_name"), str):
-                enhanced["project_name"] = _kebab_case(enhanced["project_name"]) or "unnamed"
-
-            # Prevent generic placeholders from leaking to tools by repairing from checklist
-            generic_names = {"service", "microservice", "application", "app", "project"}
-            if isinstance(enhanced.get("project_name"), str) and enhanced["project_name"].lower() in generic_names:
-                enhanced["project_name"] = self.context.get("project_name") or "unnamed"
-        except Exception:
-            pass
-
-        if not enhanced.get("project_name"):
-            enhanced["project_name"] = self.context.get("project_name") or "unnamed"
-
-        # Tool-specific enhancements
-        if tool_name == "create_repository":
-            # Ensure repo name reflects resolved project_name
-            enhanced["name"] = enhanced.get("name") or enhanced.get("project_name") or "unnamed"
-        if tool_name in ("setup_cicd_pipeline", "setup_cicd") and "repo_path" not in enhanced:
-            enhanced["repo_path"] = f"./{enhanced.get('project_name', 'project')}"
-        if tool_name == "apply_template":
-            if "target_path" not in enhanced:
-                enhanced["target_path"] = f"./{enhanced.get('project_name', 'project')}"
-            if "template" not in enhanced or not enhanced.get("template"):
-                enhanced["template"] = "fastapi-microservice"
-        if tool_name == "validate_project_name_and_type":
-            # Ensure both fields present for robust validation
-            if not enhanced.get("project_type"):
-                enhanced["project_type"] = self.context.get("project_type")
-        if tool_name == "generate_k8s_manifests" and "service_name" not in enhanced:
-            enhanced["service_name"] = enhanced.get("project_name", "service")
-        if tool_name == "setup_observability" and "project_name" not in enhanced:
-            enhanced["project_name"] = enhanced.get("project_name", self.context.get("project_name", "project"))
-        
-        return enhanced
+        """No-op: keep agent generic by not auto-modifying tool parameters."""
+        return parameters if isinstance(parameters, dict) else {}
     
     async def _update_context(self, action_decision: ActionDecision, observation: str):
         """Update context after action execution"""
