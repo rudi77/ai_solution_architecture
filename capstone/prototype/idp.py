@@ -21,6 +21,12 @@ import hashlib
 from collections import defaultdict
 import re
 from functools import partial
+try:
+    from .tools import ToolSpec, export_openai_tools, find_tool, execute_tool_by_name
+    from .tools_builtin import BUILTIN_TOOLS
+except Exception:
+    from tools import ToolSpec, export_openai_tools, find_tool, execute_tool_by_name  # type: ignore
+    from tools_builtin import BUILTIN_TOOLS  # type: ignore
 
 # External dependencies (requirements.txt)
 # pip install pydantic langchain openai anthropic structlog prometheus-client circuitbreaker aiofiles
@@ -1060,10 +1066,10 @@ class EnhancedChecklistManager:
 class ProductionReActAgent:
     """Production-ready ReAct Agent with all enhancements"""
     
-    def __init__(self, system_prompt: str, llm_provider: LLMProvider):
+    def __init__(self, system_prompt: str, llm_provider: LLMProvider, tools: Optional[List[ToolSpec]] = None):
         self.system_prompt = system_prompt
         self.llm = llm_provider
-        self.tools = EnhancedToolRegistry()
+        self.tools: List[ToolSpec] = tools or BUILTIN_TOOLS
         self.checklist_manager = EnhancedChecklistManager()
         self.state_manager = StateManager()
         self.feedback_collector = FeedbackCollector()
@@ -1221,7 +1227,7 @@ Think step by step about what needs to be done."""
             from openai import APIConnectionError  # type: ignore
             # Only attempt if our LLM provider supports OpenAI function calling
             if isinstance(self.llm, OpenAIProvider):
-                tools = self.tools.export_openai_tools()
+                tools = export_openai_tools(self.tools)
                 # Also expose meta-actions as functions with no/loose params
                 # Gate meta-actions when a next executable checklist step exists to prevent drift
                 meta_actions = []
@@ -1312,9 +1318,9 @@ Think step by step about what needs to be done."""
                     if self.current_checklist:
                         next_item = self._get_next_executable_item()
                         if next_item and decided.action_type == ActionType.TOOL_CALL:
-                            req = self.tools.resolve_tool_name(decided.action_name.strip().lower().replace("-", "_").replace(" ", "_"))
-                            exp = self.tools.resolve_tool_name((next_item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_"))
-                            if exp and req != exp:
+                            req_spec = find_tool(self.tools, decided.action_name.strip().lower().replace("-", "_").replace(" ", "_"))
+                            exp_spec = find_tool(self.tools, (next_item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_"))
+                            if exp_spec and (not req_spec or req_spec.name != exp_spec.name):
                                 decided.action_name = next_item.tool_action
                                 decided.parameters = next_item.tool_params or {}
                                 decided.reasoning = "Enforced next checklist item to prevent drift"
@@ -1558,9 +1564,9 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
             checklist_msg = await self._handle_checklist_action("create_checklist", {})
             return f"Checklist was missing. {checklist_msg}\nWill proceed with tool execution next."
 
-        # Normalize tool name to improve robustness
+        # Normalize tool name and resolve via ToolSpec list
         normalized_tool_name = tool_name.strip().lower().replace("-", "_").replace(" ", "_")
-        resolved_requested = self.tools.resolve_tool_name(normalized_tool_name)
+        requested_spec = find_tool(self.tools, normalized_tool_name)
         
         # Find corresponding checklist item (exact or normalized match)
         current_item = None
@@ -1569,12 +1575,11 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
                 if item.status not in [ChecklistItemStatus.PENDING, ChecklistItemStatus.RETRYING]:
                     continue
                 item_name_normalized = (item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_")
-                # Resolve both sides through alias map; match if they map to the same underlying tool
-                resolved_item = self.tools.resolve_tool_name(item_name_normalized) if item_name_normalized else ""
+                item_spec = find_tool(self.tools, item_name_normalized) if item_name_normalized else None
                 if (
                     item.tool_action == tool_name
                     or item_name_normalized == normalized_tool_name
-                    or (resolved_item and resolved_requested and resolved_item == resolved_requested)
+                    or (item_spec and requested_spec and item_spec.name == requested_spec.name)
                 ):
                     current_item = item
                     break
@@ -1590,23 +1595,22 @@ Generate a comprehensive checklist with all necessary steps, dependencies, and r
         # Enforce executing the current checklist item's tool if there is a mismatch
         if current_item and current_item.tool_action:
             expected_tool = (current_item.tool_action or "").strip().lower().replace("-", "_").replace(" ", "_")
-            resolved_expected = self.tools.resolve_tool_name(expected_tool)
-            if resolved_expected and resolved_requested != resolved_expected:
+            expected_spec = find_tool(self.tools, expected_tool)
+            if expected_spec and (not requested_spec or requested_spec.name != expected_spec.name):
                 normalized_tool_name = expected_tool
-                resolved_requested = resolved_expected
+                requested_spec = expected_spec
         
         # Enhance parameters with context
         enhanced_params = self._enhance_tool_parameters(normalized_tool_name, parameters)
         
         # Execute tool
-        result = await self.tools.execute_tool_async(normalized_tool_name, enhanced_params)
-        # If not found, try original name as fallback (defensive)
+        result = await execute_tool_by_name(self.tools, normalized_tool_name, enhanced_params)
         if not result.get("success") and isinstance(result.get("error"), str) and "not found" in result.get("error", ""):
-            result = await self.tools.execute_tool_async(tool_name, enhanced_params)
+            result = await execute_tool_by_name(self.tools, tool_name, enhanced_params)
 
         # Knowledge Base handling: empty matches are non-blocker; set context flag
         try:
-            if resolved_requested in ("search_knowledge_base_for_guidelines", "search_knowledge_base"):
+            if requested_spec and requested_spec.name in {"search_knowledge_base_for_guidelines", "search_knowledge_base"}:
                 matches = []
                 if isinstance(result, dict):
                     matches = (result.get("result", {}) or {}).get("matches", []) or []
