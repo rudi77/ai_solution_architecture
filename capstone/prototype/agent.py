@@ -100,6 +100,9 @@ class ReActAgent:
         self.react_history: List[str] = []
         self.step = 0
 
+        # Loop-Guard: keep recent action/observation signatures to detect repetition
+        self._loop_signatures: List[str] = []
+
         self.system_prompt = self._compose_system_prompt()
 
     async def process_request(self, user_input: str, session_id: Optional[str] = None) -> AsyncGenerator[str, None]:
@@ -219,6 +222,23 @@ class ReActAgent:
             step_duration.labels(step_type=decision.action_type.value).observe(time.time() - started)
 
             yield f"👀 Observation:\n{observation}\n"
+
+            # Loop-Guard: Detect three identical action/observation pairs in a row
+            try:
+                if self._record_and_check_loop(decision, observation, window_size=3):
+                    msg = await self._handle_user_interaction(
+                        "ask_user",
+                        {
+                            "questions": [
+                                "Ich erkenne wiederholte, wirkungslose Schritte. Hast du zusätzliche Informationen oder soll ich die Strategie ändern?"
+                            ],
+                            "context": "Loop-Guard: Drei identische Aktionen/Observations in Folge erkannt."
+                        },
+                    )
+                    yield f"❓ {msg}\n"
+                    break
+            except Exception as e:
+                self.logger.warning("loop_guard_failed", error=str(e))
 
             await self._update_context(decision, observation)
             if decision.action_type in {ActionType.COMPLETE, ActionType.ASK_USER}:
@@ -582,6 +602,26 @@ class ReActAgent:
         self.react_history.append(f"{decision.action_name} -> {observation[:100]}")
         if len(self.react_history) > 32:
             self.react_history = self.react_history[-32:]
+
+    def _record_and_check_loop(self, decision: ActionDecision, observation: str, *, window_size: int = 3) -> bool:
+        """
+        Record a normalized signature of the (action, observation) pair and
+        return True if the last `window_size` signatures are identical.
+        """
+        sig = self._signature_for_loop(decision, observation)
+        self._loop_signatures.append(sig)
+        if len(self._loop_signatures) > window_size:
+            self._loop_signatures = self._loop_signatures[-window_size:]
+        if len(self._loop_signatures) == window_size and len(set(self._loop_signatures)) == 1:
+            return True
+        return False
+
+    def _signature_for_loop(self, decision: ActionDecision, observation: str) -> str:
+        # Normalize observation to reduce noise and truncate to a stable prefix
+        obs = observation.strip().lower()
+        obs = re.sub(r"\s+", " ", obs)
+        obs = obs[:160]
+        return f"{decision.action_type.value}|{decision.action_name.lower()}|{obs}"
 
     async def _save(self):
         await self.state.save_state(self.session_id, {
