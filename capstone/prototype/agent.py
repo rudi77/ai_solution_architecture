@@ -464,7 +464,19 @@ class ReActAgent:
         except Exception:
             pass
 
+        # Instrumentation: execution time, success/failure counters
+        started_at = time.time()
         result = await execute_tool_by_name(self.tools, norm, params)
+        duration = time.time() - started_at
+        try:
+            tool_execution_time.labels(tool_name=norm).observe(duration)
+            if bool(result.get("success")):
+                tool_success_rate.labels(tool_name=norm).inc()
+            else:
+                tool_failure_rate.labels(tool_name=norm).inc()
+        except Exception:
+            # Metrics must never break the agent
+            pass
         success = bool(result.get("success"))
         status = "COMPLETED" if success else "FAILED"
         result_text = json.dumps(result, ensure_ascii=False)
