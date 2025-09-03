@@ -5,13 +5,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
-# Import agent and providers from prototype
-try:
-	from ...prototype.idp import ProductionReActAgent, OpenAIProvider
-except Exception:  # pragma: no cover
-	from capstone.prototype.idp import ProductionReActAgent, OpenAIProvider
 
-from .idp_tools import get_idp_tools
+from capstone.examples.idp_pack.idp_tools import get_idp_tools
+from capstone.prototype.idp import ReActAgent, OpenAIProvider
+
 
 
 def load_text(path: Path) -> str:
@@ -28,7 +25,7 @@ async def main() -> None:
 	openai_key = os.getenv("OPENAI_API_KEY")
 
 	provider = OpenAIProvider(api_key=openai_key)  # placeholder; relies on env var in provider
-	agent = ProductionReActAgent(
+	agent = ReActAgent(
 		system_prompt=system_prompt,
 		llm_provider=provider,
 		tools=get_idp_tools(),
