@@ -32,7 +32,6 @@ async def create_todolist(
     context: Dict[str, Any],
     system_prompt: str,
     session_id: Optional[str],
-    extract_project_info: Callable[[], Awaitable[Any]],
     logger: Any,
 ) -> str:
     """Create a Todo List using the Markdown helper and update the agent context.
@@ -40,14 +39,22 @@ async def create_todolist(
     Best-effort fallback is attempted on failure; context keys remain
     backward-compatible (both todolist_* and checklist_* are maintained).
     """
-    project_info = await extract_project_info()
+    # Derive generic project info from context/user request to keep agent generic
+    user_request = context.get("user_request", "") or ""
+    # Simple slug from request
+    try:
+        lower = str(user_request).strip().lower()
+        filtered = "".join(ch if (ch.isalnum() or ch in {" ", "-"}) else " " for ch in lower)
+        words = [w for w in filtered.split() if w]
+        project_name = "-".join(words[:6]) or "project"
+    except Exception:
+        project_name = "project"
+    project_type = "generic"
+    requirements: Dict[str, Any] = {}
     try:
         filepath = await create_todolist_md(
             llm,
-            project_name=project_info.project_name,
-            project_type=project_info.project_type,
-            user_request=context.get("user_request", ""),
-            requirements=project_info.requirements,
+            user_request=user_request,
             system_prompt=system_prompt,
             session_id=session_id,
         )
@@ -56,8 +63,7 @@ async def create_todolist(
         # Back-compat keys
         context["checklist_created"] = True
         context["checklist_file"] = filepath
-        context["project_name"] = project_info.project_name
-        context["project_type"] = project_info.project_type
+        # No project metadata in checklist-only mode
         return f"Created Todo List (saved to {filepath})"
 
     except Exception as e:
@@ -65,10 +71,7 @@ async def create_todolist(
         try:
             filepath = await create_todolist_md(
                 llm,
-                project_name=project_info.project_name,
-                project_type=project_info.project_type,
-                user_request=context.get("user_request", ""),
-                requirements=project_info.requirements,
+                user_request=user_request,
                 system_prompt=system_prompt,
                 session_id=session_id,
             )
@@ -89,16 +92,12 @@ async def update_item_status(
     system_prompt: str,
     session_id: Optional[str],
     parameters: Dict[str, Any],
-    extract_project_info: Optional[Callable[[], Awaitable[Any]]] = None,
 ) -> str:
     """Update a specific item in the Todo List via the Markdown helper.
 
     Expected parameters: item_id, status, notes (optional), result (optional).
     """
-    project_name = context.get("project_name")
-    if not project_name and extract_project_info is not None:
-        info = await extract_project_info()
-        project_name = info.project_name
+    # Checklist-only mode does not require project name; all ops are session-based
 
     item_id = parameters.get("item_id")
     status_text = parameters.get("status")
@@ -114,7 +113,6 @@ async def update_item_status(
 
     filepath = await update_todolist_md(
         llm,
-        project_name=project_name,
         instruction=instruction,
         system_prompt=system_prompt,
         session_id=session_id,
