@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Optional, Callable, Awaitable
+
+
+# Prefer todolist helpers; aliases exist elsewhere for checklist compatibility
+try:  # pragma: no cover - import shim
+    from .todolist_md import create_todolist_md, update_todolist_md  # type: ignore
+except Exception:  # pragma: no cover - runtime import fallback
+    from todolist_md import create_todolist_md, update_todolist_md  # type: ignore
+
+
+def normalize_todolist_action_name(action_name: str) -> str:
+    """Normalize common LLM variants to canonical todolist action names.
+
+    Returns the normalized action name (e.g., "create_todolist").
+    """
+    normalized = action_name.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in (
+        "create_todolist",
+        "create_checklist",
+        "create_microservice_checklist",
+        "create_a_microservice_checklist",
+    ):
+        return "create_todolist"
+    return normalized
+
+
+async def create_todolist(
+    *,
+    llm: Any,
+    context: Dict[str, Any],
+    system_prompt: str,
+    session_id: Optional[str],
+    extract_project_info: Callable[[], Awaitable[Any]],
+    logger: Any,
+) -> str:
+    """Create a Todo List using the Markdown helper and update the agent context.
+
+    Best-effort fallback is attempted on failure; context keys remain
+    backward-compatible (both todolist_* and checklist_* are maintained).
+    """
+    project_info = await extract_project_info()
+    try:
+        filepath = await create_todolist_md(
+            llm,
+            project_name=project_info.project_name,
+            project_type=project_info.project_type,
+            user_request=context.get("user_request", ""),
+            requirements=project_info.requirements,
+            system_prompt=system_prompt,
+            session_id=session_id,
+        )
+        context["todolist_created"] = True
+        context["todolist_file"] = filepath
+        # Back-compat keys
+        context["checklist_created"] = True
+        context["checklist_file"] = filepath
+        context["project_name"] = project_info.project_name
+        context["project_type"] = project_info.project_type
+        return f"Created Todo List (saved to {filepath})"
+
+    except Exception as e:
+        logger.error("todolist_creation_failed", error=str(e))
+        try:
+            filepath = await create_todolist_md(
+                llm,
+                project_name=project_info.project_name,
+                project_type=project_info.project_type,
+                user_request=context.get("user_request", ""),
+                requirements=project_info.requirements,
+                system_prompt=system_prompt,
+                session_id=session_id,
+            )
+            context["todolist_created"] = True
+            context["todolist_file"] = filepath
+            context["checklist_created"] = True
+            context["checklist_file"] = filepath
+            return f"Created minimal Todo List (saved to {filepath}). Original error: {e}"
+        except Exception as inner_e:
+            logger.error("todolist_fallback_failed", error=str(inner_e))
+            return f"Failed to create Todo List: {e}"
+
+
+async def update_item_status(
+    *,
+    llm: Any,
+    context: Dict[str, Any],
+    system_prompt: str,
+    session_id: Optional[str],
+    parameters: Dict[str, Any],
+    extract_project_info: Optional[Callable[[], Awaitable[Any]]] = None,
+) -> str:
+    """Update a specific item in the Todo List via the Markdown helper.
+
+    Expected parameters: item_id, status, notes (optional), result (optional).
+    """
+    project_name = context.get("project_name")
+    if not project_name and extract_project_info is not None:
+        info = await extract_project_info()
+        project_name = info.project_name
+
+    item_id = parameters.get("item_id")
+    status_text = parameters.get("status")
+    notes = parameters.get("notes")
+    result_txt = parameters.get("result")
+
+    instruction_parts = [f"Set task {item_id} status to {status_text}."]
+    if notes:
+        instruction_parts.append(f"Add note to task {item_id}: {notes}.")
+    if result_txt:
+        instruction_parts.append(f"Record result for task {item_id}: {result_txt}.")
+    instruction = " ".join(instruction_parts)
+
+    filepath = await update_todolist_md(
+        llm,
+        project_name=project_name,
+        instruction=instruction,
+        system_prompt=system_prompt,
+        session_id=session_id,
+    )
+    context["todolist_file"] = filepath
+    # Back-compat key
+    context["checklist_file"] = filepath
+    return f"Updated Todo List (saved to {filepath})"
+
+
+def get_next_executable_item(*, context: Dict[str, Any]) -> str:
+    """Return a guidance message to open the current Todo List file."""
+    path = context.get("todolist_file") or context.get("checklist_file")
+    return f"Open and follow the Todo List: {path}" if path else "No Todo List created"
+
+
