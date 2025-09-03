@@ -90,7 +90,7 @@ async def main():
     )
     agent = ReActAgent(
         system_prompt=generic_prompt,
-        llm_provider=llm_provider,
+        llm=llm_provider,
         tools=[],
     )
     
