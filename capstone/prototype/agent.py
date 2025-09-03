@@ -10,7 +10,8 @@ import re  # CHANGED: for simple fact extraction (kebab-case)
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from prometheus_client import Counter, Gauge, Histogram
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
+from pydantic import field_validator
 import structlog
 
 from capstone.prototype.feedback_collector import FeedbackCollector
@@ -50,7 +51,7 @@ class ActionDecision(BaseModel):
     reasoning: str = ""
     confidence: float = Field(0.0, ge=0, le=1)
 
-    @validator("action_type", pre=True)
+    @field_validator("action_type", mode="before")
     def _map_old_names(cls, v):
         if isinstance(v, str) and v.lower() == "update_checklist":
             return ActionType.UPDATE_TODOLIST
@@ -71,6 +72,14 @@ class ReActAgent:
         tools: List[ToolSpec] | None = None,
         max_steps: int = 50,
     ):
+        """
+        Initializes the ReActAgent with the given system prompt, LLM provider, tools, and maximum steps.
+        Args:
+            system_prompt: The system prompt for the LLM.
+            llm: The LLM provider.
+            tools: The tools to use.
+            max_steps: The maximum number of steps to take.
+        """
         self.system_prompt_base = system_prompt.strip()
         self.llm = llm
         self.tools: List[ToolSpec] = tools or []  # keine Default-Tools -> generisch
@@ -87,9 +96,26 @@ class ReActAgent:
 
         self.system_prompt = self._compose_system_prompt()
 
-    # ===== public entry =====
     async def process_request(self, user_input: str, session_id: Optional[str] = None) -> AsyncGenerator[str, None]:
-        workflow_counter.inc(); active_workflows.inc()
+        """
+        Verarbeitet eine Benutzeranfrage und liefert schrittweise Status-Updates als asynchronen Generator.
+
+        Diese Methode übernimmt die Steuerung des gesamten Agenten-Workflows für eine Session:
+        - Initialisiert oder lädt den Session-Kontext (inkl. Wiederherstellung eines bestehenden Zustands)
+        - Erkennt, ob auf eine Benutzereingabe gewartet wird, und verarbeitet ggf. die Antwort
+        - Hält den aktuellen Stand der Benutzereingabe und des augmentierten Kontexts aktuell
+        - Startet die eigentliche Verarbeitungsschleife (_react_loop), die die Aufgabenplanung, Tool-Aufrufe und Interaktionen mit dem LLM übernimmt
+        - Gibt nach jedem Verarbeitungsschritt ein Update-String zurück, sodass der Aufrufer den Fortschritt verfolgen kann
+        - Markiert den Workflow als erfolgreich oder fehlgeschlagen und gibt entsprechende Statusmeldungen aus
+        - Sichert am Ende den aktuellen Zustand und spült gesammeltes Feedback asynchron auf die Festplatte
+
+        Args:
+            user_input (str): Die aktuelle Benutzereingabe, die verarbeitet werden soll.
+            session_id (Optional[str]): Eine optionale Sitzungs-ID, um den Zustand zwischen Aufrufen zu persistieren.
+
+        Returns:
+            AsyncGenerator[str, None]: Ein asynchroner Generator, der Status- und Fortschrittsmeldungen als Strings liefert.
+        """
         try:
             self.session_id = session_id or hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
             restored = await self.state.load_state(self.session_id)
@@ -137,6 +163,24 @@ class ReActAgent:
 
     # ===== main ReAct loop =====
     async def _react_loop(self) -> AsyncGenerator[str, None]:
+        """
+        Die Hauptschleife des ReAct-Agenten steuert die gesamte Ausführung des Workflows. 
+        Sie übernimmt folgende Aufgaben:
+        
+        1. Prüft zu Beginn, ob für die Erstellung eines initialen Plans (Todo-Liste) noch zwingend benötigte Informationen vom Nutzer fehlen. 
+           Falls ja, werden diese Fragen gesammelt und dem Nutzer präsentiert, bevor der Plan erstellt wird.
+        2. Erstellt, sofern alle Pflichtangaben vorliegen, eine initiale Todo-Liste und speichert diese im Kontext.
+        3. Durchläuft anschließend einen iterativen ReAct-Zyklus, in dem für jeden Schritt:
+            - Ein neuer Gedanke ("Thought") vom LLM generiert wird, der die aktuelle Situation bewertet.
+            - Basierend darauf eine Aktionsentscheidung getroffen wird (z.B. Tool-Aufruf, Nutzerfrage, Abschluss).
+            - Die gewählte Aktion ausgeführt und das Ergebnis ("Observation") gesammelt wird.
+            - Der Kontext mit den neuen Informationen aktualisiert wird.
+        4. Die Schleife endet, sobald entweder der Workflow abgeschlossen ist (COMPLETE) oder eine Nutzerinteraktion erforderlich wird (ASK_USER).
+        5. Nach jeweils fünf Schritten wird der aktuelle Zustand persistiert.
+        
+        Die Methode liefert fortlaufend Status- und Fortschrittsmeldungen als asynchronen Generator zurück, die z.B. für eine UI oder ein Monitoring genutzt werden können.
+        """
+
         # PLAN-FIRST: Ermittele blocking Fragen; wenn vorhanden -> erst ASK_USER
         if not self.context.get("todolist_created"):
             questions = await self._detect_blocking_questions()
@@ -219,6 +263,9 @@ class ReActAgent:
         Erstellt die Todo-Liste (Markdown) mit:
         - Tasks (atomar, jedes exekutierbare Item enthält `tool: <name>` als Klartext im Task-Text)
         - Sektion „Open Questions (awaiting user)“ mit nicht-kritischen Fragen
+
+        Args:
+            open_questions (List[str]): Eine Liste von Fragen, die vom Nutzer noch beantwortet werden müssen.
         """
         # CHANGED: use augmented request if available
         user_req = self.context.get("user_request_augmented") or self.context.get("user_request", "")
