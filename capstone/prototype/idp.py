@@ -32,7 +32,7 @@ from capstone.prototype.llm_provider import OpenAIProvider
 # External dependencies (requirements.txt)
 # pip install pydantic langchain openai anthropic structlog prometheus-client circuitbreaker aiofiles
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
 from circuitbreaker import circuit
 from opentelemetry import trace
