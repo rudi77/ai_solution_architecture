@@ -18,7 +18,12 @@ from capstone.prototype.feedback_collector import FeedbackCollector
 from capstone.prototype.llm_provider import LLMProvider
 from capstone.prototype.statemanager import StateManager
 from capstone.prototype.todolist_md import update_todolist_md, create_todolist_md  # CHANGED: add create_todolist_md
-from capstone.prototype.tools import ToolSpec, execute_tool_by_name, export_openai_tools, find_tool
+from capstone.prototype.tools import (
+    ToolSpec,
+    export_openai_tools,
+    build_tool_index,
+    execute_tool_by_name_from_index,
+)
 
 # removed: from turtle import tracer  # CHANGED: conflicting with opentelemetry tracer
 from opentelemetry import trace
@@ -83,6 +88,7 @@ class ReActAgent:
         self.system_prompt_base = system_prompt.strip()
         self.llm = llm
         self.tools: List[ToolSpec] = tools or []  # keine Default-Tools -> generisch
+        self.tool_index = build_tool_index(self.tools)
         self.max_steps = max_steps
 
         self.state = StateManager()
@@ -466,7 +472,7 @@ class ReActAgent:
 
         # Instrumentation: execution time, success/failure counters
         started_at = time.time()
-        result = await execute_tool_by_name(self.tools, norm, params)
+        result = await execute_tool_by_name_from_index(self.tool_index, norm, params)
         duration = time.time() - started_at
         try:
             tool_execution_time.labels(tool_name=norm).observe(duration)

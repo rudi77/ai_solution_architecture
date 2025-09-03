@@ -96,3 +96,27 @@ async def execute_tool_by_name(tools: List[ToolSpec], name_or_alias: str, params
     return await execute_tool(spec, params)
 
 
+# === Lookup index helpers ===
+def build_tool_index(tools: List[ToolSpec]) -> Dict[str, ToolSpec]:
+    """Create a lookup index for tools and their aliases using normalized keys.
+
+    Keys normalize hyphens/whitespace and case to ensure consistent resolution.
+    """
+    index: Dict[str, ToolSpec] = {}
+    for tool in tools:
+        index[_normalize(tool.name)] = tool
+        if tool.aliases:
+            for alias in tool.aliases:
+                index[_normalize(alias)] = tool
+    return index
+
+
+async def execute_tool_by_name_from_index(index: Dict[str, ToolSpec], name_or_alias: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute a tool resolved via a prebuilt index. Returns a standard result dict."""
+    if not name_or_alias:
+        return {"success": False, "error": "Tool name is empty"}
+    spec = index.get(_normalize(name_or_alias))
+    if not spec:
+        return {"success": False, "error": f"Tool '{name_or_alias}' not found"}
+    return await execute_tool(spec, params)
+
