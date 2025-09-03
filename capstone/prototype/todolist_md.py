@@ -14,21 +14,17 @@ def _slugify(name: str) -> str:
     return "".join(ch for ch in slug if ch in allowed)
 
 
-def get_todolist_path(project_name: str, session_id: Optional[str] = None, base_dir: str = "./checklists") -> Path:
+def get_todolist_path(session_id: Optional[str] = None, base_dir: str = "./checklists") -> Path:
     todolist_dir = Path(base_dir)
     todolist_dir.mkdir(parents=True, exist_ok=True)
-    slug = _slugify(project_name) or "project"
     sid = session_id or datetime.now().strftime("%Y%m%d%H%M%S")
-    return todolist_dir / f"{slug}_{sid}.md"
+    return todolist_dir / f"todolist_{sid}.md"
 
 
 async def create_todolist_md(
     llm: Any,
     *,
-    project_name: str,
-    project_type: str,
     user_request: str,
-    requirements: Dict[str, Any],
     system_prompt: str,
     session_id: Optional[str] = None,
     base_dir: str = "./checklists",
@@ -39,24 +35,21 @@ async def create_todolist_md(
     """
     prompt = f"""
 You are a senior delivery engineer.
-Create a concise, actionable project implementation Todo List in Markdown.
+Create a concise, actionable Todo List as a pure Markdown checklist.
 
-Constraints:
-- Output ONLY the final Markdown, no explanations.
-- Use simple sections: title, meta (created, last-updated), tasks, notes.
-- Tasks: use checkbox list (- [ ]), stable numeric IDs and short descriptions.
-- Keep it self-contained so it can be updated by future prompts.
+Rules:
+- Output ONLY a checklist. No title, no meta, no notes, no explanations.
+- Each line must be a checkbox item: "- [ ] <short task>".
+- Use stable numeric prefixes like "1.", "2." inside the line to enable referencing tasks later.
+- Keep items short, unambiguous, and implementation-oriented.
 
-Context:
-- Project Name: {project_name}
-- Project Type: {project_type}
-- User Request: {user_request}
-- Requirements: {requirements}
+User Request:
+{user_request}
 """.strip()
 
     md = await llm.generate_response(prompt, system_prompt=system_prompt)
 
-    path = get_todolist_path(project_name, session_id=session_id, base_dir=base_dir)
+    path = get_todolist_path(session_id=session_id, base_dir=base_dir)
     path.write_text(md, encoding="utf-8")
     return str(path)
 
@@ -64,7 +57,6 @@ Context:
 async def update_todolist_md(
     llm: Any,
     *,
-    project_name: str,
     instruction: str,
     system_prompt: str,
     session_id: Optional[str] = None,
@@ -75,47 +67,31 @@ async def update_todolist_md(
     The function loads the current Markdown, asks the LLM to apply the change,
     and writes back the full updated Markdown. Returns the file path as string.
     """
-    path = get_todolist_path(project_name, session_id=session_id, base_dir=base_dir)
+    path = get_todolist_path(session_id=session_id, base_dir=base_dir)
     if not path.exists():
-        # If file does not exist yet, create a minimal shell to update
+        # If file does not exist yet, start with an empty list
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"# Todo List: {project_name}\n\n- Meta: Created: {datetime.now().isoformat()}\n\n## Tasks\n", encoding="utf-8")
+        path.write_text("", encoding="utf-8")
 
     current_md = path.read_text(encoding="utf-8")
 
     prompt = f"""
-You are a precise editor of a Markdown Todo List.
-Update the given document according to the instruction.
+You are a precise editor of a Markdown checklist.
+Apply the instruction to the checklist.
 
 Rules:
-- Return ONLY the complete updated Markdown (no comments, no code fences).
-- Preserve the existing structure, IDs, and prior content unless the instruction says otherwise.
-- Update the meta 'Last-Updated' timestamp to the current time in ISO format.
+- Return ONLY the full updated checklist (no comments, no code fences, no headings, no meta).
+- Preserve existing task IDs and wording unless the instruction says otherwise.
 
 Instruction: {instruction}
 
-Current Todo List Markdown:
+Current Checklist:
 {current_md}
 """.strip()
 
     updated_md = await llm.generate_response(prompt, system_prompt=system_prompt)
 
-    # Best-effort meta update if the model did not include it
-    try:
-        if "Last-Updated" not in updated_md:
-            stamp = datetime.now().isoformat()
-            lines = updated_md.splitlines()
-            injected = False
-            for i, line in enumerate(lines):
-                if line.strip().lower().startswith("- meta:"):
-                    lines[i] = f"- Meta: Last-Updated: {stamp}"
-                    injected = True
-                    break
-            if not injected:
-                lines.insert(1, f"- Meta: Last-Updated: {stamp}")
-            updated_md = "\n".join(lines)
-    except Exception:
-        pass
+    # No meta handling; checklist-only by design
 
     path.write_text(updated_md, encoding="utf-8")
     return str(path)

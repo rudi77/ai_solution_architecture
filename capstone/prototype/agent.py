@@ -72,14 +72,6 @@ class ActionDecision(BaseModel):
         return v
 
 ## Legacy structured output for checklist generation removed (Markdown-only flow)
-    
-class ProjectInfo(BaseModel):
-    """Structured project information extraction"""
-    project_name: str
-    project_type: str
-    programming_language: Optional[str] = None
-    missing_info: List[str] = Field(default_factory=list)
-    requirements: Dict[str, Any] = Field(default_factory=dict)
 
 
 
@@ -462,7 +454,6 @@ Determine the most appropriate next action with clear reasoning."""
                 context=self.context,
                 system_prompt=self.system_prompt_full,
                 session_id=self.session_id,
-                extract_project_info=self._extract_project_info,
                 logger=self.logger,
             )
 
@@ -473,7 +464,6 @@ Determine the most appropriate next action with clear reasoning."""
                 system_prompt=self.system_prompt_full,
                 session_id=self.session_id,
                 parameters=parameters,
-                extract_project_info=self._extract_project_info,
             )
 
         if action == "get_next_executable_item":
@@ -503,15 +493,12 @@ Determine the most appropriate next action with clear reasoning."""
             except Exception:
                 from todolist_md import update_todolist_md  # type: ignore
             try:
-                project_name = self.context.get("project_name")
-                if project_name:
-                    await update_todolist_md(
-                        self.llm,
-                        project_name=project_name,
-                        instruction=f"Set task {current_item.id} status to IN_PROGRESS.",
-                        system_prompt=self.system_prompt_full,
-                        session_id=self.session_id,
-                    )
+                await update_todolist_md(
+                    self.llm,
+                    instruction=f"Set task {current_item.id} status to IN_PROGRESS.",
+                    system_prompt=self.system_prompt_full,
+                    session_id=self.session_id,
+                )
             except Exception:
                 pass
         else:
@@ -521,15 +508,12 @@ Determine the most appropriate next action with clear reasoning."""
                     from .todolist_md import update_todolist_md  # type: ignore
                 except Exception:
                     from todolist_md import update_todolist_md  # type: ignore
-                project_name = self.context.get("project_name")
-                if project_name:
-                    await update_todolist_md(
-                        self.llm,
-                        project_name=project_name,
-                        instruction=f"Find the task that corresponds to tool '{normalized_tool_name}' and mark it IN_PROGRESS.",
-                        system_prompt=self.system_prompt_full,
-                        session_id=self.session_id,
-                    )
+                await update_todolist_md(
+                    self.llm,
+                    instruction=f"Find the task that corresponds to tool '{normalized_tool_name}' and mark it IN_PROGRESS.",
+                    system_prompt=self.system_prompt_full,
+                    session_id=self.session_id,
+                )
             except Exception:
                 pass
 
@@ -568,22 +552,18 @@ Determine the most appropriate next action with clear reasoning."""
             success = bool(result.get("success"))
             status_text = "COMPLETED" if success else "RETRYING"
             if not success:
-                # If it repeatedly fails, mark as FAILED; we don't track retry_count in Markdown, so keep it simple
                 status_text = "FAILED"
             try:
-                project_name = self.context.get("project_name")
-                if project_name:
-                    result_text = json.dumps(result, ensure_ascii=False) if success else (result.get("error", "Unknown error"))
-                    await update_todolist_md(
-                        self.llm,
-                        project_name=project_name,
-                        instruction=(
-                            f"Set task {current_item.id} status to {status_text}. "
-                            f"Record result for task {current_item.id}: {result_text}."
-                        ),
-                        system_prompt=self.system_prompt_full,
-                        session_id=self.session_id,
-                    )
+                result_text = json.dumps(result, ensure_ascii=False) if success else (result.get("error", "Unknown error"))
+                await update_todolist_md(
+                    self.llm,
+                    instruction=(
+                        f"Set task {current_item.id} status to {status_text}. "
+                        f"Record result for task {current_item.id}: {result_text}."
+                    ),
+                    system_prompt=self.system_prompt_full,
+                    session_id=self.session_id,
+                )
             except Exception:
                 pass
         else:
@@ -593,21 +573,18 @@ Determine the most appropriate next action with clear reasoning."""
                     from .todolist_md import update_todolist_md  # type: ignore
                 except Exception:
                     from todolist_md import update_todolist_md  # type: ignore
-                project_name = self.context.get("project_name")
-                if project_name:
-                    success = bool(result.get("success"))
-                    status_text = "COMPLETED" if success else "FAILED"
-                    result_text = json.dumps(result, ensure_ascii=False) if success else (result.get("error", "Unknown error"))
-                    await update_todolist_md(
-                        self.llm,
-                        project_name=project_name,
-                        instruction=(
-                            f"Find the task that corresponds to tool '{normalized_tool_name}' and set its status to {status_text}. "
-                            f"Record result: {result_text}."
-                        ),
-                        system_prompt=self.system_prompt_full,
-                        session_id=self.session_id,
-                    )
+                success = bool(result.get("success"))
+                status_text = "COMPLETED" if success else "FAILED"
+                result_text = json.dumps(result, ensure_ascii=False) if success else (result.get("error", "Unknown error"))
+                await update_todolist_md(
+                    self.llm,
+                    instruction=(
+                        f"Find the task that corresponds to tool '{normalized_tool_name}' and set its status to {status_text}. "
+                        f"Record result: {result_text}."
+                    ),
+                    system_prompt=self.system_prompt_full,
+                    session_id=self.session_id,
+                )
             except Exception:
                 pass
 
@@ -670,13 +647,8 @@ Determine the most appropriate next action with clear reasoning."""
                     from .todolist_md import update_todolist_md  # type: ignore
                 except Exception:
                     from todolist_md import update_todolist_md  # type: ignore
-                project_name = self.context.get("project_name")
-                if not project_name:
-                    info = await self._extract_project_info()
-                    project_name = info.project_name
                 filepath = await update_todolist_md(
                     self.llm,
-                    project_name=project_name,
                     instruction="Find the first FAILED task and set its status to RETRYING (increment attempt if present).",
                     system_prompt=self.system_prompt_full,
                     session_id=self.session_id,
@@ -693,13 +665,8 @@ Determine the most appropriate next action with clear reasoning."""
                     from .todolist_md import update_todolist_md  # type: ignore
                 except Exception:
                     from todolist_md import update_todolist_md  # type: ignore
-                project_name = self.context.get("project_name")
-                if not project_name:
-                    info = await self._extract_project_info()
-                    project_name = info.project_name
                 filepath = await update_todolist_md(
                     self.llm,
-                    project_name=project_name,
                     instruction="Mark all tasks that are blocked due to unmet dependencies as SKIPPED and add note 'Skipped due to dependency failure'.",
                     system_prompt=self.system_prompt_full,
                     session_id=self.session_id,
@@ -720,65 +687,33 @@ Determine the most appropriate next action with clear reasoning."""
             return f"Workflow completed. Summary: {summary}"
         
         return summary
-    
-    async def _extract_project_info(self) -> ProjectInfo:
-        """Extract project information from user request"""
         
-        prompt = f"""Analyze the following user request and extract project information:
-
-User Request: {self.context.get('user_request', '')}
-
-Extract:
-1. Project name (kebab-case)
-2. Project type (microservice/library/application/etc)
-3. Programming language (if specified)
-4. Any specific requirements
-5. Missing information that should be clarified"""
-        
-        try:
-            project_info = await self.llm.generate_structured_response(
-                prompt,
-                ProjectInfo,
-                system_prompt=self.system_prompt
-            )
-            return project_info
-            
-        except Exception as e:
-            self.logger.error("project_info_extraction_failed", error=str(e))
-            # Return default
-            return ProjectInfo(
-                project_name="unnamed-project",
-                project_type="generic",
-                missing_info=["project_name", "project_type"]
-            )
-    
-    ## Legacy builder removed (Markdown-only flow)
-    
     def _build_context_summary(self) -> str:
-        """Build context summary for LLM"""
-        
-        summary = f"Session: {self.session_id}\n"
-        summary += f"User Request: {self.context.get('user_request', 'None')}\n"
+        """Build a pretty context summary for the LLM."""
+        lines = [
+            f"Session: {self.session_id}",
+            f"User Request: {self.context.get('user_request', 'None')}",
+        ]
         if self.context.get("recent_user_message"):
-            summary += f"Recent User Message: {self.context.get('recent_user_message')}\n"
-        summary += f"Step: {self.step_counter}/{self.max_steps}\n"
-        
+            lines.append(f"Recent User Message: {self.context.get('recent_user_message')}")
+        lines.append(f"Step: {self.step_counter}/{self.max_steps}")
+
         kb = self.context.get("kb_guidelines_available")
         if kb:
-            summary += f"KB Guidelines: {kb}\n"
-        
-        if self.context.get("todolist_file") or self.context.get("checklist_file"):
-            summary += f"Todo List File: {self.context.get('todolist_file') or self.context.get('checklist_file')}\n"
+            lines.append(f"KB Guidelines: {kb}")
+
+        todolist_file = self.context.get("todolist_file") or self.context.get("checklist_file")
+        if todolist_file:
+            lines.append(f"Todo List File: {todolist_file}")
         else:
-            summary += "Todo List: Not created yet\n"
-        
-        # Recent history
+            lines.append("Todo List: Not created yet")
+
         if self.react_history:
-            summary += f"Recent Actions (last 10):\n"
+            lines.append("Recent Actions (last 10):")
             for action in self.react_history[-10:]:
-                summary += f"  - {action}\n"
-        
-        return summary
+                lines.append(f"  - {action}")
+
+        return "\n".join(lines)
     
     def _get_checklist_status(self) -> str:
         """Get current Todo List status (back-compat name)."""
@@ -859,4 +794,3 @@ Extract:
                         session_id=self.session_id,
                         step=self.step_counter)
     
-    ## Legacy mark-current-item-failed removed (Markdown-only flow)
