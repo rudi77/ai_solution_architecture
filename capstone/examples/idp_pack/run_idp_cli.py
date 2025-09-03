@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +24,10 @@ async def main() -> None:
 	prompt_path = root / "examples" / "idp_pack" / "system_prompt_git.txt"
 	system_prompt = load_text(prompt_path)
 
-	provider = OpenAIProvider(api_key=Path(".").read_text(encoding="utf-8") if False else "")  # placeholder; relies on env var in provider
+    # Initialize LLM provider with fallback to mock if no API key
+	openai_key = os.getenv("OPENAI_API_KEY")
+
+	provider = OpenAIProvider(api_key=openai_key)  # placeholder; relies on env var in provider
 	agent = ProductionReActAgent(
 		system_prompt=system_prompt,
 		llm_provider=provider,

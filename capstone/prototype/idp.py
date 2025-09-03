@@ -805,7 +805,7 @@ Determine the most appropriate next action with clear reasoning."""
         """Execute the determined action"""
         
         if action_type == ActionType.UPDATE_TODOLIST:
-            return await self._handle_checklist_action(action_name, parameters)
+            return await self._handle_todolist_action(action_name, parameters)
         
         elif action_type == ActionType.TOOL_CALL:
             return await self._execute_tool_call(action_name, parameters)
@@ -821,117 +821,56 @@ Determine the most appropriate next action with clear reasoning."""
         
         return f"Executed {action_type.value}: {action_name}"
     
-    async def _handle_checklist_action(self, action_name: str, parameters: Dict) -> str:
-        """Handle checklist-related actions"""
-        
-        # Normalize common variants from LLM outputs (e.g., "Create Microservice Checklist")
-        normalized = action_name.strip().lower().replace("-", "_").replace(" ", "_")
-        if normalized in ("create_todolist", "create_checklist", "create_microservice_checklist", "create_a_microservice_checklist"):
-            action_name = "create_checklist"
+    async def _handle_todolist_action(self, action_name: str, parameters: Dict) -> str:
+        """Handle todolist-related actions by delegating to focused helpers."""
+        try:
+            from .todolist_actions import (
+                normalize_todolist_action_name,
+                create_todolist,
+                update_item_status,
+                get_next_executable_item,
+            )  # type: ignore
+        except Exception:
+            from todolist_actions import (  # type: ignore
+                normalize_todolist_action_name,
+                create_todolist,
+                update_item_status,
+                get_next_executable_item,
+            )
 
-        if action_name == "create_checklist":
-            # Extract project info first
-            project_info = await self._extract_project_info()
-            
-            try:
-                # New simple Markdown-based checklist generation
-                try:
-                    from .checklists_simple import create_checklist_md  # type: ignore
-                except Exception:
-                    from checklists_simple import create_checklist_md  # type: ignore
-                filepath = await create_checklist_md(
-                    self.llm,
-                    project_name=project_info.project_name,
-                    project_type=project_info.project_type,
-                    user_request=self.context.get("user_request", ""),
-                    requirements=project_info.requirements,
-                    system_prompt=self.system_prompt_full,
-                    session_id=self.session_id,
-                )
-                self.context["checklist_created"] = True
-                self.context["checklist_file"] = filepath
-                # Also set Todo List keys for forward naming
-                self.context["todolist_created"] = True
-                self.context["todolist_file"] = filepath
-                # Store project identification in context for later Markdown updates
-                self.context["project_name"] = project_info.project_name
-                self.context["project_type"] = project_info.project_type
-                return f"Created Todo List (saved to {filepath})"
-                
-            except Exception as e:
-                self.logger.error("todolist_creation_failed", error=str(e))
-                # Fallback: create a minimal viable checklist so the workflow can proceed
-                try:
-                    # Simple fallback: create a minimal Markdown checklist directly
-                    try:
-                        from .checklists_simple import create_checklist_md  # type: ignore
-                    except Exception:
-                        from checklists_simple import create_checklist_md  # type: ignore
-                    filepath = await create_checklist_md(
-                        self.llm,
-                        project_name=project_info.project_name,
-                        project_type=project_info.project_type,
-                        user_request=self.context.get("user_request", ""),
-                        requirements=project_info.requirements,
-                        system_prompt=self.system_prompt_full,
-                        session_id=self.session_id,
-                    )
-                    self.context["checklist_created"] = True
-                    self.context["checklist_file"] = filepath
-                    self.context["todolist_created"] = True
-                    self.context["todolist_file"] = filepath
-                    return (
-                        f"Created minimal Todo List (saved to {filepath}). Original error: {e}"
-                    )
-                except Exception as inner_e:
-                    self.logger.error("todolist_fallback_failed", error=str(inner_e))
-                    return f"Failed to create Todo List: {e}"
-        
-        elif action_name == "update_item_status":
-            # Update via Markdown helper using instruction text
-            try:
-                from .checklists_simple import update_checklist_md  # type: ignore
-            except Exception:
-                from checklists_simple import update_checklist_md  # type: ignore
-            # Determine project_name for Markdown checklist
-            project_name = self.context.get("project_name")
-            if not project_name:
-                info = await self._extract_project_info()
-                project_name = info.project_name
-            item_id = parameters.get("item_id")
-            status_text = parameters.get("status")
-            notes = parameters.get("notes")
-            result_txt = parameters.get("result")
-            instruction_parts = [f"Set task {item_id} status to {status_text}."]
-            if notes:
-                instruction_parts.append(f"Add note to task {item_id}: {notes}.")
-            if result_txt:
-                instruction_parts.append(f"Record result for task {item_id}: {result_txt}.")
-            instruction = " ".join(instruction_parts)
-            filepath = await update_checklist_md(
-                self.llm,
-                project_name=project_name,
-                instruction=instruction,
+        action = normalize_todolist_action_name(action_name)
+
+        if action == "create_todolist":
+            return await create_todolist(
+                llm=self.llm,
+                context=self.context,
                 system_prompt=self.system_prompt_full,
                 session_id=self.session_id,
+                extract_project_info=self._extract_project_info,
+                logger=self.logger,
             )
-            self.context["checklist_file"] = filepath
-            self.context["todolist_file"] = filepath
-            return f"Updated Todo List (saved to {filepath})"
-        
-        elif action_name == "get_next_executable_item":
-            # Markdown-only flow: cannot infer next item; guide via file reference
-            path = self.context.get("todolist_file") or self.context.get("checklist_file")
-            return f"Open and follow the Todo List: {path}" if path else "No Todo List created"
-        
-        return f"Todo List action '{action_name}' completed"
+
+        if action == "update_item_status":
+            return await update_item_status(
+                llm=self.llm,
+                context=self.context,
+                system_prompt=self.system_prompt_full,
+                session_id=self.session_id,
+                parameters=parameters,
+                extract_project_info=self._extract_project_info,
+            )
+
+        if action == "get_next_executable_item":
+            return get_next_executable_item(context=self.context)
+
+        return f"Todo List action '{action}' completed"
     
     async def _execute_tool_call(self, tool_name: str, parameters: Dict) -> str:
         """Execute tool and update checklist"""
         
-        # Hard guard (Markdown flow): ensure a checklist file exists before tool execution
-        if not self.context.get("checklist_created") and not self.context.get("todolist_created"):
-            checklist_msg = await self._handle_checklist_action("create_checklist", {})
+        # Hard guard (Markdown flow): ensure a todolist file exists before tool execution
+        if not self.context.get("todolist_created") and not self.context.get("checklist_created"):
+            checklist_msg = await self._handle_todolist_action("create_todolist", {})
             return f"Todo List was missing. {checklist_msg}\nWill proceed with tool execution next."
 
         # Normalize tool name and resolve via ToolSpec list
@@ -944,13 +883,13 @@ Determine the most appropriate next action with clear reasoning."""
         # Mark item as in progress in Markdown (best-effort)
         if current_item:
             try:
-                from .checklists_simple import update_checklist_md  # type: ignore
+                from .todolist_md import update_todolist_md  # type: ignore
             except Exception:
-                from checklists_simple import update_checklist_md  # type: ignore
+                from todolist_md import update_todolist_md  # type: ignore
             try:
                 project_name = self.context.get("project_name")
                 if project_name:
-                    await update_checklist_md(
+                    await update_todolist_md(
                         self.llm,
                         project_name=project_name,
                         instruction=f"Set task {current_item.id} status to IN_PROGRESS.",
@@ -963,12 +902,12 @@ Determine the most appropriate next action with clear reasoning."""
             # No in-memory item; best-effort by tool name
             try:
                 try:
-                    from .checklists_simple import update_checklist_md  # type: ignore
+                    from .todolist_md import update_todolist_md  # type: ignore
                 except Exception:
-                    from checklists_simple import update_checklist_md  # type: ignore
+                    from todolist_md import update_todolist_md  # type: ignore
                 project_name = self.context.get("project_name")
                 if project_name:
-                    await update_checklist_md(
+                    await update_todolist_md(
                         self.llm,
                         project_name=project_name,
                         instruction=f"Find the task that corresponds to tool '{normalized_tool_name}' and mark it IN_PROGRESS.",
@@ -1007,9 +946,9 @@ Determine the most appropriate next action with clear reasoning."""
         # Update checklist based on result in Markdown
         if current_item:
             try:
-                from .checklists_simple import update_checklist_md  # type: ignore
+                from .todolist_md import update_todolist_md  # type: ignore
             except Exception:
-                from checklists_simple import update_checklist_md  # type: ignore
+                from todolist_md import update_todolist_md  # type: ignore
             success = bool(result.get("success"))
             status_text = "COMPLETED" if success else "RETRYING"
             if not success:
@@ -1019,7 +958,7 @@ Determine the most appropriate next action with clear reasoning."""
                 project_name = self.context.get("project_name")
                 if project_name:
                     result_text = json.dumps(result, ensure_ascii=False) if success else (result.get("error", "Unknown error"))
-                    await update_checklist_md(
+                    await update_todolist_md(
                         self.llm,
                         project_name=project_name,
                         instruction=(
@@ -1035,15 +974,15 @@ Determine the most appropriate next action with clear reasoning."""
             # No in-memory item; update by tool name
             try:
                 try:
-                    from .checklists_simple import update_checklist_md  # type: ignore
+                    from .todolist_md import update_todolist_md  # type: ignore
                 except Exception:
-                    from checklists_simple import update_checklist_md  # type: ignore
+                    from todolist_md import update_todolist_md  # type: ignore
                 project_name = self.context.get("project_name")
                 if project_name:
                     success = bool(result.get("success"))
                     status_text = "COMPLETED" if success else "FAILED"
                     result_text = json.dumps(result, ensure_ascii=False) if success else (result.get("error", "Unknown error"))
-                    await update_checklist_md(
+                    await update_todolist_md(
                         self.llm,
                         project_name=project_name,
                         instruction=(
@@ -1112,14 +1051,14 @@ Determine the most appropriate next action with clear reasoning."""
             # Markdown-only flow: instruct LLM to mark the first FAILED task as RETRYING
             try:
                 try:
-                    from .checklists_simple import update_checklist_md  # type: ignore
+                    from .todolist_md import update_todolist_md  # type: ignore
                 except Exception:
-                    from checklists_simple import update_checklist_md  # type: ignore
+                    from todolist_md import update_todolist_md  # type: ignore
                 project_name = self.context.get("project_name")
                 if not project_name:
                     info = await self._extract_project_info()
                     project_name = info.project_name
-                filepath = await update_checklist_md(
+                filepath = await update_todolist_md(
                     self.llm,
                     project_name=project_name,
                     instruction="Find the first FAILED task and set its status to RETRYING (increment attempt if present).",
@@ -1135,14 +1074,14 @@ Determine the most appropriate next action with clear reasoning."""
             # Markdown flow: emit instruction to mark blocked items as skipped
             try:
                 try:
-                    from .checklists_simple import update_checklist_md  # type: ignore
+                    from .todolist_md import update_todolist_md  # type: ignore
                 except Exception:
-                    from checklists_simple import update_checklist_md  # type: ignore
+                    from todolist_md import update_todolist_md  # type: ignore
                 project_name = self.context.get("project_name")
                 if not project_name:
                     info = await self._extract_project_info()
                     project_name = info.project_name
-                filepath = await update_checklist_md(
+                filepath = await update_todolist_md(
                     self.llm,
                     project_name=project_name,
                     instruction="Mark all tasks that are blocked due to unmet dependencies as SKIPPED and add note 'Skipped due to dependency failure'.",
