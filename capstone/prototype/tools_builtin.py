@@ -430,6 +430,25 @@ BUILTIN_TOOLS: List[ToolSpec] = [
         aliases=[],
     ),
     ToolSpec(
+        name="validate_project_name_and_type",
+        description="Validate project name and type",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string"},
+                "project_type": {"type": "string"},
+                "programming_language": {"type": "string"},
+            },
+            "required": ["project_name"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        func=validate_project_name_and_type,
+        is_async=True,
+        timeout=5,
+        aliases=["project-validator"],
+    ),    
+    ToolSpec(
         name="setup_branch_protection",
         description="Setup branch rules",
         input_schema={
@@ -459,25 +478,7 @@ BUILTIN_TOOLS: List[ToolSpec] = [
         timeout=20,
         aliases=["git-repo-creator", "create-git-repo"],
     ),
-    ToolSpec(
-        name="validate_project_name_and_type",
-        description="Validate project name and type",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "project_name": {"type": "string"},
-                "project_type": {"type": "string"},
-                "programming_language": {"type": "string"},
-            },
-            "required": ["project_name"],
-            "additionalProperties": False,
-        },
-        output_schema={"type": "object"},
-        func=validate_project_name_and_type,
-        is_async=True,
-        timeout=5,
-        aliases=["project-validator"],
-    ),
+    
     ToolSpec(
         name="list_templates",
         description="List available templates",
@@ -635,3 +636,40 @@ BUILTIN_TOOLS: List[ToolSpec] = [
 ]
 
 
+
+BUILTIN_TOOLS_SIMPLIFIED: List[ToolSpec] = [
+    ToolSpec(
+        name="create_repository",
+        description="Creates local Git repo and GitHub remote, pushes initial commit",
+        input_schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "visibility": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=create_repository,
+        is_async=True,
+        timeout=10,
+        aliases=[],
+    ),
+    ToolSpec(
+        name="validate_project_name_and_type",
+        description="Validate project name and type",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string"},
+                "project_type": {"type": "string"},
+                "programming_language": {"type": "string"},
+            },
+            "required": ["project_name"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        func=validate_project_name_and_type,
+        is_async=True,
+        timeout=5,
+        aliases=["project-validator"],
+    )
+]

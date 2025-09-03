@@ -27,7 +27,7 @@ async def main() -> None:
 	provider = OpenAIProvider(api_key=openai_key)  # placeholder; relies on env var in provider
 	agent = ReActAgent(
 		system_prompt=system_prompt,
-		llm_provider=provider,
+		llm=provider,
 		tools=get_idp_tools(),
 	)
 
