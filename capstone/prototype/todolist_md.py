@@ -146,6 +146,79 @@ Current Document:
     return str(path)
 
 
+# ---------- deterministic rendering from structured state ----------
+def render_todolist_markdown(
+    *,
+    tasks: list[dict],
+    open_questions: list[str] | None,
+    session_id: Optional[str] = None,
+    base_dir: str = "./checklists",
+) -> str:
+    """Render the Markdown Todo List from in-memory structured state.
+
+    This function is the single renderer: it does not call the LLM and ensures
+    the Markdown view is always consistent with the authoritative task state.
+
+    Args:
+        tasks: List of task dictionaries containing at least id, title, status, optional tool/params/notes.
+        open_questions: Optional list of clarifying questions.
+        session_id: Current session identifier used to determine the file path.
+        base_dir: Directory to store Markdown files.
+
+    Returns:
+        The file path where the Markdown view was written.
+    """
+    path = get_todolist_path(session_id=session_id, base_dir=base_dir)
+    _ensure_file(path)
+
+    created = datetime.now().isoformat()
+    last_updated = datetime.now().isoformat()
+
+    lines: list[str] = []
+    lines.append("# Todo List")
+    lines.append("## Meta")
+    lines.append(f"- created: {created}")
+    lines.append(f"- last-updated: {last_updated}")
+    lines.append("## Tasks")
+
+    def _checkbox(status: str) -> str:
+        # Render checkbox based on status; text status retained for clarity
+        checked = status.upper() in {"COMPLETED"}
+        box = "[x]" if checked else "[ ]"
+        return box
+
+    for t in tasks:
+        tid = str(t.get("id", ""))
+        title = str(t.get("title", "")).strip() or tid
+        status = str(t.get("status", "PENDING")).upper()
+        tool = t.get("tool")
+        params = t.get("params") or {}
+        notes = str(t.get("notes", "")).strip()
+
+        suffix_parts: list[str] = [f"status: {status}"]
+        if tool:
+            suffix_parts.append(f"tool: {tool}")
+        if params:
+            # keep params compact to avoid noisy Markdown
+            suffix_parts.append(f"params: {params}")
+        if notes:
+            suffix_parts.append(f"notes: {notes}")
+        suffix = " (" + ", ".join(suffix_parts) + ")" if suffix_parts else ""
+
+        lines.append(f"- {_checkbox(status)} {title}{suffix}")
+
+    lines.append("## Open Questions (awaiting user)")
+    oq = open_questions or []
+    if oq:
+        for q in oq:
+            lines.append(f"- {q}")
+    lines.append("## Notes")
+
+    md = "\n".join(lines) + "\n"
+    path.write_text(md, encoding="utf-8")
+    return str(path)
+
+
 # ---------- backwards-compat (1 release grace) ----------
 
 create_checklist_md = create_todolist_md  # type: ignore

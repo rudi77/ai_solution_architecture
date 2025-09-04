@@ -17,7 +17,11 @@ import structlog
 from capstone.prototype.feedback_collector import FeedbackCollector
 from capstone.prototype.llm_provider import LLMProvider
 from capstone.prototype.statemanager import StateManager
-from capstone.prototype.todolist_md import update_todolist_md, create_todolist_md  # CHANGED: add create_todolist_md
+from capstone.prototype.todolist_md import (
+    update_todolist_md,  # back-compat only
+    create_todolist_md,  # back-compat only
+    render_todolist_markdown,
+)
 from capstone.prototype.tools import (
     ToolSpec,
     export_openai_tools,
@@ -66,6 +70,32 @@ class ActionDecision(BaseModel):
 class BlockingQuestions(BaseModel):
     blocking: List[str] = Field(default_factory=list)
     optional: List[str] = Field(default_factory=list)
+
+
+# ===== Structured Plan Models (Single Source of Truth) =====
+class TaskStatus(str, Enum):
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+class PlanTask(BaseModel):
+    id: str
+    title: str
+    description: str | None = None
+    tool: str | None = None
+    params: Dict[str, Any] | None = None
+    status: TaskStatus = TaskStatus.PENDING
+    depends_on: List[str] = Field(default_factory=list)
+    priority: int | None = None
+    notes: str | None = None
+
+
+class PlanOutput(BaseModel):
+    tasks: List[PlanTask] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
 
 # ============ Agent ============
 class ReActAgent:
@@ -286,40 +316,49 @@ class ReActAgent:
 
     async def _create_initial_plan(self, *, open_questions: List[str]):
         """
-        Erstellt die Todo-Liste (Markdown) mit:
-        - Tasks (atomar, jedes exekutierbare Item enthält `tool: <name>` als Klartext im Task-Text)
-        - Sektion „Open Questions (awaiting user)“ mit nicht-kritischen Fragen
+        Erstellt den initialen Plan als strukturierte JSON-Struktur und rendert die Markdown-Ansicht deterministisch.
 
         Args:
-            open_questions (List[str]): Eine Liste von Fragen, die vom Nutzer noch beantwortet werden müssen.
+            open_questions: Nicht-blockierende Fragen, die zusätzlich gelistet werden sollen.
         """
-        # CHANGED: use augmented request if available
         user_req = self.context.get("user_request_augmented") or self.context.get("user_request", "")
-        guide = (
-            "Create a concise, executable TODO plan in Markdown.\n"
-            "- Sections: Title, Meta (created/last-updated), Tasks, Open Questions (awaiting user), Notes.\n"
-            "- Tasks: checkbox list (- [ ]) with short descriptions; each executable task states `tool: <exact_tool_name>` inside the line.\n"
-            "- Keep tasks atomic and verifiable.\n"
-            "- If no open questions, include the section but keep it empty.\n"
+        prompt = (
+            "Plan tasks for the user's request. Return JSON only, matching the schema.\n"
+            "Guidelines:\n"
+            "- Prefer 3–10 atomic, verifiable tasks.\n"
+            "- Include the exact tool name when applicable in field 'tool'.\n"
+            "- Provide stable 'id' (e.g., t1, t2), 'title', optional 'params', and initial 'status' = PENDING.\n"
+            "- Fill 'open_questions' with clarifications that are nice-to-have (non-blocking).\n\n"
+            f"User request:\n{user_req}\n"
         )
-        md_prompt = f"{guide}\n\nContext/user request:\n{user_req}\n"
-        path = await create_todolist_md(  # CHANGED: ensure wrapper is used
-            llm=self.llm,
-            user_request=md_prompt,
-            system_prompt=self.system_prompt,
+        try:
+            plan: PlanOutput = await self.llm.generate_structured_response(prompt, PlanOutput, system_prompt=self.system_prompt)
+        except Exception:
+            # Fallback to empty plan; we can proceed with tool decisions later
+            plan = PlanOutput(tasks=[], open_questions=[])
+
+        # Merge optional open questions detected earlier
+        merged_oq = list((plan.open_questions or [])) + list(open_questions or [])
+        # Ensure unique order-preserving
+        seen = set()
+        final_oq: List[str] = []
+        for q in merged_oq:
+            if q not in seen:
+                final_oq.append(q)
+                seen.add(q)
+
+        # Persist authoritative state in context (as plain dicts for easy serialization)
+        self.context["tasks"] = [t.model_dump() for t in plan.tasks]
+        self.context["open_questions"] = final_oq
+        self.context["todolist_created"] = True
+
+        # Render Markdown view
+        path = render_todolist_markdown(
+            tasks=self.context["tasks"],
+            open_questions=self.context.get("open_questions", []),
             session_id=self.session_id,
         )
-        self.context["todolist_created"] = True
         self.context["todolist_file"] = path
-
-        if open_questions:
-            await update_todolist_md(
-                llm=self.llm,
-                instruction="Under 'Open Questions (awaiting user)', add these bullet points: "
-                            + "; ".join(open_questions),
-                system_prompt=self.system_prompt,
-                session_id=self.session_id,
-            )
 
     # ===== ReAct inner pieces =====
     async def _generate_thought(self) -> str:
@@ -459,7 +498,7 @@ class ReActAgent:
             return params.get("summary", "OK")
         return f"Executed {kind.value}/{name}"
 
-    # ===== TodoList handling (Markdown) =====
+    # ===== TodoList handling (no LLM edits; Markdown is a view) =====
     async def _handle_todolist(self, action: str, params: Dict[str, Any]) -> str:
         act = action.lower().replace("-", "_").replace(" ", "_")
         if act in {"create_todolist", "create"}:
@@ -467,28 +506,27 @@ class ReActAgent:
             await self._create_initial_plan(open_questions=[])
             return f"Todo List (re)created at {self.context.get('todolist_file')}"
         if act == "update_item_status":
-            instr = params.get("instruction") or ""
-            if not instr:
-                return "No instruction provided."
-            await update_todolist_md(self.llm, instruction=instr, system_prompt=self.system_prompt, session_id=self.session_id)
+            # Back-compat: allow structured params {item_id,status,notes}
+            item_id = params.get("item_id")
+            status_text = str(params.get("status", "")).upper() or "PENDING"
+            notes = params.get("notes")
+            if not item_id:
+                return "No item_id provided."
+            updated = self._update_task_by_id(item_id, status_text, notes)
+            if not updated:
+                return f"Task '{item_id}' not found."
+            self._render_markdown_view()
             return "Todo List updated."
         return f"Todo action '{action}' done"
 
     async def _handle_tool(self, tool_name: str, params: Dict[str, Any]) -> str:
         if not self.context.get("todolist_created"):
             await self._create_initial_plan(open_questions=[])
-        norm = tool_name.strip().lower().replace("-", "_").replace(" ", "_")
+        norm = self._normalize_name(tool_name)
 
-        # IN_PROGRESS (best-effort)
-        try:
-            await update_todolist_md(
-                self.llm,
-                instruction=f"Find the task that corresponds to tool '{norm}' and mark it IN_PROGRESS.",
-                system_prompt=self.system_prompt,
-                session_id=self.session_id,
-            )
-        except Exception:
-            pass
+        # Deterministic status update: IN_PROGRESS
+        self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS)
+        self._render_markdown_view()
 
         # Instrumentation: execution time, success/failure counters
         started_at = time.time()
@@ -507,16 +545,9 @@ class ReActAgent:
         status = "COMPLETED" if success else "FAILED"
         result_text = json.dumps(result, ensure_ascii=False)
 
-        try:
-            await update_todolist_md(
-                self.llm,
-                instruction=(f"Find the task that corresponds to tool '{norm}' and set its status to {status}. "
-                             f"Record result: {result_text}."),
-                system_prompt=self.system_prompt,
-                session_id=self.session_id,
-            )
-        except Exception:
-            pass
+        # Deterministic status update after execution
+        self._mark_task_for_tool(norm, TaskStatus.COMPLETED if success else TaskStatus.FAILED, notes=result_text)
+        self._render_markdown_view()
 
         # Generische Blocker-Hinweise ins Context
         err = (result.get("error") or "").strip()
@@ -577,10 +608,20 @@ class ReActAgent:
         ]
         if self.context.get("recent_user_message"):
             lines.append(f"Recent User Message: {self.context['recent_user_message']}")
+        tasks = self.context.get("tasks")
+        if tasks:
+            lines.append(f"Tasks: {len(tasks)} total")
+            # Show up to first 5 tasks with minimal info for planning
+            for t in tasks[:5]:
+                tid = t.get("id")
+                title = t.get("title")
+                status = t.get("status")
+                tool = t.get("tool") or "-"
+                lines.append(f"  - {tid}: {title} [{status}] (tool: {tool})")
+        else:
+            lines.append("Tasks: none yet")
         if self.context.get("todolist_file"):
             lines.append(f"Todo List File: {self.context['todolist_file']}")
-        else:
-            lines.append("Todo List: not created yet")
         if self.react_history:
             lines.append("Recent Actions:")
             for a in self.react_history[-8:]:
@@ -644,8 +685,65 @@ class ReActAgent:
         lines.append(
             "\nUsage rules:\n"
             "- Use only listed tools.\n"
-            "- First, build a Todo List (plan). Critical clarifications must be asked BEFORE planning; minor ones go into 'Open Questions'.\n"
-            "- After each tool run, update the Todo List status and record results.\n"
+            "- First, build a Todo List (plan) as structured JSON; minor clarifications go into 'Open Questions'.\n"
+            "- After each tool run, status is updated deterministically; Markdown is a view only.\n"
             "- If a blocking error occurs, ASK_USER with concrete suggestions."
         )
         return "\n".join(lines)
+
+    # ===== Structured Task helpers =====
+    def _normalize_name(self, name: str) -> str:
+        return name.strip().lower().replace("-", "_").replace(" ", "_")
+
+    def _get_tasks(self) -> List[Dict[str, Any]]:
+        return list(self.context.get("tasks", []))
+
+    def _set_tasks(self, tasks: List[Dict[str, Any]]):
+        self.context["tasks"] = tasks
+
+    def _render_markdown_view(self):
+        try:
+            path = render_todolist_markdown(
+                tasks=self._get_tasks(),
+                open_questions=self.context.get("open_questions", []),
+                session_id=self.session_id,
+            )
+            self.context["todolist_file"] = path
+        except Exception:
+            # Rendering must not break execution
+            pass
+
+    def _find_task_for_tool(self, tool_norm: str) -> Optional[int]:
+        tasks = self._get_tasks()
+        # Prefer first task matching tool name and not completed
+        for idx, t in enumerate(tasks):
+            t_tool = str(t.get("tool") or "").strip()
+            if t_tool and self._normalize_name(t_tool) == tool_norm:
+                return idx
+        # Fallback: first PENDING/IN_PROGRESS task
+        for idx, t in enumerate(tasks):
+            status = str(t.get("status", "PENDING")).upper()
+            if status in {TaskStatus.PENDING.value, TaskStatus.IN_PROGRESS.value}:
+                return idx
+        return None
+
+    def _mark_task_for_tool(self, tool_norm: str, status: TaskStatus, *, notes: str | None = None):
+        idx = self._find_task_for_tool(tool_norm)
+        if idx is None:
+            return
+        tasks = self._get_tasks()
+        tasks[idx]["status"] = status.value
+        if notes:
+            tasks[idx]["notes"] = notes
+        self._set_tasks(tasks)
+
+    def _update_task_by_id(self, item_id: str, status_text: str, notes: Optional[str]) -> bool:
+        tasks = self._get_tasks()
+        for i, t in enumerate(tasks):
+            if str(t.get("id")) == str(item_id):
+                tasks[i]["status"] = status_text
+                if notes:
+                    tasks[i]["notes"] = notes
+                self._set_tasks(tasks)
+                return True
+        return False
