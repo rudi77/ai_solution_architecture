@@ -1,241 +1,260 @@
-Love it. Here’s a clean, end-to-end **refactor plan** that (1) makes the agent truly generic (mission prompt + tools only) and (2) keeps and elevates the **Checklist → TodoList** concept as a first-class, domain-agnostic progress tracker and decision aid.
+Hier sind die Feature-Request-Dokumente für die sechs wichtigsten Punkte aus meiner Analyse deines Agenten-Codes. Ich habe sie im üblichen **Feature Request Template** aufgeschrieben – jeweils mit **Problem Statement**, **Proposed Solution**, **Benefits** und **Acceptance Criteria**.
 
 ---
 
-# Phase 0 — What we have today (quick map)
+## 1. Migration auf Pydantic v2 (`@field_validator`)
 
-* **Agent core** mixes generic ReAct with IDP/Git assumptions; imports `BUILTIN_TOOLS` by default and stitches tool rules into the system prompt; hard-codes “checklist” creation/updates and even special blockers (git dir conflict, missing GitHub token).
-* **Checklist** is already implemented as a persisted Markdown doc with create/update helpers (`checklists_simple.py`); the agent reads/writes it and uses its existence to gate tool execution.
-* **Prompts** include IDP/Git flavored system prompts baked into the package.
-* **Tools** are well-abstracted via `ToolSpec`, `export_openai_tools`, `find_tool`, `execute_tool_by_name` (good, keep), with current IDP-specific tools in `tools_builtin.py`.
+**Problem Statement**
+Aktuell werden noch `@validator`-Dekoratoren genutzt. Diese sind seit Pydantic v2 deprecated und erzeugen Warnungen im Log. Künftig werden sie entfernt, was den Agenten brechen würde.
 
----
+**Proposed Solution**
 
-# Phase 1 — Rename & abstract “Checklist” → “TodoList”
+* Alle `@validator` durch `@field_validator(..., mode="before")` ersetzen.
+* Mapping-Logik (`_map_old_names`) entsprechend migrieren.
 
-## 1.1 File & symbol renames
+**Benefits**
 
-* **Files**
+* Zukunftssichere Codebasis (kompatibel mit Pydantic v3).
+* Keine störenden Deprecation-Warnungen mehr.
 
-  * `checklists_simple.py` → `todolist_md.py` (export the same creation/update helpers under the new name). Keep a thin compatibility import (optional) for one release.
-* **Conceptual/API changes inside the helpers**
+**Acceptance Criteria**
 
-  * No behavioral change. Only words: “Checklist” → “TodoList”. Keep Markdown format: a title, meta, **checkbox list** `- [ ]`, and notes.
-  * Keep `_slugify`, `get_*_path`, `create_*_md`, `update_*_md` signatures identical, just renamed (and update strings in prompts to say “Todo List”).
-
-## 1.2 Agent code changes (names only; behavior preserved)
-
-* In `idp.py`:
-
-  * Replace **all** `checklist_*` context keys with `todolist_*`. Examples:
-
-    * `checklist_created` → `todolist_created`
-    * `checklist_file` → `todolist_file`
-  * Rename action type: `UPDATE_CHECKLIST` → `UPDATE_TODOLIST` in `ActionType` (and any case labels).
-  * Rename handler `_handle_checklist_action` → `_handle_todolist_action`; keep public behavior intact.
-  * Rename helper `_get_checklist_status` → `_get_todolist_status`; update callers.
-  * Update any user-facing strings (“Checklist” → “Todo List”) in yields and logs.
-
-Why: You keep the persistent progress tracker but shed the “project checklist” connotation. It’s now a **generic Todo List** that any mission can use.
+* Keine Pydantic-Deprecation-Warnungen im Log.
+* Unit Tests laufen ohne Änderungen durch.
+* Verhalten der Validierung ist identisch wie zuvor.
 
 ---
 
-# Phase 2 — Make the agent truly generic (no domain assumptions)
+## 2. Tool-Metriken erfassen (Zeit, Erfolg, Fehler)
 
-## 2.1 Remove IDP/Git defaults from the agent
+**Problem Statement**
+Prometheus-Metriken `tool_execution_time`, `tool_success_rate`, `tool_failure_rate` sind zwar definiert, werden aber nicht inkrementiert/observiert. Damit fehlen Einblicke in Tool-Performance und Fehlerhäufigkeit.
 
-* **Constructor**: require the caller to pass `tools` explicitly; do **not** default to `BUILTIN_TOOLS`. (If `None`, use empty list.)
-* **Prompts**: remove any import/usage of `IDP_COPILOT_SYSTEM_PROMPT*` from the agent module; the caller must provide `system_prompt` (mission prompt).
-* **Main**: move the current IDP/Git command-line harness into an example script (see Phase 5).
+**Proposed Solution**
 
-Result: The core agent ships *no* opinions about IDP/Git.
+* Im `_handle_tool` bzw. `execute_tool_by_name`:
 
-## 2.2 Vendor-agnostic tool-calling boundary
+  * Startzeit messen, Laufzeit in `tool_execution_time` eintragen.
+  * Bei Erfolg `tool_success_rate.inc()` erhöhen.
+  * Bei Fehler `tool_failure_rate.inc()` erhöhen.
 
-* Today `_determine_action` reaches directly for OpenAI’s `.client.chat.completions.create` and mixes meta-actions with tool list.
-* **Add** to `LLMProvider` an abstract `call_tools(system_prompt, messages, tools) -> Optional[{name, arguments}]`.
+**Benefits**
 
-  * Implement in `OpenAIProvider` using the existing tool-calling flow (same as today, but moved behind the provider).
-  * For providers without tool calling, return `None`, and we’ll fall back to schema JSON (already implemented).
-* Update `_determine_action()` to **only** use the provider interface; remove direct SDK calls and try/except around OpenAI specifics.
+* Transparente Tool-Observability.
+* Frühzeitige Erkennung fehlerhafter Tools.
+* Basis für SLAs und Optimierungen.
 
-## 2.3 Neutralize domain-specific “blockers”
+**Acceptance Criteria**
 
-* Replace hard-coded git/credential blockers (`dir_conflict`, `missing_github_token`) with a **generic** `self.context["blocker"] = {message, suggestion}` when tool results contain errors.
-* Keep ASK\_USER escalation logic, but make its text generic (“A blocking error occurred…”).
-
-## 2.4 Keep the TodoList bootstrapping — generically
-
-* Preserve the nice property: **if no Todo List exists yet, create it** before the first tool call, because it orients the LLM and the user—but describe it as “Todo List”, not “Checklist”.
-* Keep best-effort updates after tool runs (mark IN\_PROGRESS/COMPLETED/FAILED) by **instructional edits** through `update_todolist_md()`; do not require a structured in-memory list (keeps it storage-agnostic).
+* Jede Tool-Ausführung erzeugt einen Eintrag in den Prometheus-Metriken.
+* Erfolge/Fehler sind korrekt gezählt.
+* Laufzeiten sind im Histogram sichtbar.
 
 ---
 
-# Phase 3 — System prompt composition & context summary
+## 3. Konsistente Tool-Namen (Lookup-Index)
 
-## 3.1 Clean system prompt composition
+**Problem Statement**
+Toolnamen werden an verschiedenen Stellen normalisiert (`lower().replace("-", "_")`). Dabei kann es zu Inkonsistenzen kommen, sodass vorhandene Tools nicht gefunden werden.
 
-* `_compose_system_prompt()` currently injects dynamic tool docs and also hardcodes IDP rules like “On blocking errors (directory conflict, missing GITHUB\_TOKEN)…” and “Limit retries for create\_repository to 1”.
-* **Change**: inject only **neutral** usage rules:
+**Proposed Solution**
 
-  * Use only listed tools.
-  * After each tool run, update the **Todo List** with status/result.
-  * If a blocking error occurs, consider ASK\_USER with suggested next steps.
-  * Don’t assume any specific tool (no `create_repository` special case).
-* The per-tool required params summary is great — keep it.
+* Beim Laden der Tools einmalig einen Lookup-Index erstellen: `{normalized_name -> ToolSpec}`.
+* Alle weiteren Tool-Calls nur über diesen Index auflösen.
 
-## 3.2 Context summary updates
+**Benefits**
 
-* `_build_context_summary()` should reference “Todo List File” instead of “Checklist File” and otherwise stay neutral.
-* Keep short **Recent Actions** ring buffer (generic and helpful).
+* Stabile Zuordnung von Tool-Namen.
+* Keine „Tool not found“-Fehler mehr.
+* Einfachere Debugbarkeit.
+
+**Acceptance Criteria**
+
+* Tools mit `-`, `_` oder Leerzeichen werden zuverlässig gefunden.
+* Kein Unterschied mehr zwischen verschiedenen Normalisierungen.
+* Bestehende Tests laufen durch.
 
 ---
 
-# Phase 4 — Public API surface and policies
+Super — ich ergänze den Feature Request zu **Punkt 4 (Strukturierte Task-Repräsentation)** mit allen Details zur LLM-Rolle, JSON-Schema, Renderlogik und Ablauf.
 
-## 4.1 Agent constructor signature
+---
 
-```python
-class ProductionReActAgent:
-    def __init__(
-        self,
-        system_prompt: str,
-        llm_provider: LLMProvider,
-        *,
-        tools: list[ToolSpec] | None = None,
-        policy: dict | None = None,
-    ):
-        ...
+## 4. Strukturierte Task-Repräsentation (statt Markdown-Manipulation)
+
+**Problem Statement**
+Aktuell werden Tasks und Statusänderungen direkt per LLM in einer Markdown-Datei geändert. Das ist fehleranfällig: das LLM kann Aufgaben falsch parsen, falsche Statuswerte einsetzen oder gar den gesamten Plan überschreiben. Dadurch sind Zustand und Darstellung unzuverlässig.
+
+---
+
+**Proposed Solution**
+
+1. **LLM bleibt Planner**
+
+   * Das LLM erzeugt den initialen Plan **nicht als Markdown**, sondern als **valide JSON-Struktur** nach einem festen Schema.
+   * Prompting erfolgt mit `generate_structured_response` / Function-Calling, `temperature≈0.2` und klarem JSON-Schema.
+   * Das LLM liefert zusätzlich `open_questions` für unklare Eingaben.
+
+2. **JSON-Schema für Tasks und Fragen**
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "status"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "tool": { "type": "string" },
+          "params": { "type": "object" },
+          "status": { "type": "string", "enum": ["PENDING","IN_PROGRESS","COMPLETED","FAILED","SKIPPED"] },
+          "depends_on": { "type": "array", "items": { "type": "string" } },
+          "priority": { "type": "integer" },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["tasks","open_questions"],
+  "additionalProperties": false
+}
 ```
 
-* `tools` default to `[]`.
-* `policy` options (generic):
+**Beispieloutput vom LLM:**
 
-  * `max_steps` (default 50)
-  * `max_retries` (default 3) with exponential backoff (existing)
-  * `persist_state` (default True; current StateManager is kept)
+```json
+{
+  "tasks": [
+    {
+      "id": "t1",
+      "title": "Rechnungs-PDFs einlesen",
+      "tool": "load_invoices",
+      "params": {"path": "/data/invoices"},
+      "status": "PENDING",
+      "priority": 1
+    },
+    {
+      "id": "t2",
+      "title": "Merkmale extrahieren",
+      "tool": "extract_features",
+      "params": {"model": "gpt-4.1-mini"},
+      "status": "PENDING",
+      "depends_on": ["t1"],
+      "priority": 2
+    }
+  ],
+  "open_questions": [
+    "Wo liegen die PDFs? (z. B. /data/invoices)",
+    "Welches Zielformat für den Export? (CSV, Parquet)"
+  ]
+}
+```
 
-## 4.2 Action space
+3. **Validierung & Reparatur**
 
-* Keep: `TOOL_CALL`, `ASK_USER`, `COMPLETE`, `ERROR_RECOVERY`.
-* Rename: `UPDATE_CHECKLIST` → `UPDATE_TODOLIST`.
-* Internally, we continue to expose “meta-actions” to the LLM (ask\_user, complete, update\_todolist, error\_recovery) through the provider’s `call_tools()` when it supports function calling.
+   * JSON gegen Schema prüfen.
+   * Falls ungültig → kurzer Repair-Prompt an das LLM mit Parserfehler.
+   * Nach 1–2 Versuchen → `ASK_USER`.
 
----
+4. **Persistenz im Agent**
 
-# Phase 5 — Extract domain packs (examples, not core)
+   * `context["tasks"]` = Single Source of Truth (Liste von Dicts oder Pydantic-`Task`-Objekten).
+   * `context["open_questions"]` = separate Liste.
+   * Jede Statusänderung (z. B. Tool gestartet → `IN_PROGRESS`, erfolgreich → `COMPLETED`) erfolgt deterministisch im Code.
 
-* Move all IDP/Git-specific assets into `examples/idp_pack/`:
+5. **Renderschicht (Markdown)**
 
-  * `system_prompt_idp.txt` (old `IDP_COPILOT_SYSTEM_PROMPT`) and `system_prompt_git.txt` (old `IDP_COPILOT_SYSTEM_PROMPT_GIT`).
-  * `idp_tools.py` exporting the current `BUILTIN_TOOLS` (unchanged content, only location moved).
-  * `run_idp_cli.py` that composes: mission prompt + tool list + policies and launches the agent like your current `main()`.
+   * Aus den Tasks wird Markdown generiert (View).
+   * Statusänderungen updaten nur `tasks` → Markdown wird neu gerendert.
+   * **Keine** LLM-Edits am Markdown mehr.
 
-This leaves `ProductionReActAgent` 100% generic.
+6. **Bei Tool Calls**
 
----
+   * Passenden Task mit `tool == name` und `status==PENDING/IN_PROGRESS` finden.
+   * Status auf `IN_PROGRESS` setzen.
+   * Nach Erfolg/Fehler → Status `COMPLETED`/`FAILED`, Resultat speichern.
 
-# Phase 6 — Code edits (surgical)
+7. **Plan-Updates**
 
-Below are the minimal, targeted edits. (Names use the new TodoList terms; line numbers omitted for brevity.)
+   * Wenn Nutzer neue Antworten liefert oder ein Tool-Fehler neue Informationen verlangt, darf das LLM den Plan erneut generieren (mit aktuellem Plan + neuen Infos als Input).
+   * Der Agent merged deterministisch (IDs beibehalten, neue IDs generieren).
 
-## 6.1 `todolist_md.py` (ex-`checklists_simple.py`)
 
-* Rename public functions:
+**Benefits**
 
-  * `create_checklist_md` → `create_todolist_md`
-  * `update_checklist_md` → `update_todolist_md`
-* Change prompt strings “Checklist” → “Todo List”, keep structure and rules identical.
+* Robuste, testbare Zustandsführung.
+* Markdown ist reine Präsentationsschicht, kein kritischer Speicher.
+* Keine Halluzinationen beim Statuswechsel.
+* Einfaches Debugging: `context["tasks"]` zeigt immer den aktuellen Stand.
 
-## 6.2 `idp.py` (agent)
 
-* **Enums**
+**Acceptance Criteria**
 
-  * `ActionType.UPDATE_CHECKLIST` → `ActionType.UPDATE_TODOLIST`.
-* **State keys**
-
-  * Replace `checklist_*` with `todolist_*` everywhere (created/file/status getters).
-* **Handlers**
-
-  * `_handle_checklist_action` → `_handle_todolist_action`; internal calls to `create_todolist_md`, `update_todolist_md` (import from `todolist_md`).
-  * `_execute_tool_call`:
-
-    * Keep the “ensure todolist exists” guard, just renamed.
-    * Keep best-effort status updates via `update_todolist_md()` (IN\_PROGRESS/COMPLETED/FAILED, with recorded result).
-    * Remove IDP-specific blocker typing; set a generic `blocker = {message, suggestion}` when any error string exists.
-* **Provider abstraction**
-
-  * Add `LLMProvider.call_tools()` and refactor `_determine_action()` to call it; remove direct OpenAI SDK usage here.
-* **System prompt composition**
-
-  * Update `_compose_system_prompt()` rules to be generic and mention “Todo List” not “Checklist”; drop tool-specific retry rules.
-* **Constructor**
-
-  * Stop defaulting `tools` to `BUILTIN_TOOLS`. Use `[]` if not provided.
-* **Main**
-
-  * Remove (or replace with a tiny sample) — the IDP CLI moves to `examples/idp_pack/run_idp_cli.py`.
-
-## 6.3 `tools.py`
-
-* No changes; keep as is (it’s already generic and solid).
-
-## 6.4 `tools_builtin.py`
-
-* No functional changes for core; move into example pack (export unchanged `BUILTIN_TOOLS`).
-
-## 6.5 `prompt.py`
-
-* Move the IDP prompts into example pack; the core module should not import them.
+* Initialer Plan wird ausschließlich als JSON erzeugt.
+* `context["tasks"]` ist die einzige Quelle für den Taskstatus.
+* Markdown ist jederzeit konsistent mit `tasks`.
+* Statuswechsel/Resultate sind deterministisch und nachvollziehbar im Log.
+* Ungültiges JSON wird repariert oder führt zu `ASK_USER`.
 
 ---
 
-# Phase 7 — Migration notes
+## 5. Retry-Strategie mit Fehlerklassifizierung
 
-* If you want one release of backwards compatibility:
+**Problem Statement**
+Aktuell wird jede Exception in `_exec_with_retry` automatisch erneut ausgeführt, egal ob es sich um einen transienten Fehler oder um einen Benutzerfehler handelt.
 
-  * Keep import shims:
+**Proposed Solution**
 
-    * `from todolist_md import create_todolist_md as create_checklist_md` etc.
-  * Map `ActionType.UPDATE_CHECKLIST` to `UPDATE_TODOLIST` in a deprecated alias for one version.
-* Update any existing missions/prompts that say “Checklist” to say “Todo List.”
+* Fehlerarten unterscheiden:
 
----
+  * `TransientError` → Retry mit Backoff.
+  * `UserInputError` → sofort `ASK_USER`.
+* Exceptions entsprechend taggen/werfen.
 
-# Phase 8 — Tests & acceptance criteria
+**Benefits**
 
-1. **Zero-tools mode**
+* Weniger unnötige Retries.
+* Bessere User Experience: Nutzer wird direkt gefragt, wenn Input fehlt/falsch ist.
+* Schnellere Recovery bei echten Fehlern.
 
-   * Start agent with `tools=[]` and a trivial mission; agent can only `ASK_USER`/`COMPLETE`. No crashes.
-2. **Hello-tools mode**
+**Acceptance Criteria**
 
-   * Register two demo tools (`echo`, `math.add`); mission instructs to use them; agent calls via provider tool-calling (OpenAI) or falls back to schema JSON; **Todo List** is created and updated after each call.
-3. **IDP pack**
-
-   * In `examples/idp_pack/`, compose the moved prompts + current `BUILTIN_TOOLS` and verify the same behavior you have today (repository creation flow), but with a **generic core** agent.
-4. **Persistence**
-
-   * Interrupt a session; resume with same `session_id`; agent restores state and **todolist** path and continues.
-5. **Blockers & ASK\_USER**
-
-   * Simulate a failing tool (e.g., `create_repository` without `GITHUB_TOKEN`); verify generic blocker → `ASK_USER` with non-IDP-specific wording.
+* Transiente Fehler werden retried.
+* User Input Fehler führen zu einer `ASK_USER`-Aktion.
+* Fehlerhandling ist in den Logs nachvollziehbar.
 
 ---
 
-# Phase 9 — Optional polish (quick wins)
+## 6. Loop-Guard gegen „im Kreis drehen“
 
-* **Pydantic v2**: migrate deprecated `@validator` to `@field_validator` in `ActionDecision`.
-* **Policy knob** to disable automatic TodoList bootstrapping (let missions opt-out).
-* **Todo item schema hint**: when creating the Todo List, suggest an item field `tool: <exact_tool_name>` (the current doc text already nudges this) so the LLM can align actions to items cleanly.
+**Problem Statement**
+Der Agent kann in Loops geraten, wenn die letzten Aktionen/Observationen keine Fortschritte bringen. Dadurch dreht er sich im Kreis.
+
+**Proposed Solution**
+
+* Loop-Guard implementieren:
+
+  * Wenn die letzten N Aktionen identisch oder wirkungslos waren → Abbruch.
+  * Stattdessen automatische Aktion `ERROR_RECOVERY` oder `ASK_USER`.
+
+**Benefits**
+
+* Verhindert Endlosschleifen.
+* Nutzer erhält klare Rückmeldung statt ewiger Wiederholung.
+* Stabileres Verhalten in unklaren Situationen.
+
+**Acceptance Criteria**
+
+* Agent bricht ab, wenn 3 gleiche Observations/Aktionen hintereinander auftreten.
+* Nutzer wird mit `ASK_USER` konfrontiert.
+* Keine Endlosschleifen mehr im Log.
 
 ---
 
-## Deliverables (by PR)
-
-* **PR-1**: Rename & extract `todolist_md.py`; agent string/enum/key renames; no behavior change.
-* **PR-2**: Remove IDP/Git defaults (no `BUILTIN_TOOLS`, no built-in prompts); neutral system-prompt composition.
-* **PR-3**: Provider `call_tools()` abstraction; `_determine_action()` refactor.
-* **PR-4**: Generic blocker handling; context summary & messages use “Todo List.”
-* **PR-5**: Example pack `examples/idp_pack/` with moved prompts/tools and a CLI runner.
-
-This leaves you with a **generic, mission-configured ReAct agent** that leverages a **Todo List** as a universal, persistent progress & decision aid — exactly what you outlined.
+👉 Soll ich dir diese Feature Requests als **ein zusammenhängendes Dokument** (z. B. in Markdown oder DOCX) aufbereiten, damit du sie direkt ins Repo legen kannst?
