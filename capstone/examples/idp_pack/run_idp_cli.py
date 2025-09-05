@@ -21,7 +21,13 @@ def load_text(path: Path) -> str:
 async def main() -> None:
 	root = Path(__file__).resolve().parents[2]
 	prompt_path = root / "examples" / "idp_pack" / "system_prompt_git.txt"
-	system_prompt = load_text(prompt_path)
+	git_mission = load_text(prompt_path)
+	# Generic system prompt shared across agents (IDP principles)
+	generic_path = root / "examples" / "idp_pack" / "system_prompt_idp.txt"
+	generic = load_text(generic_path)
+	# Orchestrator mission
+	orch_path = root / "examples" / "idp_pack" / "prompts" / "orchestrator.txt"
+	orch_mission = load_text(orch_path)
 
     # Initialize LLM provider with fallback to mock if no API key
 	openai_key = os.getenv("OPENAI_API_KEY")
@@ -31,14 +37,16 @@ async def main() -> None:
 	# Sub-agent with Git tools
 	git_tools = get_idp_tools()
 	git_agent = ReActAgent(
-		system_prompt=system_prompt,
+		system_prompt=None,
 		llm=provider,
 		tools=git_tools,
+		mission=git_mission,
+		generic_system_prompt=generic,
 	)
 
 	# Orchestrator only knows the sub-agent tool (delegation)
 	orchestrator = ReActAgent(
-		system_prompt=system_prompt,
+		system_prompt=None,
 		llm=provider,
 		tools=[
 			git_agent.to_tool(
@@ -46,8 +54,11 @@ async def main() -> None:
 				description="Git sub-agent",
 				allowed_tools=[t.name for t in git_tools],
 				budget={"max_steps": 12},
+				mission_override=git_mission,
 			),
 		],
+		mission=orch_mission,
+		generic_system_prompt=generic,
 	)
 
 	print("=" * 80)

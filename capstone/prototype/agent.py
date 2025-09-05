@@ -43,6 +43,27 @@ tool_execution_time = Histogram('idp_tool_execution_seconds', 'Tool execution ti
 tool_success_rate = Counter('idp_tool_success', 'Tool execution success', ['tool_name'])
 tool_failure_rate = Counter('idp_tool_failure', 'Tool execution failures', ['tool_name'])
 
+# ===== Default Generic Prompt (used in composed mode) =====
+DEFAULT_GENERIC_PROMPT = (
+    """
+<GenericAgentSection>
+You are a ReAct-style execution agent.
+
+Operating principles:
+- Plan-first: create/update a concise Todo List; clarify blocking questions first.
+- Be deterministic, keep outputs minimal & actionable.
+- After each tool call, update state; avoid loops; ask for help on blockers.
+
+Decision policy:
+- Prefer available tools; ask user only for truly blocking info.
+- Stop when acceptance criteria for the mission are met.
+
+Output style:
+- Short, structured, CLI-friendly status lines.
+</GenericAgentSection>
+"""
+).strip()
+
 # ============ Action Space ============
 class ActionType(Enum):
     TOOL_CALL = "tool_call"
@@ -100,11 +121,14 @@ class PlanOutput(BaseModel):
 class ReActAgent:
     def __init__(
         self,
-        system_prompt: str,
+        system_prompt: str | None,
         llm: LLMProvider,
         *,
         tools: List[ToolSpec] | None = None,
         max_steps: int = 50,
+        generic_system_prompt: str | None = None,
+        mission: str | None = None,
+        prompt_overrides: Dict[str, Any] | None = None,
     ):
         """
         Initializes the ReActAgent with the given system prompt, LLM provider, tools, and maximum steps.
@@ -114,11 +138,16 @@ class ReActAgent:
             tools: The tools to use.
             max_steps: The maximum number of steps to take.
         """
-        self.system_prompt_base = system_prompt.strip()
+        self.system_prompt_base = (system_prompt or "").strip()
         self.llm = llm
         self.tools: List[ToolSpec] = tools or []  # keine Default-Tools -> generisch
         self.tool_index = build_tool_index(self.tools)
         self.max_steps = max_steps
+
+        # New prompt composition fields
+        self.generic_system_prompt_base: str | None = (generic_system_prompt or None)
+        self.mission_text: str | None = (mission or None)
+        self.prompt_overrides: Dict[str, Any] = dict(prompt_overrides or {})
 
         self.state = StateManager()
         self.feedback = FeedbackCollector()
@@ -132,7 +161,8 @@ class ReActAgent:
         # Loop-Guard: keep recent action/observation signatures to detect repetition
         self._loop_signatures: List[str] = []
 
-        self.system_prompt = self._compose_system_prompt()
+        # Build the final system prompt using the new builder (default: compose)
+        self.final_system_prompt = self._build_final_system_prompt()
 
     async def process_request(self, user_input: str, session_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """
@@ -345,7 +375,7 @@ class ReActAgent:
             f"Tools and required params:\n{json.dumps(required_by_tool, ensure_ascii=False, indent=2)}"
         )
         try:
-            return await self.llm.generate_structured_response(prompt, BlockingQuestions, system_prompt=self.system_prompt)
+            return await self.llm.generate_structured_response(prompt, BlockingQuestions, system_prompt=self.final_system_prompt)
         except Exception:
             return BlockingQuestions()
 
@@ -367,7 +397,7 @@ class ReActAgent:
             f"User request:\n{user_req}\n"
         )
         try:
-            plan: PlanOutput = await self.llm.generate_structured_response(prompt, PlanOutput, system_prompt=self.system_prompt)
+            plan: PlanOutput = await self.llm.generate_structured_response(prompt, PlanOutput, system_prompt=self.final_system_prompt)
         except Exception:
             # Fallback to empty plan; we can proceed with tool decisions later
             plan = PlanOutput(tasks=[], open_questions=[])
@@ -404,7 +434,7 @@ class ReActAgent:
             "Keep it short."
         )
         try:
-            return await self.llm.generate_response(prompt, system_prompt=self.system_prompt)
+            return await self.llm.generate_response(prompt, system_prompt=self.final_system_prompt)
         except Exception:
             return "Analyze state and choose next safe, useful step."
 
@@ -489,7 +519,7 @@ class ReActAgent:
                 },
             ]
             call = await self.llm.call_tools(
-                system_prompt=self.system_prompt,
+                system_prompt=self.final_system_prompt,
                 tools=tools_fc + meta,
                 messages=[{
                     "role": "user",
@@ -535,7 +565,7 @@ class ReActAgent:
             "Return the best next action."
         )
         try:
-            dec = await self.llm.generate_structured_response(prompt, ActionDecision, system_prompt=self.system_prompt)
+            dec = await self.llm.generate_structured_response(prompt, ActionDecision, system_prompt=self.final_system_prompt)
             # If we detect completion condition, force COMPLETE unless ASK_USER
             if dec.action_type != ActionType.ASK_USER and self._all_tasks_completed():
                 return ActionDecision(action_type=ActionType.COMPLETE, action_name="complete", parameters={"summary": "All tasks completed."}, reasoning="All tasks done", confidence=0.95)
@@ -711,7 +741,9 @@ class ReActAgent:
         budget: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = 120.0,
         aliases: Optional[List[str]] = None,
-        system_prompt_override: Optional[str] = None,
+        system_prompt_override: Optional[str] = None,  # deprecated: mapped to mission_override
+        mission_override: Optional[str] = None,
+        generic_system_prompt_override: Optional[str] = None,
     ) -> ToolSpec:
         """Return a ToolSpec that wraps this agent as a sub-agent tool.
 
@@ -734,11 +766,17 @@ class ReActAgent:
             tools_whitelist = [t for t in tools_src if not names or t.name in names]
             max_steps = int((budget or {}).get("max_steps", 12))
 
+            # Back-compat: system_prompt_override is treated as a mission override by default
+            effective_mission = mission_override or system_prompt_override or None
+
             sub = ReActAgent(
-                system_prompt=system_prompt_override or self.system_prompt_base,
+                system_prompt=None,
                 llm=self.llm,
                 tools=tools_whitelist,
                 max_steps=max_steps,
+                generic_system_prompt=generic_system_prompt_override or self.generic_system_prompt_base,
+                mission=effective_mission,
+                prompt_overrides={"mode": "compose"},
             )
             sub.session_id = (shared_context or {}).get("session_id")
             sub.context = {
@@ -821,6 +859,47 @@ class ReActAgent:
             timeout=timeout,
             aliases=aliases or [],
         )
+
+    # ===== Prompt Builder (new) =====
+    def _build_final_system_prompt(self) -> str:
+        """Compose the final system prompt in three sections or use legacy_full as requested.
+
+        Modes:
+          - compose (default): <GenericAgentSection> + <Mission> + <Tools>
+          - legacy_full: use self.system_prompt_base 1:1 (back-compat path)
+        """
+        mode = str(self.prompt_overrides.get("mode", "compose")).strip().lower()
+        if mode == "legacy_full":
+            return self.system_prompt_base
+
+        # Generic section
+        generic = (self.generic_system_prompt_base or DEFAULT_GENERIC_PROMPT).strip()
+
+        # Mission section (always present, may be empty)
+        mission = (self.mission_text or "").strip()
+
+        # Tools section from ToolSpec list
+        tool_lines: List[str] = []
+        for spec in self.tools:
+            req = list((spec.input_schema or {}).get("required", []))
+            tool_lines.append(f"- {spec.name}: {spec.description}")
+            if req:
+                tool_lines.append(f"  required: {', '.join(req)}")
+
+        parts = [
+            "<GenericAgentSection>",
+            generic,
+            "</GenericAgentSection>",
+            "",
+            "<Mission>",
+            mission,
+            "</Mission>",
+            "",
+            "<Tools>",
+            "\n".join(tool_lines) if tool_lines else "",
+            "</Tools>",
+        ]
+        return "\n".join(parts).strip()
 
     # ===== ASK_USER =====
     async def _handle_user_interaction(self, action_name: str, params: Dict[str, Any]) -> str:
