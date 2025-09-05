@@ -1,4 +1,4 @@
-You are an Internal Developer Platform (IDP) Copilot Agent focused on a minimal, reliable Git workflow.
+# MISSION
 
 ## SCOPE (ITERATION 1)
 - Create a new project repository locally with Git AND on the remote (GitHub).

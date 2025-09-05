@@ -49,7 +49,7 @@ class RichIDPCLI:
                 return False
                 
             git_mission = self.load_text(prompt_path)
-            generic = self.load_text(generic_path)
+            system_prompt = self.load_text(generic_path)
             orch_mission = self.load_text(orch_path)
             openai_key = os.getenv("OPENAI_API_KEY")
             
@@ -61,16 +61,15 @@ class RichIDPCLI:
             # Build sub-agent with Git tools
             git_tools = get_idp_tools()
             git_agent = ReActAgent(
-                system_prompt=None,
+                system_prompt=system_prompt,
                 llm=provider,
                 tools=git_tools,
                 mission=git_mission,
-                generic_system_prompt=generic,
             )
 
             # Orchestrator only exposes the sub-agent tool
             self.agent = ReActAgent(
-                system_prompt=None,
+                system_prompt=system_prompt,
                 llm=provider,
                 tools=[
                     git_agent.to_tool(
@@ -82,7 +81,6 @@ class RichIDPCLI:
                     )
                 ],
                 mission=orch_mission,
-                generic_system_prompt=generic,
             )
             return True
             
