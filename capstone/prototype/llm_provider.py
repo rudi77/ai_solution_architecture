@@ -29,7 +29,8 @@ class LLMProvider(ABC):
 class OpenAIProvider(LLMProvider):
     """OpenAI/GPT implementation using official OpenAI SDK (no langchain)."""
     
-    def __init__(self, api_key: str, model: str = "gpt-5-mini-2025-08-07", temperature: float = 0.1):
+    #def __init__(self, api_key: str, model: str = "gpt-5-mini-2025-08-07", temperature: float = 0.1):
+    def __init__(self, api_key: str, model: str = "gpt-4.1", temperature: float = 0.1):
         from openai import AsyncOpenAI
         
         self.client = AsyncOpenAI(api_key=api_key)
@@ -42,7 +43,9 @@ class OpenAIProvider(LLMProvider):
         try:
             completion = await self.client.chat.completions.create(
                 model=self.model,
-                #temperature=self.temperature,
+                # reasoning_effort="minimal",
+                # verbosity="low",  
+                temperature=self.temperature,                
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
@@ -69,7 +72,9 @@ class OpenAIProvider(LLMProvider):
         try:
             completion = await self.client.chat.completions.create(
                 model=self.model,
-                #temperature=self.temperature,
+                # reasoning_effort="minimal",
+                # verbosity="low",
+                temperature=self.temperature,
                 messages=[
                     {"role": "system", "content": kwargs.get('system_prompt', '')},
                     {"role": "user", "content": prompt},
@@ -119,7 +124,9 @@ class OpenAIProvider(LLMProvider):
         try:
             completion = await self.client.chat.completions.create(
                 model=self.model,
-                #temperature=self.temperature,
+                # reasoning_effort="minimal",
+                # verbosity="low",
+                temperature=self.temperature,
                 messages=[{"role": "system", "content": system_prompt}] + messages,
                 tools=tools,
                 tool_choice="auto",
