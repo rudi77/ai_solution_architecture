@@ -126,7 +126,6 @@ class ReActAgent:
         *,
         tools: List[ToolSpec] | None = None,
         max_steps: int = 50,
-        generic_system_prompt: str | None = None,
         mission: str | None = None,
         prompt_overrides: Dict[str, Any] | None = None,
     ):
@@ -145,7 +144,6 @@ class ReActAgent:
         self.max_steps = max_steps
 
         # New prompt composition fields
-        self.generic_system_prompt_base: str | None = (generic_system_prompt or None)
         self.mission_text: str | None = (mission or None)
         self.prompt_overrides: Dict[str, Any] = dict(prompt_overrides or {})
 
@@ -743,7 +741,6 @@ class ReActAgent:
         aliases: Optional[List[str]] = None,
         system_prompt_override: Optional[str] = None,  # deprecated: mapped to mission_override
         mission_override: Optional[str] = None,
-        generic_system_prompt_override: Optional[str] = None,
     ) -> ToolSpec:
         """Return a ToolSpec that wraps this agent as a sub-agent tool.
 
@@ -770,11 +767,10 @@ class ReActAgent:
             effective_mission = mission_override or system_prompt_override or None
 
             sub = ReActAgent(
-                system_prompt=None,
+                system_prompt=self.system_prompt_base,
                 llm=self.llm,
                 tools=tools_whitelist,
                 max_steps=max_steps,
-                generic_system_prompt=generic_system_prompt_override or self.generic_system_prompt_base,
                 mission=effective_mission,
                 prompt_overrides={"mode": "compose"},
             )
@@ -873,7 +869,7 @@ class ReActAgent:
             return self.system_prompt_base
 
         # Generic section
-        generic = (self.generic_system_prompt_base or DEFAULT_GENERIC_PROMPT).strip()
+        generic = (self.system_prompt_base or DEFAULT_GENERIC_PROMPT).strip()
 
         # Mission section (always present, may be empty)
         mission = (self.mission_text or "").strip()
