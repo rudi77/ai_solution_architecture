@@ -7,7 +7,7 @@ import hashlib
 import json
 import time
 import re  # CHANGED: for simple fact extraction (kebab-case)
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, ClassVar
 
 from prometheus_client import Counter, Gauge, Histogram
 from pydantic import BaseModel, Field
@@ -161,6 +161,15 @@ class ReActAgent:
 
         # Build the final system prompt using the new builder (default: compose)
         self.final_system_prompt = self._build_final_system_prompt()
+        try:
+            self.logger.info(
+                "final_system_prompt",
+                mode=str(self.prompt_overrides.get("mode", "compose")),
+                prompt=self.final_system_prompt,
+            )
+        except Exception:
+            # Logging must never break agent construction
+            pass
 
     async def process_request(self, user_input: str, session_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """
@@ -604,9 +613,14 @@ class ReActAgent:
     async def _handle_todolist(self, action: str, params: Dict[str, Any]) -> str:
         act = action.lower().replace("-", "_").replace(" ", "_")
         if act in {"create_todolist", "create"}:
-            # Re-generate from latest context (idempotent)
+            # If a Todo List already exists, do NOT re-generate the plan to avoid overwriting state.
+            # Only re-render the Markdown view from the authoritative in-memory state.
+            if self.context.get("todolist_created"):
+                self._render_markdown_view()
+                return f"Todo List already exists at {self.context.get('todolist_file')}; skipped re-create."
+            # Otherwise, create the initial plan
             await self._create_initial_plan(open_questions=[])
-            return f"Todo List (re)created at {self.context.get('todolist_file')}"
+            return f"Todo List created at {self.context.get('todolist_file')}"
         if act == "update_item_status":
             # Back-compat: allow structured params {item_id,status,notes}
             item_id = params.get("item_id")
@@ -748,6 +762,9 @@ class ReActAgent:
         Inputs follow the sub-agent schema: task, inputs, shared_context, budget, resume_token, answers.
         """
 
+        # Cache a single sub-agent instance per tool wrapper to avoid re-creating it each call
+        sub_agent_cached: Optional["ReActAgent"] = None
+
         async def _subagent_tool(
             *,
             task: str,
@@ -758,22 +775,35 @@ class ReActAgent:
             answers: Optional[Dict[str, Any]] = None,
             **kwargs: Any,
         ) -> Dict[str, Any]:
+            nonlocal sub_agent_cached
+
             tools_src = self.tools
             names = set(allowed_tools or [])
             tools_whitelist = [t for t in tools_src if not names or t.name in names]
-            max_steps = int((budget or {}).get("max_steps", 12))
 
             # Back-compat: system_prompt_override is treated as a mission override by default
             effective_mission = mission_override or system_prompt_override or None
 
-            sub = ReActAgent(
-                system_prompt=self.system_prompt_base,
-                llm=self.llm,
-                tools=tools_whitelist,
-                max_steps=max_steps,
-                mission=effective_mission,
-                prompt_overrides={"mode": "compose"},
-            )
+            # Lazily create once, then reuse
+            if sub_agent_cached is None:
+                sub_agent_cached = ReActAgent(
+                    system_prompt=self.system_prompt_base,
+                    llm=self.llm,
+                    tools=tools_whitelist,
+                    max_steps=int((budget or {}).get("max_steps", 12)),
+                    mission=effective_mission,
+                    prompt_overrides={"mode": "compose"},
+                )
+
+            # Refresh runtime-configurable aspects per call
+            sub = sub_agent_cached
+            if budget and "max_steps" in budget:
+                try:
+                    sub.max_steps = int(budget.get("max_steps", sub.max_steps))
+                except Exception:
+                    pass
+
+            # Ensure session and minimal context are set for this invocation
             sub.session_id = (shared_context or {}).get("session_id")
             sub.context = {
                 "user_request": task,

@@ -32,13 +32,13 @@ async def main() -> None:
 
 	provider = OpenAIProvider(api_key=openai_key)
 
-	# Sub-agent with Git tools
+	# Sub-agent with Git tools (no mission → empty <Mission> in sub-agent)
 	git_tools = get_idp_tools()
 	git_agent = ReActAgent(
 		system_prompt=None,
 		llm=provider,
 		tools=git_tools,
-		mission=mission,
+		mission=None,
 	)
 
 	# Orchestrator only knows the sub-agent tool (delegation)
