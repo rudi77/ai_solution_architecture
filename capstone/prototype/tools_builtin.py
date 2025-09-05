@@ -708,13 +708,18 @@ async def run_sub_agent(
     allow = [t for t in BUILTIN_TOOLS if (not allowed_tools) or (t.name in allowed_tools)]
     subagent = ReActAgent(system_prompt=None, llm=llm, tools=allow, max_steps=int((budget or {}).get("max_steps", 12)), mission=system_prompt)
 
-    # Seed minimal context
-    subagent.session_id = (shared_context or {}).get("session_id")
+    # Seed minimal context (ephemeral + child-session) to avoid state collision
+    parent_sid = (shared_context or {}).get("session_id") or "no-session"
+    subagent.session_id = f"{parent_sid}:sub:{(agent_name or 'subagent')}"
     subagent.context = {
         "user_request": task,
         "known_answers_text": (shared_context or {}).get("known_answers_text", ""),
         "facts": (shared_context or {}).get("facts", {}),
         "version": int((shared_context or {}).get("version", 1)),
+        "suppress_markdown": True,
+        "ephemeral_state": True,
+        # tag for logging and ownership
+        "agent_name": agent_name or "subagent",
     }
 
     # Run a short loop
@@ -730,17 +735,27 @@ async def run_sub_agent(
             "state_token": "opaque",  # kept simple for v1
         }
 
-    # Build a minimal patch reflecting any IN_PROGRESS/COMPLETED updates it might suggest
+    # Build a minimal patch reflecting only status updates against master tasks
     patch = {
         "base_version": int((shared_context or {}).get("version", 1)),
         "agent_name": agent_name or "subagent",
         "ops": []
     }
-    # Best-effort: if sub-agent created tasks in its own context, adopt them tagged with owner
+    master_tasks = list((shared_context or {}).get("tasks", []))
+    def _find_master_task_id_by_tool(tool_name: str) -> str | None:
+        norm = (tool_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+        for mt in master_tasks:
+            tt = (mt.get("tool") or "").strip().lower().replace("-", "_").replace(" ", "_")
+            if tt == norm:
+                return str(mt.get("id"))
+        return None
     for t in subagent.context.get("tasks", []):
-        t2 = dict(t)
-        t2["owner_agent"] = agent_name or "subagent"
-        patch["ops"].append({"op": "add", "task": t2})
+        status = str(t.get("status","")).upper()
+        tool_name = t.get("tool")
+        if tool_name and status in {"IN_PROGRESS","COMPLETED"}:
+            tid = _find_master_task_id_by_tool(tool_name)
+            if tid:
+                patch["ops"].append({"op":"update","task_id":tid,"fields":{"status":status}})
 
     return {"success": True, "patch": patch, "result": {"transcript": "".join(transcript)}}
 

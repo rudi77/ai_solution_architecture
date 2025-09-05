@@ -206,11 +206,14 @@ class ReActAgent:
                     self.context["user_request_augmented"] = f"{base_req}\n\nKnown answers from user:\n{known}".strip()  # CHANGED
                     yield "📥 Danke! Ich mache weiter…\n"
             else:
-                self.context = {
+                # Preserve any pre-seeded flags (e.g., suppress_markdown/ephemeral_state) from callers
+                ctx_init = dict(self.context or {})
+                ctx_init.update({
                     "user_request": user_input,
                     "session_id": self.session_id,
                     "started_at": datetime.now().isoformat(),
-                }
+                })
+                self.context = ctx_init
                 self.context["recent_user_message"] = user_input
                 # initial augmented = original
                 self.context["user_request_augmented"] = self.context["user_request"]  # CHANGED
@@ -323,16 +326,20 @@ class ReActAgent:
             # Loop-Guard: Detect three identical action/observation pairs in a row
             try:
                 if self._record_and_check_loop(decision, observation, window_size=3):
-                    msg = await self._handle_user_interaction(
-                        "ask_user",
-                        {
-                            "questions": [
-                                "Ich erkenne wiederholte, wirkungslose Schritte. Hast du zusätzliche Informationen oder soll ich die Strategie ändern?"
-                            ],
-                            "context": "Loop-Guard: Drei identische Aktionen/Observations in Folge erkannt."
-                        },
-                    )
-                    yield f"❓ {msg}\n"
+                    if int(self.context.get("loop_guard_cooldown", 0)) <= 2:
+                        msg = await self._handle_user_interaction(
+                            "ask_user",
+                            {
+                                "questions": [
+                                    "Ich erkenne wiederholte, wirkungslose Schritte. Hast du zusätzliche Informationen oder soll ich die Strategie ändern?"
+                                ],
+                                "context": "Loop-Guard: Drei identische Aktionen/Observations in Folge erkannt."
+                            },
+                        )
+                        yield f"❓ {msg}\n"
+                    else:
+                        self.context["loop_guard_cooldown"] = 0
+                        yield "⚠️ Loop erkannt → Strategie gewechselt (kein weiteres ask_user)."
                     break
             except Exception as e:
                 self.logger.warning("loop_guard_failed", error=str(e))
@@ -424,13 +431,14 @@ class ReActAgent:
         self.context["open_questions"] = final_oq
         self.context["todolist_created"] = True
 
-        # Render Markdown view
-        path = render_todolist_markdown(
-            tasks=self.context["tasks"],
-            open_questions=self.context.get("open_questions", []),
-            session_id=self.session_id,
-        )
-        self.context["todolist_file"] = path
+        # Render Markdown view unless suppressed (e.g., in sub-agent sandbox)
+        if not self.context.get("suppress_markdown"):
+            path = render_todolist_markdown(
+                tasks=self.context["tasks"],
+                open_questions=self.context.get("open_questions", []),
+                session_id=self.session_id,
+            )
+            self.context["todolist_file"] = path
 
     # ===== ReAct inner pieces =====
     async def _generate_thought(self) -> str:
@@ -689,13 +697,15 @@ class ReActAgent:
                 "questions": need.get("questions") or [],
                 "context": need.get("context") or "",
                 "task": params.get("task"),
-                "agent_name": tool_name,
+                # propagate the sub-agent's identity if present in result or params
+                "agent_name": str(need.get("agent_name") or params.get("agent_name") or tool_name),
             }
             _ = await self._handle_user_interaction(
                 "ask_user",
                 {
                     "questions": list(need.get("questions") or []),
                     "context": need.get("context") or "Sub-Agent requires additional information.",
+                    "agent_name": str(need.get("agent_name") or params.get("agent_name") or tool_name),
                 },
             )
             self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS, notes=result_text)
@@ -761,10 +771,6 @@ class ReActAgent:
         The wrapper runs a fresh ReActAgent instance with the same LLM and a tool whitelist.
         Inputs follow the sub-agent schema: task, inputs, shared_context, budget, resume_token, answers.
         """
-
-        # Cache a single sub-agent instance per tool wrapper to avoid re-creating it each call
-        sub_agent_cached: Optional["ReActAgent"] = None
-
         async def _subagent_tool(
             *,
             task: str,
@@ -775,54 +781,73 @@ class ReActAgent:
             answers: Optional[Dict[str, Any]] = None,
             **kwargs: Any,
         ) -> Dict[str, Any]:
-            nonlocal sub_agent_cached
-
-            tools_src = self.tools
             names = set(allowed_tools or [])
-            tools_whitelist = [t for t in tools_src if not names or t.name in names]
-
-            # Back-compat: system_prompt_override is treated as a mission override by default
+            tools_whitelist = [t for t in self.tools if not names or t.name in names]
             effective_mission = mission_override or system_prompt_override or None
 
-            # Lazily create once, then reuse
-            if sub_agent_cached is None:
-                sub_agent_cached = ReActAgent(
-                    system_prompt=self.system_prompt_base,
-                    llm=self.llm,
-                    tools=tools_whitelist,
-                    max_steps=int((budget or {}).get("max_steps", 12)),
-                    mission=effective_mission,
-                    prompt_overrides={"mode": "compose"},
-                )
+            # --- snapshot original agent config
+            _orig_tools = self.tools
+            _orig_index = self.tool_index
+            _orig_max_steps = self.max_steps
+            _orig_mission = self.mission_text
+            _orig_prompt = self.final_system_prompt
+            _orig_session = self.session_id
+            _orig_context = dict(self.context or {})
 
-            # Refresh runtime-configurable aspects per call
-            sub = sub_agent_cached
-            if budget and "max_steps" in budget:
+            sub_awaiting: Optional[Dict[str, Any]] = None
+            sub_tasks_snapshot: List[Dict[str, Any]] = []
+            try:
+                # sandbox apply
+                self.tools = tools_whitelist
+                self.tool_index = build_tool_index(self.tools)
+                if budget and "max_steps" in budget:
+                    try:
+                        self.max_steps = int(budget["max_steps"])
+                    except Exception:
+                        pass
+                if effective_mission is not None:
+                    self.mission_text = effective_mission
+                    self.final_system_prompt = self._build_final_system_prompt()
+
+                parent_sid = (shared_context or {}).get("session_id") or "no-session"
+                self.session_id = f"{parent_sid}:sub:{name}"
+                self.context = {
+                    "user_request": task,
+                    "known_answers_text": (shared_context or {}).get("known_answers_text", ""),
+                    "user_inputs": (shared_context or {}).get("user_inputs", []),
+                    "facts": (shared_context or {}).get("facts", {}),
+                    "version": int((shared_context or {}).get("version", 1)),
+                    "suppress_markdown": True,
+                    "ephemeral_state": True,
+                    "agent_name": name,
+                }
+
+                transcript: List[str] = []
+                async for chunk in self.process_request(task, session_id=self.session_id):
+                    transcript.append(chunk)
+                # capture sub-agent state before rollback
                 try:
-                    sub.max_steps = int(budget.get("max_steps", sub.max_steps))
+                    sub_awaiting = self.context.get("awaiting_user_input")
                 except Exception:
-                    pass
+                    sub_awaiting = None
+                try:
+                    sub_tasks_snapshot = list(self.context.get("tasks", []))
+                except Exception:
+                    sub_tasks_snapshot = []
+            finally:
+                # rollback sandbox
+                self.tools = _orig_tools
+                self.tool_index = _orig_index
+                self.max_steps = _orig_max_steps
+                self.mission_text = _orig_mission
+                self.final_system_prompt = _orig_prompt
+                self.session_id = _orig_session
+                self.context = _orig_context
 
-            # Ensure session and minimal context are set for this invocation
-            sub.session_id = (shared_context or {}).get("session_id")
-            sub.context = {
-                "user_request": task,
-                "known_answers_text": (shared_context or {}).get("known_answers_text", ""),
-                "user_inputs": (shared_context or {}).get("user_inputs", []),
-                "facts": (shared_context or {}).get("facts", {}),
-                "version": int((shared_context or {}).get("version", 1)),
-                # prevent sub-agents from writing their own Markdown view
-                "suppress_markdown": True,
-            }
-
-            transcript: List[str] = []
-            async for chunk in sub.process_request(task, session_id=sub.session_id):
-                transcript.append(chunk)
-
-            if sub.context.get("awaiting_user_input"):
+            if sub_awaiting:
                 return {
                     "success": False,
-                    "need_user_input": sub.context.get("awaiting_user_input"),
+                    "need_user_input": sub_awaiting,
                     "state_token": "opaque",
                 }
 
@@ -837,7 +862,7 @@ class ReActAgent:
                 return None
 
             ops: list[dict] = []
-            for t in sub.context.get("tasks", []):
+            for t in sub_tasks_snapshot:
                 tool_name = str(t.get("tool") or "").strip()
                 status = str(t.get("status") or "").upper()
                 if not tool_name:
@@ -931,6 +956,18 @@ class ReActAgent:
     async def _handle_user_interaction(self, action_name: str, params: Dict[str, Any]) -> str:
         questions = params.get("questions") or []
         ctx = params.get("context") or ""
+        try:
+            # Improve observability: include agent identity and session in logs
+            agent_name = str(self.context.get("agent_name") or params.get("agent_name") or "").strip() or None
+            self.logger.info(
+                "ask_user_triggered",
+                agent=agent_name,
+                session_id=self.session_id,
+                action=action_name,
+                num_questions=len(questions),
+            )
+        except Exception:
+            pass
         self.context["awaiting_user_input"] = {
             "action": action_name,
             "questions": questions,
@@ -1022,6 +1059,7 @@ class ReActAgent:
         if len(self._loop_signatures) > window_size:
             self._loop_signatures = self._loop_signatures[-window_size:]
         if len(self._loop_signatures) == window_size and len(set(self._loop_signatures)) == 1:
+            self.context["loop_guard_cooldown"] = int(self.context.get("loop_guard_cooldown", 0)) + 1
             return True
         return False
 
@@ -1033,6 +1071,8 @@ class ReActAgent:
         return f"{decision.action_type.value}|{decision.action_name.lower()}|{obs}"
 
     async def _save(self):
+        if self.context.get("ephemeral_state"):
+            return
         await self.state.save_state(self.session_id, {
             "context": self.context,
             "react_history": self.react_history,
