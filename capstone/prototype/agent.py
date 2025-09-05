@@ -819,6 +819,7 @@ class ReActAgent:
                     "version": int((shared_context or {}).get("version", 1)),
                     "suppress_markdown": True,
                     "ephemeral_state": True,
+                    "no_user_prompts": True,
                     "agent_name": name,
                 }
 
@@ -954,6 +955,9 @@ class ReActAgent:
 
     # ===== ASK_USER =====
     async def _handle_user_interaction(self, action_name: str, params: Dict[str, Any]) -> str:
+        # Block user prompts entirely for sub-agents when flagged
+        if self.context.get("no_user_prompts"):
+            return "Sub-agent: user prompts disabled"
         questions = params.get("questions") or []
         ctx = params.get("context") or ""
         try:

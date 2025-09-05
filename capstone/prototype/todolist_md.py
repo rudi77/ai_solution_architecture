@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional
+import re
 
 
 # ---------- helpers ----------
@@ -20,6 +21,9 @@ def get_todolist_path(session_id: Optional[str] = None, base_dir: str = "./check
     todolist_dir = Path(base_dir)
     todolist_dir.mkdir(parents=True, exist_ok=True)
     sid = session_id or datetime.now().strftime("%Y%m%d%H%M%S")
+    # Sanitize for filesystem safety (Windows: : * ? " < > | and slashes)
+    if sid:
+        sid = re.sub(r'[^A-Za-z0-9._-]', '_', str(sid))[:120]
     # keep one stable file per session id, otherwise always use a single shared file
     name = f"todolist_{sid}.md" if session_id else "todolist.md"
     return todolist_dir / name
@@ -170,6 +174,10 @@ def render_todolist_markdown(
     Returns:
         The file path where the Markdown view was written.
     """
+    # Defensive: allow callers to suppress rendering entirely (e.g., sub-agents)
+    if isinstance(tasks, dict) and tasks.get("suppress_markdown"):
+        return ""
+
     path = get_todolist_path(session_id=session_id, base_dir=base_dir)
     _ensure_file(path)
 
