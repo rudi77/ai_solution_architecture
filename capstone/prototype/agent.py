@@ -18,8 +18,6 @@ from capstone.prototype.feedback_collector import FeedbackCollector
 from capstone.prototype.llm_provider import LLMProvider
 from capstone.prototype.statemanager import StateManager
 from capstone.prototype.todolist_md import (
-    update_todolist_md,  # back-compat only
-    create_todolist_md,  # back-compat only
     render_todolist_markdown,
 )
 from capstone.prototype.tools import (
@@ -243,6 +241,35 @@ class ReActAgent:
             self.step += 1
             yield f"\n--- Schritt {self.step} ---\n"
 
+            # Phase 5: If we have a pending sub-agent question and now user inputs, attempt resume
+            if self.context.get("pending_subagent_query") and self.context.get("user_inputs"):
+                try:
+                    pq = dict(self.context.get("pending_subagent_query") or {})
+                    last_answer = str(self.context.get("user_inputs", [])[-1].get("answer") or "").strip()
+                    if last_answer:
+                        # Build a resume call to the same sub-agent tool
+                        tool_name = str(pq.get("tool") or pq.get("agent_name") or "").strip()
+                        state_token = pq.get("state_token")
+                        params = {
+                            "task": pq.get("task") or "Continue previous sub-agent task",
+                            "inputs": {},
+                            "shared_context": {
+                                "session_id": self.session_id,
+                                "version": int(self.context.get("version", 1)),
+                                "facts": self.context.get("facts", {}),
+                                "known_answers_text": self.context.get("known_answers_text", ""),
+                                "user_inputs": self.context.get("user_inputs", []),
+                                "tasks": self._get_tasks(),
+                            },
+                            "resume_token": state_token,
+                            "answers": {"latest": last_answer},
+                        }
+                        obs = await self._handle_tool(tool_name, params)
+                        yield f"🔁 Resume Sub-Agent: {obs}\n"
+                        self.context.pop("pending_subagent_query", None)
+                except Exception:
+                    pass
+
             thought = await self._generate_thought()
             yield f"💭 Thought:\n{thought}\n"
 
@@ -289,8 +316,12 @@ class ReActAgent:
         # CHANGED: include augmented request + known answers + facts
         req = self.context.get("user_request_augmented") or self.context.get("user_request", "")
         last_msg = self.context.get("recent_user_message", "")
-        known = self.context.get("known_answers_text", "")
         facts = self.context.get("facts", {})
+        user_inputs_struct = list(self.context.get("user_inputs", []))
+        known_structured = "\n".join(
+            f"- {str(ui.get('answer') or '').strip()}" for ui in user_inputs_struct if str(ui.get('answer') or '').strip()
+        )
+        known_legacy = self.context.get("known_answers_text", "")
 
         required_by_tool = []
         for spec in self.tools:
@@ -308,8 +339,9 @@ class ReActAgent:
             "- Prefer to proceed without questions when enough information is available to start.\n\n"
             f"User request:\n{req}\n\n"
             f"Recent user message:\n{last_msg}\n\n"
-            f"Known answers:\n{known or '- none -'}\n\n"
+            f"Known answers (from structured inputs):\n{known_structured or known_legacy or '- none -'}\n\n"
             f"Facts (parsed):\n{json.dumps(facts, ensure_ascii=False, indent=2)}\n\n"
+            f"User inputs (structured):\n{json.dumps(user_inputs_struct, ensure_ascii=False, indent=2)}\n\n"
             f"Tools and required params:\n{json.dumps(required_by_tool, ensure_ascii=False, indent=2)}"
         )
         try:
@@ -584,6 +616,7 @@ class ReActAgent:
                     "version": int(self.context.get("version", 1)),
                     "facts": self.context.get("facts", {}),
                     "known_answers_text": self.context.get("known_answers_text", ""),
+                    "user_inputs": self.context.get("user_inputs", []),
                     # expose master tasks mapping for precise update patches
                     "tasks": self._get_tasks(),
                 }
@@ -632,6 +665,20 @@ class ReActAgent:
         if success and isinstance(patch, dict):
             merge_res = self._apply_patch(patch)
             result_text = json.dumps({"subagent_result": result, "merge": merge_res}, ensure_ascii=False)
+            # Phase 2: On conflict (e.g., 409 or ownership issues), ask user instead of completing
+            if (not bool(merge_res.get("success"))) or merge_res.get("error"):
+                self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS, notes=result_text)
+                self._render_markdown_view()
+                msg = await self._handle_user_interaction(
+                    "ask_user",
+                    {
+                        "questions": [
+                            "Konflikt bei Sub-Agent-Patch (Version/Ownership). Wie fortfahren?"
+                        ],
+                        "context": str(merge_res),
+                    },
+                )
+                return f"⚠️ Patch-Konflikt: {msg}"
             self._mark_task_for_tool(norm, TaskStatus.COMPLETED, notes=result_text)
             self._render_markdown_view()
             return f"Applied sub-agent patch: {json.dumps(merge_res)}"
@@ -664,6 +711,7 @@ class ReActAgent:
         budget: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = 120.0,
         aliases: Optional[List[str]] = None,
+        system_prompt_override: Optional[str] = None,
     ) -> ToolSpec:
         """Return a ToolSpec that wraps this agent as a sub-agent tool.
 
@@ -687,7 +735,7 @@ class ReActAgent:
             max_steps = int((budget or {}).get("max_steps", 12))
 
             sub = ReActAgent(
-                system_prompt=self.system_prompt_base,
+                system_prompt=system_prompt_override or self.system_prompt_base,
                 llm=self.llm,
                 tools=tools_whitelist,
                 max_steps=max_steps,
@@ -696,6 +744,7 @@ class ReActAgent:
             sub.context = {
                 "user_request": task,
                 "known_answers_text": (shared_context or {}).get("known_answers_text", ""),
+                "user_inputs": (shared_context or {}).get("user_inputs", []),
                 "facts": (shared_context or {}).get("facts", {}),
                 "version": int((shared_context or {}).get("version", 1)),
                 # prevent sub-agents from writing their own Markdown view
@@ -1043,6 +1092,21 @@ class ReActAgent:
                                 tasks[idx][k] = self._normalize_status_value(fields[k])
                             else:
                                 tasks[idx][k] = fields[k]
+                    applied += 1
+
+                elif kind == "annotate":
+                    tid = op.get("task_id")
+                    note = str(op.get("note") or "").strip()
+                    idx = self._find_task_index_by_id(str(tid)) if tid else None
+                    if idx is None:
+                        denied.append(f"annotate:{tid}:not_found")
+                        continue
+                    owner = tasks[idx].get("owner_agent")
+                    if owner and agent_name and owner != agent_name:
+                        denied.append(f"annotate:{tid}:owner_mismatch")
+                        continue
+                    cur = str(tasks[idx].get("notes") or "").strip()
+                    tasks[idx]["notes"] = (cur + ("; " if cur and note else "") + note).strip()
                     applied += 1
 
                 elif kind == "add":
