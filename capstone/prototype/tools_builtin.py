@@ -706,7 +706,7 @@ async def run_sub_agent(
 
     # Construct tool whitelist index from BUILTIN_TOOLS
     allow = [t for t in BUILTIN_TOOLS if (not allowed_tools) or (t.name in allowed_tools)]
-    subagent = ReActAgent(system_prompt=system_prompt, llm=llm, tools=allow, max_steps=int((budget or {}).get("max_steps", 12)))
+    subagent = ReActAgent(system_prompt=None, llm=llm, tools=allow, max_steps=int((budget or {}).get("max_steps", 12)), mission=system_prompt)
 
     # Seed minimal context
     subagent.session_id = (shared_context or {}).get("session_id")

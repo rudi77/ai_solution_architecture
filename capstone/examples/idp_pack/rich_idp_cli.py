@@ -41,12 +41,16 @@ class RichIDPCLI:
         try:
             root = Path(__file__).resolve().parents[2]
             prompt_path = root / "examples" / "idp_pack" / "system_prompt_git.txt"
+            generic_path = root / "examples" / "idp_pack" / "system_prompt_idp.txt"
+            orch_path = root / "examples" / "idp_pack" / "prompts" / "orchestrator.txt"
             
             if not prompt_path.exists():
                 self.console.print(f"[red]Error: System prompt not found at {prompt_path}[/red]")
                 return False
                 
-            system_prompt = self.load_text(prompt_path)
+            git_mission = self.load_text(prompt_path)
+            generic = self.load_text(generic_path)
+            orch_mission = self.load_text(orch_path)
             openai_key = os.getenv("OPENAI_API_KEY")
             
             if not openai_key:
@@ -57,14 +61,16 @@ class RichIDPCLI:
             # Build sub-agent with Git tools
             git_tools = get_idp_tools()
             git_agent = ReActAgent(
-                system_prompt=system_prompt,
+                system_prompt=None,
                 llm=provider,
                 tools=git_tools,
+                mission=git_mission,
+                generic_system_prompt=generic,
             )
 
             # Orchestrator only exposes the sub-agent tool
             self.agent = ReActAgent(
-                system_prompt=system_prompt,
+                system_prompt=None,
                 llm=provider,
                 tools=[
                     git_agent.to_tool(
@@ -72,8 +78,11 @@ class RichIDPCLI:
                         description="Git sub-agent",
                         allowed_tools=[t.name for t in git_tools],
                         budget={"max_steps": 12},
+                        mission_override=git_mission,
                     )
                 ],
+                mission=orch_mission,
+                generic_system_prompt=generic,
             )
             return True
             
