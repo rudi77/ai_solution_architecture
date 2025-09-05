@@ -20,7 +20,8 @@ from rich.markdown import Markdown
 from rich.syntax import Syntax
 
 from capstone.examples.idp_pack.idp_tools import get_idp_tools
-from capstone.prototype.idp import ReActAgent, OpenAIProvider
+from capstone.prototype.agent import ReActAgent
+from capstone.prototype.llm_provider import OpenAIProvider
 
 
 class RichIDPCLI:
@@ -52,10 +53,27 @@ class RichIDPCLI:
                 self.console.print("[yellow]Warning: No OPENAI_API_KEY found. Using mock provider.[/yellow]")
             
             provider = OpenAIProvider(api_key=openai_key)
+
+            # Build sub-agent with Git tools
+            git_tools = get_idp_tools()
+            git_agent = ReActAgent(
+                system_prompt=system_prompt,
+                llm=provider,
+                tools=git_tools,
+            )
+
+            # Orchestrator only exposes the sub-agent tool
             self.agent = ReActAgent(
                 system_prompt=system_prompt,
                 llm=provider,
-                tools=get_idp_tools(),
+                tools=[
+                    git_agent.to_tool(
+                        name="agent_git",
+                        description="Git sub-agent",
+                        allowed_tools=[t.name for t in git_tools],
+                        budget={"max_steps": 12},
+                    )
+                ],
             )
             return True
             

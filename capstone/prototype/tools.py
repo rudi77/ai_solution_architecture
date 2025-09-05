@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Awaitable, Union
 import asyncio
 import concurrent.futures
+import json
 
 
 JsonDict = Dict[str, Any]
@@ -118,5 +119,22 @@ async def execute_tool_by_name_from_index(index: Dict[str, ToolSpec], name_or_al
     spec = index.get(_normalize(name_or_alias))
     if not spec:
         return {"success": False, "error": f"Tool '{name_or_alias}' not found"}
+    # Best-effort param sanitization: ensure JSON-serializable
+    try:
+        json.dumps(params)
+    except Exception:
+        params = {k: str(v) for k, v in (params or {}).items()}
     return await execute_tool(spec, params)
+
+
+def merge_tool_specs(*tool_groups: List[ToolSpec]) -> List[ToolSpec]:
+    """Merge multiple tool lists by normalized name, last one wins.
+
+    This allows composing BUILTIN_TOOLS with agent-tools without duplicates.
+    """
+    merged: Dict[str, ToolSpec] = {}
+    for group in tool_groups:
+        for t in group or []:
+            merged[_normalize(t.name)] = t
+    return list(merged.values())
 

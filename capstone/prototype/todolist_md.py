@@ -20,7 +20,9 @@ def get_todolist_path(session_id: Optional[str] = None, base_dir: str = "./check
     todolist_dir = Path(base_dir)
     todolist_dir.mkdir(parents=True, exist_ok=True)
     sid = session_id or datetime.now().strftime("%Y%m%d%H%M%S")
-    return todolist_dir / f"todolist_{sid}.md"
+    # keep one stable file per session id, otherwise always use a single shared file
+    name = f"todolist_{sid}.md" if session_id else "todolist.md"
+    return todolist_dir / name
 
 
 def _ensure_file(path: Path) -> None:

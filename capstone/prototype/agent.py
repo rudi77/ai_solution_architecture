@@ -91,6 +91,7 @@ class PlanTask(BaseModel):
     depends_on: List[str] = Field(default_factory=list)
     priority: int | None = None
     notes: str | None = None
+    owner_agent: str | None = None
 
 
 class PlanOutput(BaseModel):
@@ -178,6 +179,8 @@ class ReActAgent:
                 self.context["recent_user_message"] = user_input
                 # initial augmented = original
                 self.context["user_request_augmented"] = self.context["user_request"]  # CHANGED
+                # initialize plan version for optimistic concurrency (sub-agent patches)
+                self.context["version"] = 1
                 yield f"🚀 Neue Session: {self.session_id}\n"
 
             yield f"📝 Verarbeitung: {user_input}\n"
@@ -433,6 +436,25 @@ class ReActAgent:
                     }
                 }
                 },
+                {  # ✅ delegate_to_agent meta
+                "type": "function",
+                "function": {
+                    "name": "delegate_to_agent",
+                    "description": "Delegate a sub-task to a specialized sub-agent (registered as a tool)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_name": {"type": "string"},
+                            "task": {"type": "string"},
+                            "inputs": {"type": "object"},
+                            "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                            "budget": {"type": "object"}
+                        },
+                        "required": ["agent_name", "task"],
+                        "additionalProperties": True
+                    }
+                }
+                },
             ]
             call = await self.llm.call_tools(
                 system_prompt=self.system_prompt,
@@ -454,6 +476,22 @@ class ReActAgent:
                     return ActionDecision(action_type=ActionType.COMPLETE, action_name="complete", parameters=params, reasoning="Done", confidence=0.9)
                 if name == "error_recovery":
                     return ActionDecision(action_type=ActionType.ERROR_RECOVERY, action_name="retry_failed", parameters=params, reasoning="Try to recover", confidence=0.7)
+                if name == "delegate_to_agent":
+                    agent_name = str(params.get("agent_name") or "").strip()
+                    tool_name = f"agent_{self._normalize_name(agent_name)}" if agent_name else ""
+                    tool_params = {
+                        "task": params.get("task"),
+                        "inputs": params.get("inputs") or {},
+                        "shared_context": {
+                            "session_id": self.session_id,
+                            "version": int(self.context.get("version", 1)),
+                            "facts": self.context.get("facts", {}),
+                            "known_answers_text": self.context.get("known_answers_text", ""),
+                        },
+                        "allowed_tools": params.get("allowed_tools") or [],
+                        "budget": params.get("budget") or {},
+                    }
+                    return ActionDecision(action_type=ActionType.TOOL_CALL, action_name=tool_name, parameters=tool_params, reasoning="Delegate to sub-agent tool", confidence=0.85)
                 return ActionDecision(action_type=ActionType.TOOL_CALL, action_name=name, parameters=params, reasoning="Execute tool", confidence=0.8)
         except Exception as e:
             self.logger.warning("tool_calling_failed", error=str(e))
@@ -490,6 +528,7 @@ class ReActAgent:
             return await self._handle_todolist(name, params)
         if kind == ActionType.TOOL_CALL:
             return await self._handle_tool(name, params)
+        # NOTE: delegate_to_agent will be routed as TOOL_CALL to agent_* tool names by LLM meta function
         if kind == ActionType.ASK_USER:
             return await self._handle_user_interaction(name, params)
         if kind == ActionType.ERROR_RECOVERY:
@@ -530,7 +569,22 @@ class ReActAgent:
 
         # Instrumentation: execution time, success/failure counters
         started_at = time.time()
-        result = await execute_tool_by_name_from_index(self.tool_index, norm, params)
+        # Build tool params from decision without injecting non-serializable objects
+        tool_params = dict(params or {})
+        # If the target tool declares 'shared_context' in its schema, provide it by default
+        try:
+            spec = self.tool_index.get(self._normalize_name(tool_name))
+            props = dict((spec.input_schema or {}).get("properties") or {}) if spec else {}
+            if ("shared_context" in props) and ("shared_context" not in tool_params):
+                tool_params["shared_context"] = {
+                    "session_id": self.session_id,
+                    "version": int(self.context.get("version", 1)),
+                    "facts": self.context.get("facts", {}),
+                    "known_answers_text": self.context.get("known_answers_text", ""),
+                }
+        except Exception:
+            pass
+        result = await execute_tool_by_name_from_index(self.tool_index, norm, tool_params)
         duration = time.time() - started_at
         try:
             tool_execution_time.labels(tool_name=norm).observe(duration)
@@ -545,7 +599,39 @@ class ReActAgent:
         status = "COMPLETED" if success else "FAILED"
         result_text = json.dumps(result, ensure_ascii=False)
 
-        # Deterministic status update after execution
+        # Special handling for sub-agent contract (generic; independent of tool name)
+        # Bubble-up need_user_input without marking task failed
+        if not success and result.get("need_user_input"):
+            need = result.get("need_user_input") or {}
+            self.context["pending_subagent_query"] = {
+                "tool": tool_name,
+                "state_token": result.get("state_token"),
+                "questions": need.get("questions") or [],
+                "context": need.get("context") or "",
+                "task": params.get("task"),
+                "agent_name": tool_name,
+            }
+            _ = await self._handle_user_interaction(
+                "ask_user",
+                {
+                    "questions": list(need.get("questions") or []),
+                    "context": need.get("context") or "Sub-Agent requires additional information.",
+                },
+            )
+            self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS, notes=result_text)
+            self._render_markdown_view()
+            return "Sub-agent requires user input; awaiting response."
+
+        # If sub-agent returned a patch, apply it
+        patch = result.get("patch")
+        if success and isinstance(patch, dict):
+            merge_res = self._apply_patch(patch)
+            result_text = json.dumps({"subagent_result": result, "merge": merge_res}, ensure_ascii=False)
+            self._mark_task_for_tool(norm, TaskStatus.COMPLETED, notes=result_text)
+            self._render_markdown_view()
+            return f"Applied sub-agent patch: {json.dumps(merge_res)}"
+
+        # Deterministic status update after execution (generic tools)
         self._mark_task_for_tool(norm, TaskStatus.COMPLETED if success else TaskStatus.FAILED, notes=result_text)
         self._render_markdown_view()
 
@@ -558,6 +644,102 @@ class ReActAgent:
             }
 
         return f"{tool_name} -> {json.dumps(result, indent=2)}"
+
+    # ===== Sub-agent as ToolSpec factory =====
+    def to_tool(
+        self,
+        *,
+        name: str,
+        description: str,
+        allowed_tools: Optional[List[str]] = None,
+        budget: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = 120.0,
+        aliases: Optional[List[str]] = None,
+    ) -> ToolSpec:
+        """Return a ToolSpec that wraps this agent as a sub-agent tool.
+
+        The wrapper runs a fresh ReActAgent instance with the same LLM and a tool whitelist.
+        Inputs follow the sub-agent schema: task, inputs, shared_context, budget, resume_token, answers.
+        """
+
+        async def _subagent_tool(
+            *,
+            task: str,
+            inputs: Optional[Dict[str, Any]] = None,
+            shared_context: Optional[Dict[str, Any]] = None,
+            budget: Optional[Dict[str, Any]] = None,
+            resume_token: Optional[str] = None,
+            answers: Optional[Dict[str, Any]] = None,
+            **kwargs: Any,
+        ) -> Dict[str, Any]:
+            tools_src = self.tools
+            names = set(allowed_tools or [])
+            tools_whitelist = [t for t in tools_src if not names or t.name in names]
+            max_steps = int((budget or {}).get("max_steps", 12))
+
+            sub = ReActAgent(
+                system_prompt=self.system_prompt_base,
+                llm=self.llm,
+                tools=tools_whitelist,
+                max_steps=max_steps,
+            )
+            sub.session_id = (shared_context or {}).get("session_id")
+            sub.context = {
+                "user_request": task,
+                "known_answers_text": (shared_context or {}).get("known_answers_text", ""),
+                "facts": (shared_context or {}).get("facts", {}),
+                "version": int((shared_context or {}).get("version", 1)),
+                # prevent sub-agents from writing their own Markdown view
+                "suppress_markdown": True,
+            }
+
+            transcript: List[str] = []
+            async for chunk in sub.process_request(task, session_id=sub.session_id):
+                transcript.append(chunk)
+
+            if sub.context.get("awaiting_user_input"):
+                return {
+                    "success": False,
+                    "need_user_input": sub.context.get("awaiting_user_input"),
+                    "state_token": "opaque",
+                }
+
+            patch = {
+                "base_version": int((shared_context or {}).get("version", 1)),
+                "agent_name": name,
+                "ops": [],
+            }
+            for t in sub.context.get("tasks", []):
+                t2 = dict(t)
+                t2["owner_agent"] = name
+                patch["ops"].append({"op": "add", "task": t2})
+
+            return {"success": True, "patch": patch, "result": {"transcript": "".join(transcript)}}
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "inputs": {"type": "object"},
+                "shared_context": {"type": "object"},
+                "budget": {"type": "object"},
+                "resume_token": {"type": "string"},
+                "answers": {"type": "object"},
+            },
+            "required": ["task"],
+            "additionalProperties": True,
+        }
+
+        return ToolSpec(
+            name=name,
+            description=description,
+            input_schema=schema,
+            output_schema={"type": "object"},
+            func=_subagent_tool,
+            is_async=True,
+            timeout=timeout,
+            aliases=aliases or [],
+        )
 
     # ===== ASK_USER =====
     async def _handle_user_interaction(self, action_name: str, params: Dict[str, Any]) -> str:
@@ -702,6 +884,9 @@ class ReActAgent:
         self.context["tasks"] = tasks
 
     def _render_markdown_view(self):
+        # Allow disabling Markdown rendering (e.g., for sub-agents)
+        if self.context.get("suppress_markdown"):
+            return
         try:
             path = render_todolist_markdown(
                 tasks=self._get_tasks(),
@@ -747,3 +932,127 @@ class ReActAgent:
                 self._set_tasks(tasks)
                 return True
         return False
+
+    # ===== Patch Engine (Sub-Agent -> Orchestrator) =====
+    def _find_task_index_by_id(self, task_id: str) -> Optional[int]:
+        tasks = self._get_tasks()
+        for i, t in enumerate(tasks):
+            if str(t.get("id")) == str(task_id):
+                return i
+        return None
+
+    def _apply_patch(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply a sub-agent patch with version/ownership guards.
+
+        Patch format:
+          {"base_version": int, "agent_name": str, "ops": [ ... ]}
+
+        Supported ops:
+          - {"op":"update", "task_id": str, "fields": {...}}
+          - {"op":"add", "task": {...}}
+          - {"op":"add_subtask", "parent_id": str, "task": {...}}
+          - {"op":"link_dep", "task_id": str, "depends_on": [str,...]}
+          - {"op":"unlink_dep", "task_id": str, "depends_on": [str,...]}
+        """
+        current_version = int(self.context.get("version", 1))
+        base_version = int(patch.get("base_version") or current_version)
+        agent_name = str(patch.get("agent_name") or "").strip() or None
+
+        if base_version != current_version:
+            return {"success": False, "error": f"409 Conflict: base_version {base_version} != current {current_version}"}
+
+        tasks = self._get_tasks()
+        applied: int = 0
+        denied: list[str] = []
+
+        for op in patch.get("ops", []) or []:
+            try:
+                kind = str(op.get("op") or "").lower()
+                if kind == "update":
+                    tid = op.get("task_id")
+                    fields = dict(op.get("fields") or {})
+                    idx = self._find_task_index_by_id(str(tid)) if tid else None
+                    if idx is None:
+                        denied.append(f"update:{tid}:not_found")
+                        continue
+                    owner = tasks[idx].get("owner_agent")
+                    if owner and agent_name and owner != agent_name:
+                        denied.append(f"update:{tid}:owner_mismatch")
+                        continue
+                    # allow updating standard fields only; ignore unknowns
+                    for k in ["title", "description", "tool", "params", "status", "notes", "priority"]:
+                        if k in fields:
+                            tasks[idx][k] = fields[k]
+                    applied += 1
+
+                elif kind == "add":
+                    t = dict(op.get("task") or {})
+                    if agent_name:
+                        t.setdefault("owner_agent", agent_name)
+                    # default fields
+                    t.setdefault("status", TaskStatus.PENDING.value)
+                    t.setdefault("id", f"t{len(tasks)+1}")
+                    tasks.append(t)
+                    applied += 1
+
+                elif kind == "add_subtask":
+                    parent_id = op.get("parent_id")
+                    t = dict(op.get("task") or {})
+                    if agent_name:
+                        t.setdefault("owner_agent", agent_name)
+                    # mark relation in notes and depends_on
+                    notes = (t.get("notes") or "").strip()
+                    rel_note = f"subtask_of:{parent_id}"
+                    t["notes"] = (notes + ("; " if notes else "") + rel_note).strip()
+                    deps = list(t.get("depends_on") or [])
+                    if parent_id:
+                        deps.append(str(parent_id))
+                    t["depends_on"] = sorted(set(map(str, deps)))
+                    t.setdefault("status", TaskStatus.PENDING.value)
+                    t.setdefault("id", f"t{len(tasks)+1}")
+                    tasks.append(t)
+                    applied += 1
+
+                elif kind == "link_dep":
+                    tid = op.get("task_id")
+                    links = [str(x) for x in (op.get("depends_on") or [])]
+                    idx = self._find_task_index_by_id(str(tid)) if tid else None
+                    if idx is None:
+                        denied.append(f"link_dep:{tid}:not_found")
+                        continue
+                    owner = tasks[idx].get("owner_agent")
+                    if owner and agent_name and owner != agent_name:
+                        denied.append(f"link_dep:{tid}:owner_mismatch")
+                        continue
+                    cur = set(map(str, tasks[idx].get("depends_on") or []))
+                    cur.update(links)
+                    tasks[idx]["depends_on"] = sorted(cur)
+                    applied += 1
+
+                elif kind == "unlink_dep":
+                    tid = op.get("task_id")
+                    unlink = set(map(str, (op.get("depends_on") or [])))
+                    idx = self._find_task_index_by_id(str(tid)) if tid else None
+                    if idx is None:
+                        denied.append(f"unlink_dep:{tid}:not_found")
+                        continue
+                    owner = tasks[idx].get("owner_agent")
+                    if owner and agent_name and owner != agent_name:
+                        denied.append(f"unlink_dep:{tid}:owner_mismatch")
+                        continue
+                    cur = set(map(str, tasks[idx].get("depends_on") or []))
+                    tasks[idx]["depends_on"] = sorted(cur - unlink)
+                    applied += 1
+
+                else:
+                    denied.append(f"{kind}:unsupported")
+            except Exception as e:
+                denied.append(f"{op.get('op')}:error:{e}")
+
+        # Persist changes if any op applied
+        if applied > 0:
+            self._set_tasks(tasks)
+            self.context["version"] = int(self.context.get("version", current_version)) + 1
+            self._render_markdown_view()
+
+        return {"success": True, "applied": applied, "denied": denied, "new_version": int(self.context.get("version", current_version))}
