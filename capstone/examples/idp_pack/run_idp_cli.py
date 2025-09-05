@@ -7,7 +7,9 @@ from typing import Optional
 
 
 from capstone.examples.idp_pack.idp_tools import get_idp_tools
-from capstone.prototype.idp import ReActAgent, OpenAIProvider
+from capstone.prototype.agent import ReActAgent
+from capstone.prototype.llm_provider import OpenAIProvider
+from capstone.prototype.tools_builtin import AGENT_TOOLS
 
 
 
@@ -24,11 +26,28 @@ async def main() -> None:
     # Initialize LLM provider with fallback to mock if no API key
 	openai_key = os.getenv("OPENAI_API_KEY")
 
-	provider = OpenAIProvider(api_key=openai_key)  # placeholder; relies on env var in provider
-	agent = ReActAgent(
+	provider = OpenAIProvider(api_key=openai_key)
+
+	# Sub-agent with Git tools
+	git_tools = get_idp_tools()
+	git_agent = ReActAgent(
 		system_prompt=system_prompt,
 		llm=provider,
-		tools=get_idp_tools(),
+		tools=git_tools,
+	)
+
+	# Orchestrator only knows the sub-agent tool (delegation)
+	orchestrator = ReActAgent(
+		system_prompt=system_prompt,
+		llm=provider,
+		tools=[
+			git_agent.to_tool(
+				name="agent_git",
+				description="Git sub-agent",
+				allowed_tools=[t.name for t in git_tools],
+				budget={"max_steps": 12},
+			),
+		],
 	)
 
 	print("=" * 80)
@@ -37,14 +56,15 @@ async def main() -> None:
 	print("=" * 80)
 
 	session_id: Optional[str] = None
+	print("\nRoles:\n- Orchestrator (delegates)\n- Sub-Agent (does the work)\n")
 	while True:
 		msg = input("You: ").strip()
 		if msg.lower() in {"", "exit", "quit", "q"}:
 			break
-		async for update in agent.process_request(msg, session_id=session_id):
+		async for update in orchestrator.process_request(msg, session_id=session_id):
 			print(update, end="", flush=True)
-		session_id = agent.session_id
-		if agent.context.get("awaiting_user_input"):
+		session_id = orchestrator.session_id
+		if orchestrator.context.get("awaiting_user_input"):
 			continue
 		print("")
 
