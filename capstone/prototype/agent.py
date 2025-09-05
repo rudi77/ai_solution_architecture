@@ -504,6 +504,9 @@ class ReActAgent:
         )
         try:
             dec = await self.llm.generate_structured_response(prompt, ActionDecision, system_prompt=self.system_prompt)
+            # If we detect completion condition, force COMPLETE unless ASK_USER
+            if dec.action_type != ActionType.ASK_USER and self._all_tasks_completed():
+                return ActionDecision(action_type=ActionType.COMPLETE, action_name="complete", parameters={"summary": "All tasks completed."}, reasoning="All tasks done", confidence=0.95)
             if dec.action_type != ActionType.ASK_USER and not self.context.get("todolist_created"):
                 return ActionDecision(action_type=ActionType.UPDATE_TODOLIST, action_name="create_todolist", parameters={}, reasoning="Bootstrap the plan", confidence=dec.confidence)
             return dec
@@ -581,6 +584,8 @@ class ReActAgent:
                     "version": int(self.context.get("version", 1)),
                     "facts": self.context.get("facts", {}),
                     "known_answers_text": self.context.get("known_answers_text", ""),
+                    # expose master tasks mapping for precise update patches
+                    "tasks": self._get_tasks(),
                 }
         except Exception:
             pass
@@ -643,6 +648,10 @@ class ReActAgent:
                 "suggestion": "Gib korrigierte Parameter oder weitere Hinweise; ansonsten anderes Tool wählen."
             }
 
+        # If all tasks are completed, hint to COMPLETE
+        if self._all_tasks_completed():
+            self.context["suggest_complete"] = True
+
         return f"{tool_name} -> {json.dumps(result, indent=2)}"
 
     # ===== Sub-agent as ToolSpec factory =====
@@ -704,15 +713,38 @@ class ReActAgent:
                     "state_token": "opaque",
                 }
 
+            # Build patch as update-only against master tasks to avoid duplicates and regressions
+            master_tasks = list((shared_context or {}).get("tasks", []))
+            def _find_master_task_id_by_tool(tool_name: str) -> Optional[str]:
+                norm = tool_name.strip().lower().replace("-", "_").replace(" ", "_")
+                for mt in master_tasks:
+                    ttool = str(mt.get("tool") or "").strip()
+                    if ttool and ttool.strip().lower().replace("-", "_").replace(" ", "_") == norm:
+                        return str(mt.get("id"))
+                return None
+
+            ops: list[dict] = []
+            for t in sub.context.get("tasks", []):
+                tool_name = str(t.get("tool") or "").strip()
+                status = str(t.get("status") or "").upper()
+                if not tool_name:
+                    continue
+                if status not in {"IN_PROGRESS", "COMPLETED"}:
+                    continue
+                tid = _find_master_task_id_by_tool(tool_name)
+                if not tid:
+                    continue
+                ops.append({
+                    "op": "update",
+                    "task_id": tid,
+                    "fields": {"status": status}
+                })
+
             patch = {
                 "base_version": int((shared_context or {}).get("version", 1)),
                 "agent_name": name,
-                "ops": [],
+                "ops": ops,
             }
-            for t in sub.context.get("tasks", []):
-                t2 = dict(t)
-                t2["owner_agent"] = name
-                patch["ops"].append({"op": "add", "task": t2})
 
             return {"success": True, "patch": patch, "result": {"transcript": "".join(transcript)}}
 
@@ -888,8 +920,12 @@ class ReActAgent:
         if self.context.get("suppress_markdown"):
             return
         try:
+            # Ensure we never downgrade statuses while rendering; normalize first
+            tasks = self._get_tasks()
+            for t in tasks:
+                t["status"] = self._normalize_status_value(t.get("status"))
             path = render_todolist_markdown(
-                tasks=self._get_tasks(),
+                tasks=tasks,
                 open_questions=self.context.get("open_questions", []),
                 session_id=self.session_id,
             )
@@ -941,6 +977,27 @@ class ReActAgent:
                 return i
         return None
 
+    def _normalize_status_value(self, value: Any) -> str:
+        """Normalize status values to uppercase strings like 'PENDING'/'COMPLETED'."""
+        try:
+            if isinstance(value, TaskStatus):
+                return value.value
+            s = str(value).strip()
+            if "." in s and s.upper().startswith("TASKSTATUS"):
+                s = s.split(".")[-1]
+            return s.upper() or TaskStatus.PENDING.value
+        except Exception:
+            return TaskStatus.PENDING.value
+
+    def _all_tasks_completed(self) -> bool:
+        tasks = self._get_tasks()
+        if not tasks:
+            return False
+        for t in tasks:
+            if str(t.get("status", "")).upper() != TaskStatus.COMPLETED.value:
+                return False
+        return True
+
     def _apply_patch(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         """Apply a sub-agent patch with version/ownership guards.
 
@@ -982,7 +1039,10 @@ class ReActAgent:
                     # allow updating standard fields only; ignore unknowns
                     for k in ["title", "description", "tool", "params", "status", "notes", "priority"]:
                         if k in fields:
-                            tasks[idx][k] = fields[k]
+                            if k == "status":
+                                tasks[idx][k] = self._normalize_status_value(fields[k])
+                            else:
+                                tasks[idx][k] = fields[k]
                     applied += 1
 
                 elif kind == "add":
@@ -990,10 +1050,25 @@ class ReActAgent:
                     if agent_name:
                         t.setdefault("owner_agent", agent_name)
                     # default fields
-                    t.setdefault("status", TaskStatus.PENDING.value)
+                    t["status"] = self._normalize_status_value(t.get("status", TaskStatus.PENDING.value))
                     t.setdefault("id", f"t{len(tasks)+1}")
-                    tasks.append(t)
-                    applied += 1
+                    # de-duplicate by id: if exists, merge instead of append
+                    exist_idx = self._find_task_index_by_id(str(t.get("id")))
+                    if exist_idx is not None:
+                        owner = tasks[exist_idx].get("owner_agent")
+                        if owner and agent_name and owner != agent_name:
+                            denied.append(f"add:{t.get('id')}:owner_mismatch")
+                        else:
+                            for k in ["title", "description", "tool", "params", "status", "notes", "priority", "owner_agent", "depends_on"]:
+                                if k in t:
+                                    if k == "status":
+                                        tasks[exist_idx][k] = self._normalize_status_value(t[k])
+                                    else:
+                                        tasks[exist_idx][k] = t[k]
+                            applied += 1
+                    else:
+                        tasks.append(t)
+                        applied += 1
 
                 elif kind == "add_subtask":
                     parent_id = op.get("parent_id")
@@ -1008,10 +1083,25 @@ class ReActAgent:
                     if parent_id:
                         deps.append(str(parent_id))
                     t["depends_on"] = sorted(set(map(str, deps)))
-                    t.setdefault("status", TaskStatus.PENDING.value)
+                    t["status"] = self._normalize_status_value(t.get("status", TaskStatus.PENDING.value))
                     t.setdefault("id", f"t{len(tasks)+1}")
-                    tasks.append(t)
-                    applied += 1
+                    # de-duplicate by id
+                    exist_idx = self._find_task_index_by_id(str(t.get("id")))
+                    if exist_idx is not None:
+                        owner = tasks[exist_idx].get("owner_agent")
+                        if owner and agent_name and owner != agent_name:
+                            denied.append(f"add_subtask:{t.get('id')}:owner_mismatch")
+                        else:
+                            for k in ["title", "description", "tool", "params", "status", "notes", "priority", "owner_agent", "depends_on"]:
+                                if k in t:
+                                    if k == "status":
+                                        tasks[exist_idx][k] = self._normalize_status_value(t[k])
+                                    else:
+                                        tasks[exist_idx][k] = t[k]
+                            applied += 1
+                    else:
+                        tasks.append(t)
+                        applied += 1
 
                 elif kind == "link_dep":
                     tid = op.get("task_id")
