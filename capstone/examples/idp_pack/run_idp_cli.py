@@ -7,7 +7,8 @@ from typing import Optional
 
 
 from capstone.examples.idp_pack.idp_tools import get_idp_tools
-from capstone.prototype.idp import ReActAgent, OpenAIProvider
+from capstone.prototype.agent import ReActAgent
+from capstone.prototype.llm_provider import OpenAIProvider
 
 
 
