@@ -10,6 +10,9 @@ import asyncio.subprocess as asp
 from typing import Any, Dict, List
 
 from .tools import ToolSpec
+from .agent import ReActAgent
+from .llm_provider import LLMProvider
+from .tools import build_tool_index, execute_tool_by_name_from_index
 
 
 # ==== Tool Implementations (migrated from idp.py methods) ====
@@ -673,3 +676,115 @@ BUILTIN_TOOLS_SIMPLIFIED: List[ToolSpec] = [
         aliases=["project-validator"],
     )
 ]
+
+# Expose combined tool list for agent construction where needed
+ALL_TOOLS: List[ToolSpec] = BUILTIN_TOOLS
+
+
+# ===== Sub-Agent Wrapper(s) as Tools =====
+async def run_sub_agent(
+    *,
+    task: str,
+    inputs: Dict[str, Any] | None = None,
+    shared_context: Dict[str, Any] | None = None,
+    allowed_tools: List[str] | None = None,
+    budget: Dict[str, Any] | None = None,
+    resume_token: str | None = None,
+    answers: Dict[str, Any] | None = None,
+    agent_name: str | None = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Run a constrained sub-agent and return either a patch or need_user_input.
+
+    This wrapper expects the hosting orchestrator to pass in the orchestrator's LLMProvider via kwargs['llm']
+    and the base system prompt via kwargs['system_prompt'] for consistency.
+    """
+    llm: LLMProvider | None = kwargs.get("llm")
+    system_prompt: str = kwargs.get("system_prompt") or ""
+    if llm is None:
+        return {"success": False, "error": "Missing llm provider for sub-agent"}
+
+    # Construct tool whitelist index from BUILTIN_TOOLS
+    allow = [t for t in BUILTIN_TOOLS if (not allowed_tools) or (t.name in allowed_tools)]
+    subagent = ReActAgent(system_prompt=None, llm=llm, tools=allow, max_steps=int((budget or {}).get("max_steps", 12)), mission=system_prompt)
+
+    # Seed minimal context (ephemeral + child-session) to avoid state collision
+    parent_sid = (shared_context or {}).get("session_id") or "no-session"
+    subagent.session_id = f"{parent_sid}:sub:{(agent_name or 'subagent')}"
+    subagent.context = {
+        "user_request": task,
+        "known_answers_text": (shared_context or {}).get("known_answers_text", ""),
+        "facts": (shared_context or {}).get("facts", {}),
+        "version": int((shared_context or {}).get("version", 1)),
+        "suppress_markdown": True,
+        "ephemeral_state": True,
+        # tag for logging and ownership
+        "agent_name": agent_name or "subagent",
+    }
+
+    # Run a short loop
+    transcript: List[str] = []
+    async for chunk in subagent.process_request(task, session_id=subagent.session_id):
+        transcript.append(chunk)
+
+    # Inspect sub-agent state
+    if subagent.context.get("awaiting_user_input"):
+        return {
+            "success": False,
+            "need_user_input": subagent.context.get("awaiting_user_input"),
+            "state_token": "opaque",  # kept simple for v1
+        }
+
+    # Build a minimal patch reflecting only status updates against master tasks
+    patch = {
+        "base_version": int((shared_context or {}).get("version", 1)),
+        "agent_name": agent_name or "subagent",
+        "ops": []
+    }
+    master_tasks = list((shared_context or {}).get("tasks", []))
+    def _find_master_task_id_by_tool(tool_name: str) -> str | None:
+        norm = (tool_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+        for mt in master_tasks:
+            tt = (mt.get("tool") or "").strip().lower().replace("-", "_").replace(" ", "_")
+            if tt == norm:
+                return str(mt.get("id"))
+        return None
+    for t in subagent.context.get("tasks", []):
+        status = str(t.get("status","")).upper()
+        tool_name = t.get("tool")
+        if tool_name and status in {"IN_PROGRESS","COMPLETED"}:
+            tid = _find_master_task_id_by_tool(tool_name)
+            if tid:
+                patch["ops"].append({"op":"update","task_id":tid,"fields":{"status":status}})
+
+    return {"success": True, "patch": patch, "result": {"transcript": "".join(transcript)}}
+
+
+# Example sub-agent ToolSpec (scaffolder)
+AGENT_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="agent_scaffold_webservice",
+        description="Sub-agent: scaffolds a webservice using whitelisted tools",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "inputs": {"type": "object"},
+                "shared_context": {"type": "object"},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                "budget": {"type": "object"},
+                "resume_token": {"type": "string"},
+                "answers": {"type": "object"},
+            },
+            "required": ["task"],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=run_sub_agent,
+        is_async=True,
+        timeout=120,
+        aliases=["agent_scaffold", "agent_webservice"],
+    )
+]
+
+ALL_TOOLS_WITH_AGENTS: List[ToolSpec] = BUILTIN_TOOLS + AGENT_TOOLS

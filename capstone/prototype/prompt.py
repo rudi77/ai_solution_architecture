@@ -1,4 +1,22 @@
-"""System prompts used by the IDP Copilot."""
+"""System prompts used by the IDP Copilot.
+
+Phase 4 introduces modular prompt files. These constants remain as defaults.
+"""
+
+from pathlib import Path
+
+
+def _load_prompt_file(filename: str, default_text: str) -> str:
+    """Load a prompt text from capstone/prototype/prompts/<filename> if present.
+
+    Falls back to provided default_text when the file does not exist or cannot be read.
+    """
+    try:
+        base = Path(__file__).parent / "prompts"
+        path = base / filename
+        return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return default_text.strip()
 
 IDP_COPILOT_SYSTEM_PROMPT = """You are an advanced Internal Developer Platform (IDP) Copilot Agent with production-grade capabilities.
 
@@ -105,5 +123,31 @@ Avoid calling any other tools. If additional steps are requested, ask the user t
 - Prefer clarity and reliability over breadth.
 
 Output concise progress updates suitable for a CLI. Keep the scope strictly limited to repository creation in this iteration."""
+
+
+# ===== Modular prompt exports (Phase 4) =====
+
+ORCHESTRATOR_PROMPT = _load_prompt_file(
+    "orchestrator.txt",
+    """You are the Orchestrator Agent.
+Maintain the master plan as structured tasks (single source of truth).
+Delegate to sub-agents or call tools. Never edit Markdown via LLM; Markdown is a deterministic view.
+Ask the user only when blocking information is missing. Enforce ownership and versioning for sub-agent patches.
+Keep responses concise and focused on the next best action.""",
+)
+
+SCAFFOLD_PROMPT = _load_prompt_file(
+    "scaffold.txt",
+    """You are the Scaffolding Agent.
+Your focus: repository creation, templates, and initial project structure.
+Use available tools safely and return precise, verifiable results. Do not change the master plan directly; suggest patches.""",
+)
+
+DELIVERY_PROMPT = _load_prompt_file(
+    "delivery.txt",
+    """You are the Delivery Agent.
+Your focus: CI/CD, testing, deployment, and observability setup.
+Act deterministically, report actionable results, and propose patches to the master plan when needed.""",
+)
 
 
