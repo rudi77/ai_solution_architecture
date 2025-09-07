@@ -202,15 +202,24 @@ def render_todolist_markdown(
         title = str(t.get("title", "")).strip() or tid
         status = str(t.get("status", "PENDING")).upper()
         tool = t.get("tool")
+        executor_id = t.get("executor_id")
+        action = t.get("action")
         params = t.get("params") or {}
         notes = str(t.get("notes", "")).strip()
+        owner = t.get("owner_agent")
 
         suffix_parts: list[str] = [f"status: {status}"]
         if tool:
             suffix_parts.append(f"tool: {tool}")
+        if executor_id:
+            suffix_parts.append(f"executor: {executor_id}")
+        if action:
+            suffix_parts.append(f"action: {action}")
         if params:
             # keep params compact to avoid noisy Markdown
             suffix_parts.append(f"params: {params}")
+        if owner:
+            suffix_parts.append(f"owner: {owner}")
         if notes:
             suffix_parts.append(f"notes: {notes}")
         suffix = " (" + ", ".join(suffix_parts) + ")" if suffix_parts else ""
