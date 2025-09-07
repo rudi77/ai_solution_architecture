@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -118,45 +119,68 @@ def render_tab_agent_system(base_url: str) -> None:
     st.subheader("Agent System registrieren")
     st.caption("YAML ODER JSON einfügen. Wird direkt an POST /agent-systems gesendet.")
 
-    default_yaml = (
-        "version: 1\n"
-        "system:\n"
-        "  name: idp-orchestrator\n"
-        "agents:\n"
-        "  - id: orchestrator\n"
-        "    role: orchestrator\n"
-        "    description: Main orchestrator\n"
-        "    system_prompt: |\n"
-        "      You are the Orchestrator Agent...\n"
-        "    mission: |\n"
-        "      Coordinate sub-agents to accomplish the task.\n"
-        "    max_steps: 40\n"
-        "    model:\n"
-        "      provider: openai\n"
-        "      model: gpt-4.1\n"
-        "      temperature: 0.1\n"
-        "    tools:\n"
-        "      allow:\n"
-        "        - agent_git\n"
-        "        - validate_project_name_and_type\n"
-        "        - create_repository\n"
-        "  - id: agent_git\n"
-        "    role: worker\n"
-        "    description: Git worker\n"
-        "    system_prompt: |\n"
-        "      You are a Git-focused worker agent...\n"
-        "    mission: |\n"
-        "      Create repo and push initial commit.\n"
-        "    max_steps: 12\n"
-        "    model:\n"
-        "      provider: openai\n"
-        "      model: gpt-4.1\n"
-        "      temperature: 0.1\n"
-        "    tools:\n"
-        "      allow:\n"
-        "        - validate_project_name_and_type\n"
-        "        - create_repository\n"
+    def _read_prompt(rel_path: str, fallback: str) -> str:
+        """Read prompt file relative to capstone root; return fallback on error."""
+        try:
+            root = Path(__file__).resolve().parents[1]
+            text = (root / rel_path).read_text(encoding="utf-8")
+            return text.strip()
+        except Exception:
+            return fallback.strip()
+
+    def _indent_block(text: str, spaces: int = 6) -> str:
+        """Indent every line of a multi-line string by N spaces for YAML literal blocks."""
+        pad = " " * spaces
+        return "\n".join(pad + line if line else pad for line in text.splitlines())
+
+    orch_text = _read_prompt(
+        "examples/idp_pack/prompts/orchestrator.txt",
+        "You are a generic orchestration agent.",
     )
+    mission_text = _read_prompt(
+        "examples/idp_pack/prompts/mission_git.txt",
+        "Create a repository locally and on GitHub; push initial commit.",
+    )
+
+    # Default YAML mirrors run_idp_cli.py structure and prompts
+    default_yaml = f"""
+version: 1
+system:
+  name: idp-orchestrator
+agents:
+  - id: orchestrator
+    role: orchestrator
+    description: Main orchestrator
+    system_prompt: |
+{_indent_block(orch_text)}
+
+    mission: |
+{_indent_block(mission_text)}
+
+    max_steps: 40
+    model:
+      provider: openai
+      model: gpt-4.1
+      temperature: 0.1
+    tools:
+      allow:
+        - agent_git
+  - id: agent_git
+    role: worker
+    description: Git worker
+    mission: |
+{_indent_block(mission_text)}
+
+    max_steps: 12
+    model:
+      provider: openai
+      model: gpt-4.1
+      temperature: 0.1
+    tools:
+      allow:
+        - validate_project_name_and_type
+        - create_repository
+"""
 
     text = st.text_area("AgentSystem (YAML oder JSON)", value=default_yaml, height=320)
 

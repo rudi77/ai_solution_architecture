@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from capstone.prototype.tools_builtin import ALL_TOOLS_WITH_AGENTS
-from capstone.prototype.tools import ToolSpec
+from capstone.prototype.tools import ToolSpec, build_tool_index
 from capstone.prototype.agent import ReActAgent
 from capstone.prototype.llm_provider import OpenAIProvider  # type: ignore[attr-defined]
 from ..config import get_openai_api_key
@@ -53,6 +53,22 @@ def build_agent_system_from_yaml(doc: Dict[str, Any]) -> Dict[str, Any]:
                     mission_override=sub.mission_text or None,
                 )
             )
+
+    # Rebuild tool index, prompt, and executor capabilities now that tools are attached
+    try:
+        orchestrator.tool_index = build_tool_index(orchestrator.tools)
+        orchestrator.final_system_prompt = orchestrator._build_final_system_prompt()
+        orchestrator.executor_index = orchestrator._build_executor_index()
+        try:
+            orchestrator.logger.info(
+                "final_system_prompt",
+                mode=str(orchestrator.prompt_overrides.get("mode", "compose")),
+                prompt=orchestrator.final_system_prompt,
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
 
     return {
         "system": system,
