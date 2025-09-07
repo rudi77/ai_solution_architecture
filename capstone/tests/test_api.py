@@ -63,6 +63,17 @@ async def test_tools_and_agent_systems() -> None:
 
 
 @pytest.mark.asyncio
+async def test_health() -> None:
+    """Test the /health endpoint is reachable."""
+    from capstone.backend.app.main import app
+
+    async with httpx.AsyncClient(app=app, base_url="http://test") as client:
+        res = await client.get("/health")
+        assert res.status_code == 200
+        assert res.json().get("status") == "ok"
+
+
+@pytest.mark.asyncio
 async def test_agent_system_register_invalid_returns_400() -> None:
     """Missing orchestrator should yield 400 from /agent-systems."""
     _require_openai()
