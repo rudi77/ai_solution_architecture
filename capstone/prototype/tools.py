@@ -20,6 +20,9 @@ class ToolSpec:
     is_async: bool = True
     timeout: Optional[float] = None
     aliases: Optional[List[str]] = None
+    # Optional provider that returns an ExecutorCapabilities-like dict describing actions
+    # This enables capability handshakes for sub-agents and tools.
+    capabilities_provider: Optional[Callable[[], Dict[str, Any]]] = None
 
 
 def _normalize(name: str) -> str:

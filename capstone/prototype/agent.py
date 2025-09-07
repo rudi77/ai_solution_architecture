@@ -105,6 +105,8 @@ class PlanTask(BaseModel):
     title: str
     description: str | None = None
     tool: str | None = None
+    executor_id: str | None = None
+    action: str | None = None
     params: Dict[str, Any] | None = None
     status: TaskStatus = TaskStatus.PENDING
     depends_on: List[str] = Field(default_factory=list)
@@ -158,6 +160,11 @@ class ReActAgent:
 
         # Loop-Guard: keep recent action/observation signatures to detect repetition
         self._loop_signatures: List[str] = []
+        # Duplicate-Action Guard: track executor/action/params hash and version
+        self._duplicate_action_cache: Dict[str, int] = {}
+
+        # Executor capabilities index (built from tools)
+        self.executor_index: Dict[str, Dict[str, Any]] = {}
 
         # Build the final system prompt using the new builder (default: compose)
         self.final_system_prompt = self._build_final_system_prompt()
@@ -170,6 +177,12 @@ class ReActAgent:
         except Exception:
             # Logging must never break agent construction
             pass
+
+        # Build executor capabilities index at construction
+        try:
+            self.executor_index = self._build_executor_index()
+        except Exception:
+            self.executor_index = {}
 
     async def process_request(self, user_input: str, session_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """
@@ -401,14 +414,42 @@ class ReActAgent:
             open_questions: Nicht-blockierende Fragen, die zusätzlich gelistet werden sollen.
         """
         user_req = self.context.get("user_request_augmented") or self.context.get("user_request", "")
+        # Expose executor capabilities to the planner (with descriptions)
+        exec_index = self.executor_index or {}
+        visible_executors = [(eid, (exec_index[eid] or {}).get("label") or eid) for eid in exec_index.keys()]
+        capabilities_map = {eid: [a.get("name") for a in (exec_index[eid].get("actions") or [])] for eid in exec_index.keys()}
+        # Detailed map for the LLM with action descriptions and required params
+        capabilities_detailed = {}
+        for eid, cap in exec_index.items():
+            actions_detailed = []
+            for a in cap.get("actions", []) or []:
+                params_schema = a.get("params_schema") or {}
+                actions_detailed.append({
+                    "name": a.get("name"),
+                    "description": a.get("description") or "",
+                    "required_params": list((params_schema.get("required") or [])),
+                })
+            capabilities_detailed[eid] = {
+                "label": cap.get("label") or eid,
+                "actions": actions_detailed,
+            }
         prompt = (
             "Plan tasks for the user's request. Return JSON only, matching the schema.\n"
             "Guidelines:\n"
             "- Prefer 3–10 atomic, verifiable tasks.\n"
-            "- Include the exact tool name when applicable in field 'tool'.\n"
+            "- Use only these executors and their actions.\n"
+            "- Use action descriptions to decide scope: if one action can complete multiple subtasks, avoid splitting.\n"
+            "- Avoid proposing tasks for unavailable executors/actions.\n"
+            "- Prefer composite tools over manual multi-step sequences when available.\n"
+            "- Avoid duplicate tasks (same executor_id + action + params).\n"
+            "- Set executor_id from 'visible_executors' and action from 'capabilities_map[executor_id]'.\n"
+            "- Include the exact tool name when applicable in field 'tool' (optional).\n"
             "- Provide stable 'id' (e.g., t1, t2), 'title', optional 'params', and initial 'status' = PENDING.\n"
             "- Fill 'open_questions' with clarifications that are nice-to-have (non-blocking).\n\n"
-            f"User request:\n{user_req}\n"
+            f"User request:\n{user_req}\n\n"
+            f"visible_executors = {json.dumps(visible_executors, ensure_ascii=False)}\n"
+            f"capabilities_map = {json.dumps(capabilities_map, ensure_ascii=False)}\n"
+            f"capabilities_detailed = {json.dumps(capabilities_detailed, ensure_ascii=False)}\n"
         )
         try:
             plan: PlanOutput = await self.llm.generate_structured_response(prompt, PlanOutput, system_prompt=self.final_system_prompt)
@@ -426,8 +467,17 @@ class ReActAgent:
                 final_oq.append(q)
                 seen.add(q)
 
+        # Reconcile, validate, and prune against capabilities
+        tasks_dicts = [t.model_dump() for t in plan.tasks]
+        try:
+            tasks_dicts = self._reconcile_tasks_with_capabilities(tasks_dicts, self.executor_index)
+            _ = self._validate_plan_against_capabilities(tasks_dicts, self.executor_index)
+            tasks_dicts = self._prune_invalid_and_duplicate_tasks(tasks_dicts, self.executor_index)
+        except Exception:
+            pass
+
         # Persist authoritative state in context (as plain dicts for easy serialization)
-        self.context["tasks"] = [t.model_dump() for t in plan.tasks]
+        self.context["tasks"] = tasks_dicts
         self.context["open_questions"] = final_oq
         self.context["todolist_created"] = True
 
@@ -648,30 +698,93 @@ class ReActAgent:
             await self._create_initial_plan(open_questions=[])
         norm = self._normalize_name(tool_name)
 
-        # Deterministic status update: IN_PROGRESS
-        self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS)
-        self._render_markdown_view()
-
-        # Instrumentation: execution time, success/failure counters
+        # Instrumentation: execution time start (must be available for all paths)
         started_at = time.time()
+
+        # Log which tool is about to be executed and acting agent identity
+        try:
+            agent_identity = str(self.context.get("agent_name") or "orchestrator").strip()
+            self.logger.info(
+                "tool_call_start",
+                agent=agent_identity,
+                tool=norm,
+                raw_tool_name=str(tool_name),
+                params_preview=list(sorted((params or {}).keys()))[:8],
+            )
+        except Exception:
+            pass
+
+        # Duplicate-Action Guard: skip if same executor/action/params caused no change previously
+        try:
+            exec_id = self._executor_id_for_tool(norm)
+            action_name = self._action_for_tool(norm)
+            params_hash = hashlib.md5(json.dumps(params, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+            sig = f"{exec_id}|{action_name}|{params_hash}"
+            last_version = self._duplicate_action_cache.get(sig)
+            if last_version is not None and int(self.context.get("version", 1)) == last_version:
+                msg = await self._handle_user_interaction(
+                    "ask_user",
+                    {
+                        "questions": [
+                            "Gleiche Aktion mit identischen Parametern ohne Zustandsänderung erkannt. Zusätzliche Hinweise oder Strategie ändern?"
+                        ],
+                        "context": f"executor={exec_id}, action={action_name}",
+                    },
+                )
+                # Ensure matching end-log even when we early-return due to duplicate guard
+                try:
+                    self.logger.info(
+                        "tool_call_end",
+                        tool=norm,
+                        success=True,
+                        duration_ms=int((time.time() - started_at) * 1000),
+                    )
+                except Exception:
+                    pass
+                return f"⏭️ Duplicate action guarded. {msg}"
+        except Exception:
+            pass
+
+        # Deterministic status update: IN_PROGRESS only if not already COMPLETED
+        try:
+            idx_for_tool = self._find_task_for_tool(norm)
+            if idx_for_tool is not None:
+                cur_status = str(self._get_tasks()[idx_for_tool].get("status", "PENDING")).upper()
+                if cur_status != TaskStatus.COMPLETED.value:
+                    self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS)
+                    self._render_markdown_view()
+        except Exception:
+            # Never fail the execution due to status pre-checks
+            self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS)
+            self._render_markdown_view()
+
+        # Instrumentation: success/failure counters
         # Build tool params from decision without injecting non-serializable objects
         tool_params = dict(params or {})
         # If the target tool declares 'shared_context' in its schema, provide it by default
         try:
             spec = self.tool_index.get(self._normalize_name(tool_name))
             props = dict((spec.input_schema or {}).get("properties") or {}) if spec else {}
-            if ("shared_context" in props) and ("shared_context" not in tool_params):
-                tool_params["shared_context"] = {
-                    "session_id": self.session_id,
-                    "version": int(self.context.get("version", 1)),
-                    "facts": self.context.get("facts", {}),
-                    "known_answers_text": self.context.get("known_answers_text", ""),
-                    "user_inputs": self.context.get("user_inputs", []),
-                    # expose master tasks mapping for precise update patches
-                    "tasks": self._get_tasks(),
-                }
+            if ("shared_context" in props):
+                # Merge or create shared_context with tasks and target_task_id
+                sc = dict(tool_params.get("shared_context") or {})
+                sc.setdefault("session_id", self.session_id)
+                sc.setdefault("version", int(self.context.get("version", 1)))
+                sc.setdefault("facts", self.context.get("facts", {}))
+                sc.setdefault("known_answers_text", self.context.get("known_answers_text", ""))
+                sc.setdefault("user_inputs", self.context.get("user_inputs", []))
+                # expose master tasks mapping and the current target task id for deterministic patching
+                sc["tasks"] = self._get_tasks()
+                try:
+                    current_idx = self._find_task_for_tool(norm)
+                    if current_idx is not None:
+                        sc["target_task_id"] = str(self._get_tasks()[current_idx].get("id"))
+                except Exception:
+                    pass
+                tool_params["shared_context"] = sc
         except Exception:
             pass
+        before_version = int(self.context.get("version", 1))
         result = await execute_tool_by_name_from_index(self.tool_index, norm, tool_params)
         duration = time.time() - started_at
         try:
@@ -686,6 +799,17 @@ class ReActAgent:
         success = bool(result.get("success"))
         status = "COMPLETED" if success else "FAILED"
         result_text = json.dumps(result, ensure_ascii=False)
+
+        # Log end of tool call with status
+        try:
+            self.logger.info(
+                "tool_call_end",
+                tool=norm,
+                success=success,
+                duration_ms=int(duration * 1000),
+            )
+        except Exception:
+            pass
 
         # Special handling for sub-agent contract (generic; independent of tool name)
         # Bubble-up need_user_input without marking task failed
@@ -710,6 +834,16 @@ class ReActAgent:
             )
             self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS, notes=result_text)
             self._render_markdown_view()
+            # Ensure end log before returning to wait for user input
+            try:
+                self.logger.info(
+                    "tool_call_end",
+                    tool=norm,
+                    success=False,
+                    duration_ms=int((time.time() - started_at) * 1000),
+                )
+            except Exception:
+                pass
             return "Sub-agent requires user input; awaiting response."
 
         # If sub-agent returned a patch, apply it
@@ -717,7 +851,35 @@ class ReActAgent:
         if success and isinstance(patch, dict):
             merge_res = self._apply_patch(patch)
             result_text = json.dumps({"subagent_result": result, "merge": merge_res}, ensure_ascii=False)
-            # Phase 2: On conflict (e.g., 409 or ownership issues), ask user instead of completing
+            # Retry once on no-op applied=0: refresh capabilities, reconcile+revalidate, retry
+            if merge_res.get("success") and int(merge_res.get("applied", 0)) == 0 and not merge_res.get("error"):
+                # Retry once after reconciling tasks with current capabilities
+                self.executor_index = self._build_executor_index()
+                try:
+                    tasks = self._reconcile_tasks_with_capabilities(self._get_tasks(), self.executor_index)
+                    _ = self._validate_plan_against_capabilities(tasks, self.executor_index)
+                    self._set_tasks(tasks)
+                except Exception:
+                    pass
+                merge_res_retry = self._apply_patch(patch)
+                result_text = json.dumps({"subagent_result": result, "merge": merge_res_retry}, ensure_ascii=False)
+                if int(merge_res_retry.get("applied", 0)) == 0:
+                    # Treat as no-op but successful sub-agent run; mark current task completed and continue
+                    self._mark_task_for_tool(norm, TaskStatus.COMPLETED, notes=result_text)
+                    self._render_markdown_view()
+                    # Ensure we always emit a tool_call_end for this successful no-op path
+                    try:
+                        self.logger.info(
+                            "tool_call_end",
+                            tool=norm,
+                            success=True,
+                            duration_ms=int((time.time() - started_at) * 1000),
+                        )
+                    except Exception:
+                        pass
+                    return "No-Op patch: marked task completed"
+
+            # On conflict (e.g., 409 or ownership issues), ask user instead of completing
             if (not bool(merge_res.get("success"))) or merge_res.get("error"):
                 self._mark_task_for_tool(norm, TaskStatus.IN_PROGRESS, notes=result_text)
                 self._render_markdown_view()
@@ -730,14 +892,44 @@ class ReActAgent:
                         "context": str(merge_res),
                     },
                 )
+                # Emit end log for conflict path as well
+                try:
+                    self.logger.info(
+                        "tool_call_end",
+                        tool=norm,
+                        success=False,
+                        duration_ms=int((time.time() - started_at) * 1000),
+                    )
+                except Exception:
+                    pass
                 return f"⚠️ Patch-Konflikt: {msg}"
             self._mark_task_for_tool(norm, TaskStatus.COMPLETED, notes=result_text)
             self._render_markdown_view()
             return f"Applied sub-agent patch: {json.dumps(merge_res)}"
 
         # Deterministic status update after execution (generic tools)
-        self._mark_task_for_tool(norm, TaskStatus.COMPLETED if success else TaskStatus.FAILED, notes=result_text)
-        self._render_markdown_view()
+        # Never downgrade a COMPLETED task back to IN_PROGRESS/FAILED due to noisy results
+        try:
+            idx_for_tool = self._find_task_for_tool(norm)
+            if idx_for_tool is not None:
+                cur_status = str(self._get_tasks()[idx_for_tool].get("status", "PENDING")).upper()
+                next_status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
+                if cur_status == TaskStatus.COMPLETED.value and next_status != TaskStatus.COMPLETED:
+                    # keep completed; just append notes
+                    tasks = self._get_tasks()
+                    if result_text:
+                        tasks[idx_for_tool]["notes"] = result_text
+                        self._set_tasks(tasks)
+                        self._render_markdown_view()
+                else:
+                    self._mark_task_for_tool(norm, next_status, notes=result_text)
+                    self._render_markdown_view()
+            else:
+                self._mark_task_for_tool(norm, TaskStatus.COMPLETED if success else TaskStatus.FAILED, notes=result_text)
+                self._render_markdown_view()
+        except Exception:
+            self._mark_task_for_tool(norm, TaskStatus.COMPLETED if success else TaskStatus.FAILED, notes=result_text)
+            self._render_markdown_view()
 
         # Generische Blocker-Hinweise ins Context
         err = (result.get("error") or "").strip()
@@ -750,6 +942,18 @@ class ReActAgent:
         # If all tasks are completed, hint to COMPLETE
         if self._all_tasks_completed():
             self.context["suggest_complete"] = True
+
+        # Record duplicate-action guard signature if no version change occurred
+        try:
+            after_version = int(self.context.get("version", 1))
+            if after_version == before_version:
+                exec_id = self._executor_id_for_tool(norm)
+                action_name = self._action_for_tool(norm)
+                params_hash = hashlib.md5(json.dumps(params, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+                sig = f"{exec_id}|{action_name}|{params_hash}"
+                self._duplicate_action_cache[sig] = after_version
+        except Exception:
+            pass
 
         return f"{tool_name} -> {json.dumps(result, indent=2)}"
 
@@ -854,11 +1058,30 @@ class ReActAgent:
 
             # Build patch as update-only against master tasks to avoid duplicates and regressions
             master_tasks = list((shared_context or {}).get("tasks", []))
+            target_task_id = str((shared_context or {}).get("target_task_id") or "").strip() or None
+            wrapper_norm = name.strip().lower().replace("-", "_").replace(" ", "_")
+            def _norm(s: str) -> str:
+                return s.strip().lower().replace("-", "_").replace(" ", "_")
             def _find_master_task_id_by_tool(tool_name: str) -> Optional[str]:
-                norm = tool_name.strip().lower().replace("-", "_").replace(" ", "_")
+                # 0) If orchestrator provided a target_task_id, use it deterministically
+                if target_task_id:
+                    return target_task_id
+                norm = _norm(tool_name)
+                # 1) Direct match on tool field
                 for mt in master_tasks:
-                    ttool = str(mt.get("tool") or "").strip()
-                    if ttool and ttool.strip().lower().replace("-", "_").replace(" ", "_") == norm:
+                    ttool = _norm(str(mt.get("tool") or ""))
+                    if ttool and ttool == norm:
+                        return str(mt.get("id"))
+                # 2) Match on prefixed tool name (e.g., agent_git.create_repository)
+                for mt in master_tasks:
+                    ttool = _norm(str(mt.get("tool") or ""))
+                    if ttool and ttool == f"{wrapper_norm}.{norm}":
+                        return str(mt.get("id"))
+                # 3) Fallback: match by executor_id + action
+                for mt in master_tasks:
+                    exec_id = _norm(str(mt.get("executor_id") or ""))
+                    action = _norm(str(mt.get("action") or ""))
+                    if action == norm and (not exec_id or exec_id == wrapper_norm):
                         return str(mt.get("id"))
                 return None
 
@@ -901,6 +1124,28 @@ class ReActAgent:
             "additionalProperties": True,
         }
 
+        # Capabilities provider advertises sub-agent actions based on its internal tool whitelist
+        def _caps_provider() -> Dict[str, Any]:
+            names = set(allowed_tools or [])
+            tools_whitelist = [t for t in self.tools if not names or t.name in names]
+            actions = []
+            for t in tools_whitelist:
+                try:
+                    actions.append({
+                        "name": self._normalize_name(t.name),
+                        "description": t.description,
+                        "params_schema": t.input_schema or {"type": "object"},
+                        "acceptance": None
+                    })
+                except Exception:
+                    continue
+            return {
+                "executor_id": self._normalize_name(name),
+                "label": description or name,
+                "version": "cap-v1",
+                "actions": actions,
+            }
+
         return ToolSpec(
             name=name,
             description=description,
@@ -910,6 +1155,7 @@ class ReActAgent:
             is_async=True,
             timeout=timeout,
             aliases=aliases or [],
+            capabilities_provider=_caps_provider,
         )
 
     # ===== Prompt Builder (new) =====
@@ -1107,6 +1353,159 @@ class ReActAgent:
     def _normalize_name(self, name: str) -> str:
         return name.strip().lower().replace("-", "_").replace(" ", "_")
 
+    # ===== Capabilities & Planning helpers =====
+    def _build_executor_index(self) -> Dict[str, Dict[str, Any]]:
+        """Build executor capabilities from registered tools.
+
+        For tools without explicit capabilities, synthesize a single action using the tool name.
+        Returns a map executor_id -> capabilities dict with keys: executor_id, label, version, actions[].
+        """
+        index: Dict[str, Dict[str, Any]] = {}
+        for spec in self.tools:
+            try:
+                cap: Dict[str, Any]
+                # If tool provides its own capabilities
+                if getattr(spec, "capabilities_provider", None):
+                    cap = spec.capabilities_provider()  # type: ignore[misc]
+                    eid = str(cap.get("executor_id") or self._normalize_name(spec.name))
+                    cap["executor_id"] = eid
+                    index[eid] = cap
+                else:
+                    eid = self._normalize_name(spec.name)
+                    cap = {
+                        "executor_id": eid,
+                        "label": spec.name,
+                        "version": "cap-v1",
+                        "actions": [
+                            {
+                                "name": self._normalize_name(spec.name),
+                                "description": getattr(spec, "description", spec.name),
+                                "params_schema": spec.input_schema or {"type": "object"},
+                                "acceptance": None,
+                            }
+                        ],
+                    }
+                    index[eid] = cap
+                try:
+                    # Structured capability log per executor
+                    self.logger.info(
+                        "executor_capabilities",
+                        executor_id=index[eid]["executor_id"],
+                        label=index[eid].get("label"),
+                        version=index[eid].get("version"),
+                        actions=[a.get("name") for a in index[eid].get("actions", [])],
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                continue
+        # Keep in context for prompts/visibility
+        self.context["executor_index"] = index
+        return index
+
+    def _executor_id_for_tool(self, tool_norm: str) -> str:
+        # Prefer matching synthesized eid equal to tool name
+        eid = self._normalize_name(tool_norm)
+        if eid in self.executor_index:
+            return eid
+        # Fallback: first executor containing an action matching tool name
+        for k, cap in (self.executor_index or {}).items():
+            for a in cap.get("actions", []) or []:
+                if self._normalize_name(a.get("name", "")) == tool_norm:
+                    return k
+        return eid
+
+    def _action_for_tool(self, tool_norm: str) -> str:
+        # Default action name equals normalized tool name for synthesized capabilities
+        return self._normalize_name(tool_norm)
+
+    def _validate_plan_against_capabilities(self, tasks: List[Dict[str, Any]], executor_index: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Validate tasks against capability index. Marks invalid tasks with status ERROR and notes.
+        Returns a report dict; tasks are mutated in place with notes when invalid.
+        """
+        report = {"invalid": 0}
+        for t in tasks:
+            eid = t.get("executor_id")
+            act = t.get("action")
+            if not eid or eid not in executor_index:
+                t["status"] = TaskStatus.FAILED.value
+                t["notes"] = (t.get("notes") or "") + "; invalid executor_id"
+                report["invalid"] += 1
+                continue
+            actions = [a.get("name") for a in executor_index[eid].get("actions", [])]
+            if not act or self._normalize_name(act) not in [self._normalize_name(a) for a in actions]:
+                t["status"] = TaskStatus.FAILED.value
+                t["notes"] = (t.get("notes") or "") + "; invalid action"
+                report["invalid"] += 1
+        return report
+
+    def _reconcile_tasks_with_capabilities(self, tasks: List[Dict[str, Any]], executor_index: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Fill missing executor_id/action when determinable without domain knowledge."""
+        # If only one executor, set missing executor_id
+        visible = list(executor_index.keys())
+        single_executor = visible[0] if len(visible) == 1 else None
+        for t in tasks:
+            # Derive executor_id from tool name if missing
+            if not t.get("executor_id"):
+                tool = (t.get("tool") or "").strip()
+                if tool:
+                    t["executor_id"] = self._executor_id_for_tool(self._normalize_name(tool))
+                elif single_executor:
+                    t["executor_id"] = single_executor
+            # Derive action if missing or invalid and executor has single action
+            eid = t.get("executor_id")
+            if eid and eid in executor_index:
+                actions = executor_index[eid].get("actions", [])
+                if not t.get("action"):
+                    if len(actions) == 1:
+                        t["action"] = actions[0].get("name")
+                    else:
+                        # Try to match tool to action
+                        tool = (t.get("tool") or "").strip()
+                        cand = self._normalize_name(tool) if tool else None
+                        for a in actions:
+                            if cand and self._normalize_name(a.get("name", "")) == cand:
+                                t["action"] = a.get("name")
+                                break
+        return tasks
+
+    def _prune_invalid_and_duplicate_tasks(self, tasks: List[Dict[str, Any]], executor_index: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove tasks that reference non-existent executors/actions and collapse duplicates.
+
+        Duplicate criteria: same normalized (executor_id, action, json.dumps(params, sort_keys=True)).
+        """
+        pruned: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for t in tasks:
+            eid = t.get("executor_id")
+            act = t.get("action")
+            if not eid or eid not in executor_index:
+                continue
+            actions = [self._normalize_name(a.get("name")) for a in executor_index[eid].get("actions", [])]
+            if not act or self._normalize_name(act) not in actions:
+                continue
+            try:
+                params = t.get("params") or {}
+                key = json.dumps({
+                    "eid": self._normalize_name(eid),
+                    "act": self._normalize_name(act),
+                    "params": params,
+                }, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                key = f"{self._normalize_name(eid)}|{self._normalize_name(act)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            pruned.append(t)
+        # reassign stable ids t1..tn if missing or duplicate ids present
+        assigned_ids: set[str] = set()
+        for i, t in enumerate(pruned, start=1):
+            tid = str(t.get("id") or "").strip()
+            if not tid or tid in assigned_ids:
+                t["id"] = f"t{i}"
+            assigned_ids.add(str(t.get("id")))
+        return pruned
+
     def _get_tasks(self) -> List[Dict[str, Any]]:
         return list(self.context.get("tasks", []))
 
@@ -1134,10 +1533,11 @@ class ReActAgent:
 
     def _find_task_for_tool(self, tool_norm: str) -> Optional[int]:
         tasks = self._get_tasks()
-        # Prefer first task matching tool name and not completed
+        # Prefer first task matching tool name that is not COMPLETED
         for idx, t in enumerate(tasks):
             t_tool = str(t.get("tool") or "").strip()
-            if t_tool and self._normalize_name(t_tool) == tool_norm:
+            status = str(t.get("status", "PENDING")).upper()
+            if t_tool and self._normalize_name(t_tool) == tool_norm and status != TaskStatus.COMPLETED.value:
                 return idx
         # Fallback: first PENDING/IN_PROGRESS task
         for idx, t in enumerate(tasks):
@@ -1208,9 +1608,14 @@ class ReActAgent:
           - {"op":"add_subtask", "parent_id": str, "task": {...}}
           - {"op":"link_dep", "task_id": str, "depends_on": [str,...]}
           - {"op":"unlink_dep", "task_id": str, "depends_on": [str,...]}
+          - {"op":"set_status", "task_id": str, "value": "COMPLETED"}
+          - {"op":"set_field", "task_id": str, "path": "notes", "value": "..."}
+          - {"op":"append_task", "task": Task}
+          - {"op":"remove_task", "task_id": str}
+          - {"op":"replace_task", "task_id": str, "task": Task}
         """
         current_version = int(self.context.get("version", 1))
-        base_version = int(patch.get("base_version") or current_version)
+        base_version = int(patch.get("base_version") or patch.get("applied_to_plan_version") or current_version)
         agent_name = str(patch.get("agent_name") or "").strip() or None
 
         if base_version != current_version:
@@ -1335,6 +1740,84 @@ class ReActAgent:
                 elif kind == "unlink_dep":
                     tid = op.get("task_id")
                     unlink = set(map(str, (op.get("depends_on") or [])))
+                elif kind == "set_status":
+                    tid = op.get("task_id")
+                    value = op.get("value")
+                    idx = self._find_task_index_by_id(str(tid)) if tid else None
+                    if idx is None:
+                        denied.append(f"set_status:{tid}:not_found")
+                        continue
+                    owner = tasks[idx].get("owner_agent")
+                    if owner and agent_name and owner != agent_name:
+                        denied.append(f"set_status:{tid}:owner_mismatch")
+                        continue
+                    tasks[idx]["status"] = self._normalize_status_value(value)
+                    applied += 1
+
+                elif kind == "set_field":
+                    tid = op.get("task_id")
+                    path = str(op.get("path") or "").strip()
+                    value = op.get("value")
+                    idx = self._find_task_index_by_id(str(tid)) if tid else None
+                    if idx is None or not path:
+                        denied.append(f"set_field:{tid}:invalid")
+                        continue
+                    owner = tasks[idx].get("owner_agent")
+                    if owner and agent_name and owner != agent_name:
+                        denied.append(f"set_field:{tid}:owner_mismatch")
+                        continue
+                    # Only allow top-level safe fields
+                    if path in {"title","description","tool","params","status","notes","priority","executor_id","action"}:
+                        if path == "status":
+                            tasks[idx][path] = self._normalize_status_value(value)
+                        else:
+                            tasks[idx][path] = value
+                        applied += 1
+                    else:
+                        denied.append(f"set_field:{tid}:path_not_allowed")
+
+                elif kind == "append_task":
+                    t = dict(op.get("task") or {})
+                    if agent_name:
+                        t.setdefault("owner_agent", agent_name)
+                    t["status"] = self._normalize_status_value(t.get("status", TaskStatus.PENDING.value))
+                    t.setdefault("id", f"t{len(tasks)+1}")
+                    exist_idx = self._find_task_index_by_id(str(t.get("id")))
+                    if exist_idx is not None:
+                        denied.append(f"append_task:{t.get('id')}:exists")
+                    else:
+                        tasks.append(t)
+                        applied += 1
+
+                elif kind == "remove_task":
+                    tid = op.get("task_id")
+                    idx = self._find_task_index_by_id(str(tid)) if tid else None
+                    if idx is None:
+                        denied.append(f"remove_task:{tid}:not_found")
+                        continue
+                    owner = tasks[idx].get("owner_agent")
+                    if owner and agent_name and owner != agent_name:
+                        denied.append(f"remove_task:{tid}:owner_mismatch")
+                        continue
+                    tasks.pop(idx)
+                    applied += 1
+
+                elif kind == "replace_task":
+                    tid = op.get("task_id")
+                    new_t = dict(op.get("task") or {})
+                    idx = self._find_task_index_by_id(str(tid)) if tid else None
+                    if idx is None:
+                        denied.append(f"replace_task:{tid}:not_found")
+                        continue
+                    owner = tasks[idx].get("owner_agent")
+                    if owner and agent_name and owner != agent_name:
+                        denied.append(f"replace_task:{tid}:owner_mismatch")
+                        continue
+                    # preserve id unless explicitly set
+                    new_t.setdefault("id", tasks[idx].get("id"))
+                    new_t["status"] = self._normalize_status_value(new_t.get("status", TaskStatus.PENDING.value))
+                    tasks[idx] = new_t
+                    applied += 1
                     idx = self._find_task_index_by_id(str(tid)) if tid else None
                     if idx is None:
                         denied.append(f"unlink_dep:{tid}:not_found")
