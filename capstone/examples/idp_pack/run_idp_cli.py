@@ -13,6 +13,7 @@ from capstone.prototype.tools_builtin import AGENT_TOOLS
 
 
 
+
 def load_text(path: Path) -> str:
 	"""Load text file content."""
 	return path.read_text(encoding="utf-8")
