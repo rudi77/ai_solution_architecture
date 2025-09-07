@@ -742,11 +742,30 @@ async def run_sub_agent(
         "ops": []
     }
     master_tasks = list((shared_context or {}).get("tasks", []))
+    target_task_id = str((shared_context or {}).get("target_task_id") or "").strip() or None
+    wrapper_norm = (agent_name or "subagent").strip().lower().replace("-", "_").replace(" ", "_")
+    def _norm(s: str) -> str:
+        return (s or "").strip().lower().replace("-", "_").replace(" ", "_")
     def _find_master_task_id_by_tool(tool_name: str) -> str | None:
-        norm = (tool_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+        # 0) Deterministic: prefer explicitly given target_task_id
+        if target_task_id:
+            return target_task_id
+        norm = _norm(tool_name)
+        # 1) Direct tool match
         for mt in master_tasks:
-            tt = (mt.get("tool") or "").strip().lower().replace("-", "_").replace(" ", "_")
-            if tt == norm:
+            tt = _norm(mt.get("tool"))
+            if tt and tt == norm:
+                return str(mt.get("id"))
+        # 2) Prefixed tool match: wrapper.action
+        for mt in master_tasks:
+            tt = _norm(mt.get("tool"))
+            if tt and tt == f"{wrapper_norm}.{norm}":
+                return str(mt.get("id"))
+        # 3) Fallback: match by executor_id + action
+        for mt in master_tasks:
+            exec_id = _norm(mt.get("executor_id"))
+            action = _norm(mt.get("action"))
+            if action == norm and (not exec_id or exec_id == wrapper_norm):
                 return str(mt.get("id"))
         return None
     for t in subagent.context.get("tasks", []):

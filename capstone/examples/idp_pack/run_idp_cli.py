@@ -33,13 +33,13 @@ async def main() -> None:
 
 	provider = OpenAIProvider(api_key=openai_key)
 
-	# Sub-agent with Git tools (no mission → empty <Mission> in sub-agent)
+	# Sub-agent with Git tools (now with explicit Git mission)
 	git_tools = get_idp_tools()
 	git_agent = ReActAgent(
 		system_prompt=None,
 		llm=provider,
 		tools=git_tools,
-		mission=None,
+		mission=mission,
 	)
 
 	# Orchestrator only knows the sub-agent tool (delegation)
@@ -51,7 +51,8 @@ async def main() -> None:
 				name="agent_git",
 				description="Git sub-agent",
 				allowed_tools=[t.name for t in git_tools],
-				budget={"max_steps": 12},				
+				budget={"max_steps": 12},
+				mission_override=mission,
 			),
 		],
 		mission=mission,
