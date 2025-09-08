@@ -13,6 +13,10 @@ from ..core.registry import AgentSystemRegistry
 from capstone.prototype.todolist_md import get_todolist_path
 
 
+# create a logger use structlog
+import structlog
+logger = structlog.get_logger()
+
 router = APIRouter()
 sessions = SessionStore()
 # Reuse the same registry instance used by agent_systems module
@@ -62,6 +66,7 @@ async def stream(sid: str) -> StreamingResponse:
 
     async def event_gen():
         user_text = entry.agent.context.get("recent_user_message", "")
+        logger.info("user_text", user_text=user_text)
         async for chunk in entry.agent.process_request(user_text, session_id=sid):
             # Ensure each event is a string line; chunk may already be text
             payload = chunk if isinstance(chunk, str) else str(chunk)
