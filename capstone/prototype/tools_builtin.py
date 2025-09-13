@@ -19,6 +19,7 @@ from .tool_packages.project_tools import PROJECT_TOOLS
 from .tool_packages.cicd_tools import CICD_TOOLS
 from .tool_packages.k8s_tools import K8S_TOOLS
 from .tool_packages.docs_tools import DOCS_TOOLS
+from .tool_packages.file_tools import FILE_TOOLS
 
 logger = structlog.get_logger()
 
@@ -130,6 +131,7 @@ BUILTIN_TOOLS: List[ToolSpec] = merge_tool_specs(
     CICD_TOOLS,
     K8S_TOOLS,
     DOCS_TOOLS,
+    FILE_TOOLS,
 )
 
 # Simplified tool set for basic operations

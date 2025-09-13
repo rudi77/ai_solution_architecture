@@ -5,6 +5,9 @@ from .project_ops import (
     apply_template,
     validate_project_name_and_type,
     search_knowledge_base_for_guidelines,
+    discover_templates,
+    select_template,
+    apply_project_template,
 )
 from .specs import PROJECT_TOOLS
 
@@ -13,5 +16,8 @@ __all__ = [
     "apply_template",
     "validate_project_name_and_type", 
     "search_knowledge_base_for_guidelines",
+    "discover_templates",
+    "select_template",
+    "apply_project_template",
     "PROJECT_TOOLS",
 ]

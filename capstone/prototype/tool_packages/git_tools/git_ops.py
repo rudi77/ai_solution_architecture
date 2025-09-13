@@ -390,3 +390,233 @@ async def create_git_repository_with_branch_protection(
     if not protection.get("success"):
         return protection
     return {"success": True, "repo": create, "branch_protection": protection}
+
+
+async def git_commit(repo_path: str, message: str, **kwargs) -> Dict[str, Any]:
+    """Create a Git commit in the specified repository.
+    
+    Args:
+        repo_path: Path to the Git repository
+        message: Commit message
+        
+    Returns:
+        Dict with success status and commit info
+    """
+    logger.info("git_commit_start", repo_path=repo_path, message=message)
+    
+    try:
+        repo_dir = Path(repo_path)
+        
+        if not repo_dir.exists():
+            return {
+                "success": False,
+                "error": f"Repository path does not exist: {repo_path}"
+            }
+        
+        git_dir = repo_dir / ".git"
+        if not git_dir.exists():
+            return {
+                "success": False,
+                "error": f"Not a git repository: {repo_path}"
+            }
+        
+        def run_git(args: List[str]) -> Dict[str, Any]:
+            cmd = ["git"] + args
+            logger.info("git_command_start", command=" ".join(cmd), cwd=str(repo_dir))
+            
+            try:
+                result = subprocess.run(
+                    cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=30
+                )
+                return {
+                    "code": result.returncode,
+                    "stdout": result.stdout.strip(),
+                    "stderr": result.stderr.strip()
+                }
+            except subprocess.TimeoutExpired:
+                logger.error("git_command_timeout", command=" ".join(args))
+                return {"code": -1, "stdout": "", "stderr": "Command timed out"}
+            except Exception as e:
+                logger.error("git_command_exception", command=" ".join(args), error=str(e))
+                return {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
+        
+        # Create commit
+        commit_res = run_git(["commit", "-m", message])
+        if commit_res["code"] != 0:
+            # Check if there are no changes to commit
+            if "nothing to commit" in commit_res["stdout"] or "nothing to commit" in commit_res["stderr"]:
+                return {
+                    "success": True,
+                    "repo_path": str(repo_dir),
+                    "message": "No changes to commit",
+                    "commit_hash": None
+                }
+            
+            error = f"git commit failed: {commit_res['stderr']}"
+            logger.error("git_commit_failed", error=error)
+            return {"success": False, "error": error}
+        
+        # Get commit hash
+        rev_res = run_git(["rev-parse", "HEAD"])
+        commit_hash = rev_res["stdout"] if rev_res["code"] == 0 else None
+        
+        logger.info("git_commit_success", repo_path=repo_path, commit_hash=commit_hash)
+        return {
+            "success": True,
+            "repo_path": str(repo_dir),
+            "commit_hash": commit_hash,
+            "message": message
+        }
+        
+    except Exception as e:
+        error = f"Failed to commit in repository {repo_path}: {str(e)}"
+        logger.error("git_commit_exception", repo_path=repo_path, error=error)
+        return {"success": False, "error": error}
+
+
+async def git_push(repo_path: str, remote: str = "origin", branch: str = "main", **kwargs) -> Dict[str, Any]:
+    """Push changes to remote repository.
+    
+    Args:
+        repo_path: Path to the Git repository
+        remote: Remote name (default: origin)
+        branch: Branch name (default: main)
+        
+    Returns:
+        Dict with success status and push info
+    """
+    logger.info("git_push_start", repo_path=repo_path, remote=remote, branch=branch)
+    
+    try:
+        repo_dir = Path(repo_path)
+        
+        if not repo_dir.exists():
+            return {
+                "success": False,
+                "error": f"Repository path does not exist: {repo_path}"
+            }
+        
+        git_dir = repo_dir / ".git"
+        if not git_dir.exists():
+            return {
+                "success": False,
+                "error": f"Not a git repository: {repo_path}"
+            }
+        
+        def run_git(args: List[str]) -> Dict[str, Any]:
+            cmd = ["git"] + args
+            logger.info("git_command_start", command=" ".join(cmd), cwd=str(repo_dir))
+            
+            try:
+                result = subprocess.run(
+                    cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=60
+                )
+                return {
+                    "code": result.returncode,
+                    "stdout": result.stdout.strip(),
+                    "stderr": result.stderr.strip()
+                }
+            except subprocess.TimeoutExpired:
+                logger.error("git_command_timeout", command=" ".join(args))
+                return {"code": -1, "stdout": "", "stderr": "Command timed out"}
+            except Exception as e:
+                logger.error("git_command_exception", command=" ".join(args), error=str(e))
+                return {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
+        
+        # Push to remote
+        push_res = run_git(["push", remote, branch])
+        if push_res["code"] != 0:
+            error = f"git push failed: {push_res['stderr']}"
+            logger.error("git_push_failed", error=error)
+            return {"success": False, "error": error}
+        
+        logger.info("git_push_success", repo_path=repo_path, remote=remote, branch=branch)
+        return {
+            "success": True,
+            "repo_path": str(repo_dir),
+            "remote": remote,
+            "branch": branch,
+            "message": f"Pushed to {remote}/{branch}"
+        }
+        
+    except Exception as e:
+        error = f"Failed to push repository {repo_path}: {str(e)}"
+        logger.error("git_push_exception", repo_path=repo_path, error=error)
+        return {"success": False, "error": error}
+
+
+async def git_add_files(repo_path: str, files: List[str], **kwargs) -> Dict[str, Any]:
+    """Add files to Git staging area.
+    
+    Args:
+        repo_path: Path to the Git repository
+        files: List of file paths to add
+        
+    Returns:
+        Dict with success status and add info
+    """
+    logger.info("git_add_files_start", repo_path=repo_path, file_count=len(files))
+    
+    try:
+        repo_dir = Path(repo_path)
+        
+        if not repo_dir.exists():
+            return {
+                "success": False,
+                "error": f"Repository path does not exist: {repo_path}"
+            }
+        
+        git_dir = repo_dir / ".git"
+        if not git_dir.exists():
+            return {
+                "success": False,
+                "error": f"Not a git repository: {repo_path}"
+            }
+        
+        if not files:
+            return {
+                "success": True,
+                "repo_path": str(repo_dir),
+                "files": [],
+                "message": "No files to add"
+            }
+        
+        def run_git(args: List[str]) -> Dict[str, Any]:
+            cmd = ["git"] + args
+            logger.info("git_command_start", command=" ".join(cmd), cwd=str(repo_dir))
+            
+            try:
+                result = subprocess.run(
+                    cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=30
+                )
+                return {
+                    "code": result.returncode,
+                    "stdout": result.stdout.strip(),
+                    "stderr": result.stderr.strip()
+                }
+            except subprocess.TimeoutExpired:
+                logger.error("git_command_timeout", command=" ".join(args))
+                return {"code": -1, "stdout": "", "stderr": "Command timed out"}
+            except Exception as e:
+                logger.error("git_command_exception", command=" ".join(args), error=str(e))
+                return {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
+        
+        # Add files to staging area
+        add_res = run_git(["add"] + files)
+        if add_res["code"] != 0:
+            error = f"git add failed: {add_res['stderr']}"
+            logger.error("git_add_files_failed", error=error)
+            return {"success": False, "error": error}
+        
+        logger.info("git_add_files_success", repo_path=repo_path, files=files)
+        return {
+            "success": True,
+            "repo_path": str(repo_dir),
+            "files": files,
+            "message": f"Added {len(files)} files to staging area"
+        }
+        
+    except Exception as e:
+        error = f"Failed to add files in repository {repo_path}: {str(e)}"
+        logger.error("git_add_files_exception", repo_path=repo_path, error=error)
+        return {"success": False, "error": error}
