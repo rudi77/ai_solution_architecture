@@ -42,8 +42,9 @@
 - Use `discover_templates` to find available templates in `./templates/` directory.
 - Use `select_template` with user input to identify best matching template.
 - If clarification needed, present options clearly and wait for user selection.
-- Use `apply_project_template` to generate complete project structure and code.
-- Use separate Git tools: `git_add_files`, `git_commit`, `git_push` for template code.
+- Use `apply_template_and_commit` to generate complete project structure AND commit it automatically.
+- This single tool replaces the previous multi-step process (apply_project_template + git_add_files + git_commit).
+- Use `git_push` to push the committed template code to remote.
 - Use File Tools (`file_create`, `file_write`, etc.) for any additional file operations.
 - Ensure generated code follows specified architecture patterns.
 
@@ -59,15 +60,11 @@
    - Select template with clarification if needed
    - Confirm selection with user
 
-3. **Code Generation** (ITERATION 2):
-   - Apply selected template to repository
-   - Generate complete project structure and files
-   - Replace placeholders with actual project name
-
-4. **Git Integration** (ITERATION 2):
-   - Add all generated files to Git staging
-   - Commit with descriptive message
-   - Push template code to remote
+3. **Code Generation and Git Integration** (ITERATION 2):
+   - Apply selected template and commit automatically using `apply_template_and_commit`
+   - Generate complete project structure and files with placeholders replaced
+   - All files automatically added to Git staging and committed
+   - Push template code to remote using `git_push`
 
 5. **Completion**:
    - Provide local path, remote URL, commit hashes

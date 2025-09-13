@@ -1,5 +1,5 @@
 """
-Rich-based CLI for IDP Pack - Enhanced Git workflow interface
+Rich-based CLI for IDP Pack - Template-Based Project Creation Interface
 """
 from __future__ import annotations
 
@@ -40,15 +40,15 @@ class RichIDPCLI:
         """Initialize the ReAct agent with proper error handling."""
         try:
             root = Path(__file__).resolve().parents[2]
-            prompt_path = root / "examples" / "idp_pack" / "system_prompt_git.txt"
+            mission_path = root / "examples" / "idp_pack" / "prompts" / "mission_template_git.txt"
             generic_path = root / "examples" / "idp_pack" / "system_prompt_idp.txt"
             orch_path = root / "examples" / "idp_pack" / "prompts" / "orchestrator.txt"
             
-            if not prompt_path.exists():
-                self.console.print(f"[red]Error: System prompt not found at {prompt_path}[/red]")
+            if not mission_path.exists():
+                self.console.print(f"[red]Error: Mission file not found at {mission_path}[/red]")
                 return False
                 
-            git_mission = self.load_text(prompt_path)
+            template_mission = self.load_text(mission_path)
             system_prompt = self.load_text(generic_path)
             orch_mission = self.load_text(orch_path)
             openai_key = os.getenv("OPENAI_API_KEY")
@@ -58,26 +58,26 @@ class RichIDPCLI:
             
             provider = OpenAIProvider(api_key=openai_key)
 
-            # Build sub-agent with Git tools
-            git_tools = get_idp_tools()
-            git_agent = ReActAgent(
+            # Build sub-agent with IDP tools (including templates and file tools)
+            idp_tools = get_idp_tools()
+            template_agent = ReActAgent(
                 system_prompt=system_prompt,
                 llm=provider,
-                tools=git_tools,
-                mission=git_mission,
+                tools=idp_tools,
+                mission=template_mission,
             )
 
-            # Orchestrator only exposes the sub-agent tool
+            # Orchestrator only exposes the template agent tool
             self.agent = ReActAgent(
                 system_prompt=system_prompt,
                 llm=provider,
                 tools=[
-                    git_agent.to_tool(
-                        name="agent_git",
-                        description="Git sub-agent",
-                        allowed_tools=[t.name for t in git_tools],
-                        budget={"max_steps": 12},
-                        mission_override=git_mission,
+                    template_agent.to_tool(
+                        name="agent_template_git",
+                        description="Template-based project creation agent",
+                        allowed_tools=[t.name for t in idp_tools],
+                        budget={"max_steps": 20},
+                        mission_override=template_mission,
                     )
                 ],
                 mission=orch_mission,
@@ -93,16 +93,21 @@ class RichIDPCLI:
         welcome_panel = Panel(
             Text.from_markup(
                 "[bold blue]IDP Pack CLI[/bold blue]\n"
-                "[dim]Intelligent Development Partner - Git Workflow Assistant[/dim]\n\n"
+                "[dim]Intelligent Development Partner - Template-Based Project Creation[/dim]\n\n"
+                "[green]Features:[/green]\n"
+                "• Create repositories with AI-generated project templates\n"
+                "• Intelligent template selection with clarification\n"
+                "• Complete project structure generation\n"
+                "• Git integration with commit and push\n\n"
                 "[green]Commands:[/green]\n"
                 "• Type your request naturally\n"
                 "• [bold]help[/bold] - Show available commands\n"
                 "• [bold]status[/bold] - Show current session status\n"
                 "• [bold]clear[/bold] - Clear session history\n"
                 "• [bold]exit/quit/q[/bold] - Exit the CLI\n\n"
-                "[yellow]Ready to assist with your Git workflow![/yellow]"
+                "[yellow]Ready to create your next project![/yellow]"
             ),
-            title="🤖 Welcome",
+            title="🚀 Welcome",
             border_style="blue",
             padding=(1, 2)
         )
@@ -131,15 +136,28 @@ class RichIDPCLI:
         - **clear** - Clear the current session and start fresh
         - **exit/quit/q** - Exit the CLI
         
-        ## Usage Examples
-        - "Show me the current git status"
-        - "Create a new branch for feature X"
-        - "Review the last commit"
-        - "Help me resolve merge conflicts"
+        ## Template-Based Project Creation Examples
+        - "Create Python FastAPI service named payment-api"
+        - "Create Python web application named user-service" 
+        - "Create C# Web API named order-service"
+        - "Create microservice with hexagonal architecture named product-api"
+        
+        ## Available Templates
+        - **Python FastAPI Hexagonal** - Microservice with Hexagonal Architecture
+        - **Python Flask MVC** - Web application with MVC pattern
+        - **C# Web API Clean** - Enterprise API with Clean Architecture + CQRS
+        
+        ## How It Works
+        1. **Repository Creation** - Creates Git repo locally and on GitHub
+        2. **Template Selection** - Intelligently matches your request to templates
+        3. **Clarification** - Asks for choice if multiple templates match
+        4. **Code Generation** - Creates complete project structure
+        5. **Git Integration** - Commits and pushes generated code
         
         ## Tips
-        - Use natural language to describe what you need
-        - The agent can handle complex Git workflows
+        - Use natural language to describe your project
+        - Specify language, framework, and architecture preferences
+        - The agent will ask for clarification if needed
         - Session history is maintained for context
         """
         self.console.print(Markdown(help_content))

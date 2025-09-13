@@ -25,7 +25,7 @@ async def main() -> None:
 	orch_path = root / "examples" / "idp_pack" / "prompts" / "orchestrator.txt"
 	orch_system_prompt = load_text(orch_path)
 
-	mission_path = root / "examples" / "idp_pack" / "prompts" / "mission_git.txt"
+	mission_path = root / "examples" / "idp_pack" / "prompts" / "mission_template_git.txt"
 	mission = load_text(mission_path)
 
     # Initialize LLM provider with fallback to mock if no API key
@@ -59,7 +59,8 @@ async def main() -> None:
 	)
 
 	print("=" * 80)
-	print("IDP Pack CLI - minimal Git workflow example")
+	print("IDP Pack CLI - Template-Based Project Creation")
+	print("Create repositories with AI-generated project templates")
 	print("Type 'exit' to quit.")
 	print("=" * 80)
 

@@ -443,3 +443,110 @@ async def apply_project_template(template_file: str, target_dir: str, project_na
         error = f"Failed to apply template: {str(e)}"
         logger.error("apply_project_template_failed", error=error)
         return {"success": False, "error": error}
+
+
+async def apply_template_and_commit(
+    template_file: str, 
+    target_dir: str, 
+    project_name: str, 
+    commit_message: str = "Apply template: generate project structure",
+    **kwargs
+) -> Dict[str, Any]:
+    """Apply template and automatically commit all generated files with proper path handling.
+    
+    This is a wrapper function that combines template application with git operations,
+    handling the file path conversion that was causing issues in the agent workflow.
+    
+    Args:
+        template_file: Path to the template markdown file
+        target_dir: Target directory for the project (should be a git repository)
+        project_name: Name of the project
+        commit_message: Git commit message
+        
+    Returns:
+        Dict with success status, commit info, and file details
+    """
+    logger.info("apply_template_and_commit_start", 
+                template_file=template_file, 
+                target_dir=target_dir, 
+                project_name=project_name)
+    
+    try:
+        from pathlib import Path
+        
+        # Step 1: Apply the template
+        template_result = await apply_project_template(
+            template_file=template_file,
+            target_dir=target_dir,
+            project_name=project_name
+        )
+        
+        if not template_result["success"]:
+            return template_result
+        
+        created_files = template_result["files_created"]
+        logger.info("template_applied_successfully", files_count=len(created_files))
+        
+        # Step 2: Convert absolute paths to relative paths for git
+        repo_path_obj = Path(target_dir)
+        relative_files = []
+        
+        for file_path in created_files:
+            path_obj = Path(file_path)
+            if path_obj.is_absolute():
+                try:
+                    rel_path = path_obj.relative_to(repo_path_obj)
+                    relative_files.append(str(rel_path))
+                except ValueError:
+                    # File is not within repo_path, use original path
+                    relative_files.append(file_path)
+            else:
+                relative_files.append(file_path)
+        
+        logger.info("file_paths_converted", 
+                   absolute_count=len(created_files),
+                   relative_count=len(relative_files))
+        
+        # Step 3: Add files to git staging area
+        from ..git_tools.git_ops import git_add_files, git_commit
+        
+        add_result = await git_add_files(repo_path=target_dir, files=relative_files)
+        if not add_result["success"]:
+            return {
+                "success": False,
+                "error": f"Failed to add files to git: {add_result.get('error')}",
+                "template_applied": True,
+                "files_created": created_files
+            }
+        
+        logger.info("files_added_to_git", files_count=len(relative_files))
+        
+        # Step 4: Commit the changes
+        commit_result = await git_commit(repo_path=target_dir, message=commit_message)
+        if not commit_result["success"]:
+            return {
+                "success": False,
+                "error": f"Failed to commit changes: {commit_result.get('error')}",
+                "template_applied": True,
+                "files_created": created_files,
+                "files_added": True
+            }
+        
+        logger.info("template_and_commit_success", 
+                   commit_hash=commit_result.get("commit_hash"),
+                   files_count=len(created_files))
+        
+        return {
+            "success": True,
+            "files_created": created_files,
+            "relative_files": relative_files,
+            "project_path": str(repo_path_obj),
+            "commit_hash": commit_result.get("commit_hash"),
+            "commit_message": commit_message,
+            "message": f"Template applied and committed successfully. Created {len(created_files)} files."
+        }
+        
+    except Exception as e:
+        error = f"Failed to apply template and commit: {str(e)}"
+        logger.error("apply_template_and_commit_failed", error=error)
+        return {"success": False, "error": error}

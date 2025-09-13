@@ -10,6 +10,7 @@ from .project_ops import (
     discover_templates,
     select_template,
     apply_project_template,
+    apply_template_and_commit,
 )
 
 PROJECT_TOOLS: List[ToolSpec] = [
@@ -217,5 +218,56 @@ PROJECT_TOOLS: List[ToolSpec] = [
         is_async=True,
         timeout=30,
         aliases=["create_from_template", "generate_project"],
+    ),
+    ToolSpec(
+        name="apply_template_and_commit",
+        description="Apply template and automatically commit all generated files (fixes file path issues)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "template_file": {
+                    "type": "string",
+                    "description": "Path to the template markdown file"
+                },
+                "target_dir": {
+                    "type": "string",
+                    "description": "Target directory for the project (should be a git repository)"
+                },
+                "project_name": {
+                    "type": "string",
+                    "description": "Name of the project"
+                },
+                "commit_message": {
+                    "type": "string",
+                    "description": "Git commit message",
+                    "default": "Apply template: generate project structure"
+                }
+            },
+            "required": ["template_file", "target_dir", "project_name"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "files_created": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "relative_files": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "project_path": {"type": "string"},
+                "commit_hash": {"type": ["string", "null"]},
+                "commit_message": {"type": "string"},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=apply_template_and_commit,
+        is_async=True,
+        timeout=60,
+        aliases=["template_and_commit", "apply_template_with_git"],
     ),
 ]

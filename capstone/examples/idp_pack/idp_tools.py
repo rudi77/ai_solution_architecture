@@ -8,5 +8,5 @@ from capstone.prototype.tools_builtin import BUILTIN_TOOLS  # type: ignore
 
 
 def get_idp_tools() -> List["ToolSpec"]:
-	"""Return the built-in IDP tools for example composition."""
-	return BUILTIN_TOOLS_SIMPLIFIED
+	"""Return the full built-in IDP tools including templates and file tools."""
+	return BUILTIN_TOOLS

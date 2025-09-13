@@ -349,3 +349,9 @@ secrets.json
 
 
 assignments/assignment2/model
+
+# IDP Copilot runtime files
+agent_states/
+checklists/
+feedback/
+templates/  # Copy of capstone/templates for agent runtime

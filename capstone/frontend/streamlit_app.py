@@ -138,19 +138,19 @@ def render_tab_agent_system(base_url: str) -> None:
         "You are a generic orchestration agent.",
     )
     mission_text = _read_prompt(
-        "examples/idp_pack/prompts/mission_git.txt",
-        "Create a repository locally and on GitHub; push initial commit.",
+        "examples/idp_pack/prompts/mission_template_git.txt",
+        "Create a repository with AI-generated project templates locally and on GitHub; includes template selection and code generation.",
     )
 
     # Default YAML mirrors run_idp_cli.py structure and prompts
     default_yaml = f"""
 version: 1
 system:
-  name: idp-orchestrator
+  name: idp-template-orchestrator
 agents:
   - id: orchestrator
     role: orchestrator
-    description: Main orchestrator
+    description: Template-based project creation orchestrator
     system_prompt: |
 {_indent_block(orch_text)}
 
@@ -164,10 +164,10 @@ agents:
       temperature: 0.1
     tools:
       allow:
-        - agent_git
-  - id: agent_git
+        - agent_template_git
+  - id: agent_template_git
     role: worker
-    description: Git worker
+    description: Template-based project creation worker
     mission: |
 {_indent_block(mission_text)}
 
@@ -180,6 +180,18 @@ agents:
       allow:
         - validate_project_name_and_type
         - create_repository
+        - discover_templates
+        - select_template
+        - apply_project_template
+        - file_create
+        - file_read
+        - file_write
+        - file_edit
+        - file_delete
+        - file_list_directory
+        - git_commit
+        - git_push
+        - git_add_files
 """
 
     text = st.text_area("AgentSystem (YAML oder JSON)", value=default_yaml, height=320)
@@ -220,7 +232,20 @@ agents:
 
 def render_tab_chat(base_url: str) -> None:
     """Render the Chat tab including session creation and SSE streaming."""
-    st.subheader("Chat mit Orchestrator")
+    st.subheader("Template-Based Project Creation")
+    st.caption("Beschreibe dein gewünschtes Projekt und ich erstelle es mit der passenden Vorlage!")
+    
+    with st.expander("📋 Verfügbare Templates", expanded=False):
+        st.markdown("""
+        **Python FastAPI Hexagonal** - Microservice mit Hexagonal Architecture  
+        *Beispiel: "Create Python FastAPI service named payment-api"*
+        
+        **Python Flask MVC** - Webanwendung mit MVC Pattern  
+        *Beispiel: "Create Python web application named user-service"*
+        
+        **C# Web API Clean** - Enterprise API mit Clean Architecture + CQRS  
+        *Beispiel: "Create C# Web API named order-service"*
+        """)
 
     if not st.session_state.agent_system_id:
         st.info("Bitte zuerst ein Agent System registrieren (Tab „Agent System“).")
@@ -243,9 +268,9 @@ def render_tab_chat(base_url: str) -> None:
     user_msg = st.text_input(
         "Deine Nachricht",
         value=(
-            "Erzeuge ein neues Service-Repo 'awesome-svc' und pushe initialen Commit."
+            "Create Python FastAPI service named payment-api"
         ),
-        placeholder="Nachricht für den Orchestrator …",
+        placeholder="Beschreibe dein Projekt (z.B. 'Create Python FastAPI service named user-api') …",
     )
     go = st.button("Senden & Streamen ▶", type="primary")
 
@@ -351,7 +376,7 @@ def main() -> None:
 
     init_session_state()
 
-    st.title("🤖 Agent Orchestration Demo")
+    st.title("🚀 IDP Template-Based Project Creation")
     tab_sys, tab_chat, tab_state, tab_tools = st.tabs(
         ["⚙️ Agent System", "💬 Chat", "📋 State & ToDo", "🧰 Tools"]
     )
