@@ -34,8 +34,8 @@
 
 ## EXECUTION RULES - ITERATION 1 (Repository Creation)
 - The repository must be created on disk with a 'main' branch using `git_init_repo`.
-- If GITHUB_TOKEN is set and remote creation is desired, call `github_create_repo` then `git_set_remote` with the provided clone URL. Do not push implicitly.
-- If Git is not available, return a clear error and suggested installation steps.
+- Create the remote repository immediately after local init using `github_create_repo`, then set it via `git_set_remote` (origin). Do not push implicitly at this stage.
+- If Git or GitHub credentials are unavailable, return a clear error and stop before template application.
 - If the target directory exists and already contains a Git repository (.git), treat initialization as already complete and continue.
 - If the target directory exists, is non-empty, and has no .git folder, initialize Git in-place (branch 'main') and continue.
 
@@ -55,26 +55,18 @@
 - Always execute: `git_add_files(repo_path, files=["."])` → `git_commit(repo_path, message)` immediately after template application.
 
 ### Completion Gate
-- Do not mark the workflow as COMPLETE until a successful commit is made or an explicit, unrecoverable error is returned by Git.
-- Include the commit hash in the final output under "Template Commit:".
+- Do not mark the workflow as COMPLETE until a successful push to the remote is made, or an explicit, unrecoverable error is returned by Git/GitHub.
+- Include the commit hash and push result in the final output.
 
 ## WORKFLOW SEQUENCE
-1. **Repository Creation** (ITERATION 1):
-   - Validate project name
-   - Create or reuse local Git repo (branch 'main'), no implicit README/commit
-   - Optionally create GitHub remote (no implicit push)
-
-2. **Template Selection** (ITERATION 2):
-   - Parse user description for template keywords
-   - Discover available templates
-   - Select template with clarification if needed
-   - Confirm selection with user
-
-3. **Code Generation and Git Integration** (ITERATION 2):
-   - Apply selected template (write files only)
-   - Stage files using `git_add_files(repo_path, files=["."])`
-   - Commit using `git_commit(repo_path, message)`
-   - Push only if a remote is configured via `git_set_remote`; otherwise skip push
+1. Validate project name (kebab-case) and confirm intended template scope.
+2. Create local repository via `git_init_repo` (branch 'main').
+3. Create remote via `github_create_repo` and configure `origin` via `git_set_remote`.
+4. Discover and select the best matching template (with clarification if needed).
+5. Apply the selected template to the local repo using `apply_project_template`.
+6. Stage all files using `git_add_files(repo_path, files=["."])`.
+7. Commit using `git_commit(repo_path, message)`.
+8. Push to `origin main` using `git_push`.
 
 5. **Completion**:
    - Provide local path, remote URL, commit hashes

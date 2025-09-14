@@ -1,4 +1,11 @@
 
+// Relative Path: backend\app\api\__init__.py
+
+
+
+
+
+
 // Relative Path: backend\app\api\agent_systems.py
 from __future__ import annotations
 
@@ -216,13 +223,6 @@ async def list_tools() -> dict:
             }
         )
     return {"tools": items}
-
-
-
-
-
-
-// Relative Path: backend\app\api\__init__.py
 
 
 
@@ -456,6 +456,13 @@ class SessionStore:
 
 
 
+// Relative Path: backend\app\schemas\__init__.py
+
+
+
+
+
+
 // Relative Path: backend\app\schemas\agent_system.py
 from __future__ import annotations
 
@@ -490,7 +497,8 @@ class AgentSystem(BaseModel):
 
 
 
-// Relative Path: backend\app\schemas\__init__.py
+// Relative Path: backend\app\__init__.py
+from .main import app, create_app
 
 
 
@@ -553,14 +561,6 @@ app = create_app()
 
 
 
-// Relative Path: backend\app\__init__.py
-from .main import app, create_app
-
-
-
-
-
-
 // Relative Path: examples\idp_pack\idp_tools.py
 from __future__ import annotations
 
@@ -572,15 +572,15 @@ from capstone.prototype.tools_builtin import BUILTIN_TOOLS  # type: ignore
 
 
 def get_idp_tools() -> List["ToolSpec"]:
-	"""Return the built-in IDP tools for example composition."""
-	return BUILTIN_TOOLS_SIMPLIFIED
+	"""Return the full built-in IDP tools including templates and file tools."""
+	return BUILTIN_TOOLS
 
 
 
 
 // Relative Path: examples\idp_pack\rich_idp_cli.py
 """
-Rich-based CLI for IDP Pack - Enhanced Git workflow interface
+Rich-based CLI for IDP Pack - Template-Based Project Creation Interface
 """
 from __future__ import annotations
 
@@ -621,15 +621,15 @@ class RichIDPCLI:
         """Initialize the ReAct agent with proper error handling."""
         try:
             root = Path(__file__).resolve().parents[2]
-            prompt_path = root / "examples" / "idp_pack" / "system_prompt_git.txt"
+            mission_path = root / "examples" / "idp_pack" / "prompts" / "mission_template_git.txt"
             generic_path = root / "examples" / "idp_pack" / "system_prompt_idp.txt"
             orch_path = root / "examples" / "idp_pack" / "prompts" / "orchestrator.txt"
             
-            if not prompt_path.exists():
-                self.console.print(f"[red]Error: System prompt not found at {prompt_path}[/red]")
+            if not mission_path.exists():
+                self.console.print(f"[red]Error: Mission file not found at {mission_path}[/red]")
                 return False
                 
-            git_mission = self.load_text(prompt_path)
+            template_mission = self.load_text(mission_path)
             system_prompt = self.load_text(generic_path)
             orch_mission = self.load_text(orch_path)
             openai_key = os.getenv("OPENAI_API_KEY")
@@ -639,26 +639,26 @@ class RichIDPCLI:
             
             provider = OpenAIProvider(api_key=openai_key)
 
-            # Build sub-agent with Git tools
-            git_tools = get_idp_tools()
-            git_agent = ReActAgent(
+            # Build sub-agent with IDP tools (including templates and file tools)
+            idp_tools = get_idp_tools()
+            template_agent = ReActAgent(
                 system_prompt=system_prompt,
                 llm=provider,
-                tools=git_tools,
-                mission=git_mission,
+                tools=idp_tools,
+                mission=template_mission,
             )
 
-            # Orchestrator only exposes the sub-agent tool
+            # Orchestrator only exposes the template agent tool
             self.agent = ReActAgent(
                 system_prompt=system_prompt,
                 llm=provider,
                 tools=[
-                    git_agent.to_tool(
-                        name="agent_git",
-                        description="Git sub-agent",
-                        allowed_tools=[t.name for t in git_tools],
-                        budget={"max_steps": 12},
-                        mission_override=git_mission,
+                    template_agent.to_tool(
+                        name="agent_template_git",
+                        description="Template-based project creation agent",
+                        allowed_tools=[t.name for t in idp_tools],
+                        budget={"max_steps": 20},
+                        mission_override=template_mission,
                     )
                 ],
                 mission=orch_mission,
@@ -674,16 +674,21 @@ class RichIDPCLI:
         welcome_panel = Panel(
             Text.from_markup(
                 "[bold blue]IDP Pack CLI[/bold blue]\n"
-                "[dim]Intelligent Development Partner - Git Workflow Assistant[/dim]\n\n"
+                "[dim]Intelligent Development Partner - Template-Based Project Creation[/dim]\n\n"
+                "[green]Features:[/green]\n"
+                "• Create repositories with AI-generated project templates\n"
+                "• Intelligent template selection with clarification\n"
+                "• Complete project structure generation\n"
+                "• Git integration with commit and push\n\n"
                 "[green]Commands:[/green]\n"
                 "• Type your request naturally\n"
                 "• [bold]help[/bold] - Show available commands\n"
                 "• [bold]status[/bold] - Show current session status\n"
                 "• [bold]clear[/bold] - Clear session history\n"
                 "• [bold]exit/quit/q[/bold] - Exit the CLI\n\n"
-                "[yellow]Ready to assist with your Git workflow![/yellow]"
+                "[yellow]Ready to create your next project![/yellow]"
             ),
-            title="🤖 Welcome",
+            title="🚀 Welcome",
             border_style="blue",
             padding=(1, 2)
         )
@@ -712,15 +717,28 @@ class RichIDPCLI:
         - **clear** - Clear the current session and start fresh
         - **exit/quit/q** - Exit the CLI
         
-        ## Usage Examples
-        - "Show me the current git status"
-        - "Create a new branch for feature X"
-        - "Review the last commit"
-        - "Help me resolve merge conflicts"
+        ## Template-Based Project Creation Examples
+        - "Create Python FastAPI service named payment-api"
+        - "Create Python web application named user-service" 
+        - "Create C# Web API named order-service"
+        - "Create microservice with hexagonal architecture named product-api"
+        
+        ## Available Templates
+        - **Python FastAPI Hexagonal** - Microservice with Hexagonal Architecture
+        - **Python Flask MVC** - Web application with MVC pattern
+        - **C# Web API Clean** - Enterprise API with Clean Architecture + CQRS
+        
+        ## How It Works
+        1. **Repository Creation** - Creates Git repo locally and on GitHub
+        2. **Template Selection** - Intelligently matches your request to templates
+        3. **Clarification** - Asks for choice if multiple templates match
+        4. **Code Generation** - Creates complete project structure
+        5. **Git Integration** - Commits and pushes generated code
         
         ## Tips
-        - Use natural language to describe what you need
-        - The agent can handle complex Git workflows
+        - Use natural language to describe your project
+        - Specify language, framework, and architecture preferences
+        - The agent will ask for clarification if needed
         - Session history is maintained for context
         """
         self.console.print(Markdown(help_content))
@@ -859,7 +877,7 @@ async def main() -> None:
 	orch_path = root / "examples" / "idp_pack" / "prompts" / "orchestrator.txt"
 	orch_system_prompt = load_text(orch_path)
 
-	mission_path = root / "examples" / "idp_pack" / "prompts" / "mission_git.txt"
+	mission_path = root / "examples" / "idp_pack" / "prompts" / "mission_template_git.txt"
 	mission = load_text(mission_path)
 
     # Initialize LLM provider with fallback to mock if no API key
@@ -893,7 +911,8 @@ async def main() -> None:
 	)
 
 	print("=" * 80)
-	print("IDP Pack CLI - minimal Git workflow example")
+	print("IDP Pack CLI - Template-Based Project Creation")
+	print("Create repositories with AI-generated project templates")
 	print("Type 'exit' to quit.")
 	print("=" * 80)
 
@@ -913,6 +932,13 @@ async def main() -> None:
 
 if __name__ == "__main__":
 	asyncio.run(main())
+
+
+
+
+// Relative Path: frontend\components\__init__.py
+
+
 
 
 
@@ -952,13 +978,6 @@ def stream_agent(base_url: str, session_id: str) -> Generator[str, None, None]:
             except Exception:
                 payload = event.data
             yield str(payload)
-
-
-
-
-
-
-// Relative Path: frontend\components\__init__.py
 
 
 
@@ -1106,19 +1125,19 @@ def render_tab_agent_system(base_url: str) -> None:
         "You are a generic orchestration agent.",
     )
     mission_text = _read_prompt(
-        "examples/idp_pack/prompts/mission_git.txt",
-        "Create a repository locally and on GitHub; push initial commit.",
+        "examples/idp_pack/prompts/mission_template_git.txt",
+        "Create a repository with AI-generated project templates locally and on GitHub; includes template selection and code generation.",
     )
 
     # Default YAML mirrors run_idp_cli.py structure and prompts
     default_yaml = f"""
 version: 1
 system:
-  name: idp-orchestrator
+  name: idp-template-orchestrator
 agents:
   - id: orchestrator
     role: orchestrator
-    description: Main orchestrator
+    description: Template-based project creation orchestrator
     system_prompt: |
 {_indent_block(orch_text)}
 
@@ -1132,10 +1151,10 @@ agents:
       temperature: 0.1
     tools:
       allow:
-        - agent_git
-  - id: agent_git
+        - agent_template_git
+  - id: agent_template_git
     role: worker
-    description: Git worker
+    description: Template-based project creation worker
     mission: |
 {_indent_block(mission_text)}
 
@@ -1148,6 +1167,18 @@ agents:
       allow:
         - validate_project_name_and_type
         - create_repository
+        - discover_templates
+        - select_template
+        - apply_project_template
+        - file_create
+        - file_read
+        - file_write
+        - file_edit
+        - file_delete
+        - file_list_directory
+        - git_commit
+        - git_push
+        - git_add_files
 """
 
     text = st.text_area("AgentSystem (YAML oder JSON)", value=default_yaml, height=320)
@@ -1188,7 +1219,20 @@ agents:
 
 def render_tab_chat(base_url: str) -> None:
     """Render the Chat tab including session creation and SSE streaming."""
-    st.subheader("Chat mit Orchestrator")
+    st.subheader("Template-Based Project Creation")
+    st.caption("Beschreibe dein gewünschtes Projekt und ich erstelle es mit der passenden Vorlage!")
+    
+    with st.expander("📋 Verfügbare Templates", expanded=False):
+        st.markdown("""
+        **Python FastAPI Hexagonal** - Microservice mit Hexagonal Architecture  
+        *Beispiel: "Create Python FastAPI service named payment-api"*
+        
+        **Python Flask MVC** - Webanwendung mit MVC Pattern  
+        *Beispiel: "Create Python web application named user-service"*
+        
+        **C# Web API Clean** - Enterprise API mit Clean Architecture + CQRS  
+        *Beispiel: "Create C# Web API named order-service"*
+        """)
 
     if not st.session_state.agent_system_id:
         st.info("Bitte zuerst ein Agent System registrieren (Tab „Agent System“).")
@@ -1211,9 +1255,9 @@ def render_tab_chat(base_url: str) -> None:
     user_msg = st.text_input(
         "Deine Nachricht",
         value=(
-            "Erzeuge ein neues Service-Repo 'awesome-svc' und pushe initialen Commit."
+            "Create Python FastAPI service named payment-api"
         ),
-        placeholder="Nachricht für den Orchestrator …",
+        placeholder="Beschreibe dein Projekt (z.B. 'Create Python FastAPI service named user-api') …",
     )
     go = st.button("Senden & Streamen ▶", type="primary")
 
@@ -1319,7 +1363,7 @@ def main() -> None:
 
     init_session_state()
 
-    st.title("🤖 Agent Orchestration Demo")
+    st.title("🚀 IDP Template-Based Project Creation")
     tab_sys, tab_chat, tab_state, tab_tools = st.tabs(
         ["⚙️ Agent System", "💬 Chat", "📋 State & ToDo", "🧰 Tools"]
     )
@@ -1337,6 +1381,2870 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
+
+
+
+
+
+// Relative Path: prototype\tool_packages\cicd_tools\__init__.py
+"""CI/CD tools package."""
+
+from .cicd_ops import setup_cicd, run_tests, setup_observability
+from .specs import CICD_TOOLS
+
+__all__ = [
+    "setup_cicd",
+    "run_tests", 
+    "setup_observability",
+    "CICD_TOOLS",
+]
+
+
+
+// Relative Path: prototype\tool_packages\cicd_tools\cicd_ops.py
+"""CI/CD operations implementation."""
+
+from __future__ import annotations
+from typing import Any, Dict
+import asyncio
+
+
+async def setup_cicd(repo_path: str, pipeline_type: str = "github-actions", **kwargs) -> Dict[str, Any]:
+    """Setup CI/CD pipeline for a repository."""
+    await asyncio.sleep(2)
+    return {
+        "success": True,
+        "pipeline_file": f".github/workflows/ci.yml",
+        "stages": ["lint", "test", "build", "security-scan"],
+    }
+
+
+async def run_tests(project_path: str, **kwargs) -> Dict[str, Any]:
+    """Run test suite for a project."""
+    await asyncio.sleep(5)
+    return {"success": True, "tests_run": 42, "tests_passed": 42, "coverage": "87%"}
+
+
+async def setup_observability(project_name: str = None, **kwargs) -> Dict[str, Any]:
+    """Setup observability stack for a project."""
+    await asyncio.sleep(1)
+    return {
+        "success": True,
+        "stack": ["prometheus", "grafana", "otel"],
+        "notes": "Integrated default dashboards and traces",
+    }
+
+
+
+// Relative Path: prototype\tool_packages\cicd_tools\specs.py
+"""CI/CD tools specifications."""
+
+from typing import List
+from ...tools import ToolSpec
+from .cicd_ops import setup_cicd, run_tests, setup_observability
+
+CICD_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="setup_cicd_pipeline",
+        description="Setup CI/CD pipeline",
+        input_schema={
+            "type": "object",
+            "properties": {"repo_path": {"type": "string"}, "pipeline_type": {"type": "string"}},
+            "required": ["repo_path"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        func=setup_cicd,
+        is_async=True,
+        timeout=20,
+        aliases=["ci-cd-configurator"],
+    ),
+    ToolSpec(
+        name="run_initial_tests",
+        description="Run initial test suite",
+        input_schema={
+            "type": "object",
+            "properties": {"project_path": {"type": "string"}},
+            "required": ["project_path"],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=run_tests,
+        is_async=True,
+        timeout=30,
+        aliases=["test-runner"],
+    ),
+    ToolSpec(
+        name="setup_observability",
+        description="Setup monitoring & logging",
+        input_schema={
+            "type": "object",
+            "properties": {"project_name": {"type": "string"}},
+            "required": [],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=setup_observability,
+        is_async=True,
+        timeout=10,
+        aliases=["observability-integrator"],
+    ),
+]
+
+
+
+// Relative Path: prototype\tool_packages\common\__init__.py
+"""Common utilities shared across tool packages."""
+
+from .path_manager import (
+    get_working_directory,
+    get_repos_directory,
+    validate_path,
+    get_relative_path,
+    ensure_subdirectory,
+    WorkingDirectoryManager
+)
+from .execution_guard import validate_working_directory, ensure_repos_directory
+
+__all__ = [
+    'get_working_directory',
+    'get_repos_directory', 
+    'validate_path',
+    'get_relative_path',
+    'ensure_subdirectory',
+    'WorkingDirectoryManager',
+    'validate_working_directory',
+    'ensure_repos_directory'
+]
+
+
+
+// Relative Path: prototype\tool_packages\common\execution_guard.py
+"""Tool execution guards and validation.
+
+This module provides execution-time validation to ensure tools
+operate within the expected working directory constraints.
+"""
+
+from __future__ import annotations
+import asyncio
+import functools
+from pathlib import Path
+from typing import Any, Dict, Callable, Union
+import structlog
+from .path_manager import get_working_directory, validate_path
+
+logger = structlog.get_logger()
+
+def validate_working_directory(func: Callable) -> Callable:
+    """Decorator to validate working directory before tool execution.
+    
+    This decorator ensures that:
+    1. The current working directory hasn't changed unexpectedly
+    2. Any path parameters are within the working directory
+    3. The tool operates in a predictable directory context
+    """
+    
+    @functools.wraps(func)
+    async def async_wrapper(*args, **kwargs):
+        # Get expected working directory
+        expected_wd = get_working_directory()
+        current_wd = Path.cwd()
+        
+        # Warn if working directory has changed
+        if current_wd.resolve() != expected_wd.resolve():
+            logger.warning(
+                "working_directory_drift_detected",
+                expected=str(expected_wd),
+                current=str(current_wd),
+                tool=func.__name__
+            )
+        
+        # Validate path parameters
+        path_params = ['target_dir', 'repo_path', 'directory', 'path', 'file_path']
+        for param_name in path_params:
+            if param_name in kwargs:
+                param_value = kwargs[param_name]
+                if param_value:
+                    try:
+                        validated_path = validate_path(param_value)
+                        kwargs[param_name] = str(validated_path)
+                        logger.debug(
+                            "path_parameter_validated",
+                            tool=func.__name__,
+                            param=param_name,
+                            original=param_value,
+                            validated=str(validated_path)
+                        )
+                    except ValueError as e:
+                        logger.error(
+                            "path_parameter_validation_failed",
+                            tool=func.__name__,
+                            param=param_name,
+                            value=param_value,
+                            error=str(e)
+                        )
+                        return {
+                            "success": False,
+                            "error": f"Invalid path parameter '{param_name}': {str(e)}"
+                        }
+        
+        # Execute the tool
+        result = await func(*args, **kwargs)
+        
+        # Log execution completion
+        logger.debug(
+            "tool_execution_completed",
+            tool=func.__name__,
+            success=result.get("success", False) if isinstance(result, dict) else True
+        )
+        
+        return result
+    
+    @functools.wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        # Get expected working directory  
+        expected_wd = get_working_directory()
+        current_wd = Path.cwd()
+        
+        # Warn if working directory has changed
+        if current_wd.resolve() != expected_wd.resolve():
+            logger.warning(
+                "working_directory_drift_detected", 
+                expected=str(expected_wd),
+                current=str(current_wd),
+                tool=func.__name__
+            )
+        
+        # Validate path parameters (same logic as async version)
+        path_params = ['target_dir', 'repo_path', 'directory', 'path', 'file_path']
+        for param_name in path_params:
+            if param_name in kwargs:
+                param_value = kwargs[param_name]
+                if param_value:
+                    try:
+                        validated_path = validate_path(param_value)
+                        kwargs[param_name] = str(validated_path)
+                    except ValueError as e:
+                        logger.error(
+                            "path_parameter_validation_failed",
+                            tool=func.__name__,
+                            param=param_name, 
+                            value=param_value,
+                            error=str(e)
+                        )
+                        return {
+                            "success": False,
+                            "error": f"Invalid path parameter '{param_name}': {str(e)}"
+                        }
+        
+        # Execute the tool
+        result = func(*args, **kwargs)
+        
+        return result
+    
+    # Return appropriate wrapper based on whether function is async
+    if asyncio.iscoroutinefunction(func):
+        return async_wrapper
+    else:
+        return sync_wrapper
+
+
+def ensure_repos_directory():
+    """Ensure the repos directory exists and is properly initialized."""
+    from .path_manager import get_repos_directory
+    repos_dir = get_repos_directory()
+    logger.info("repos_directory_ensured", path=str(repos_dir))
+    return repos_dir
+
+
+
+// Relative Path: prototype\tool_packages\common\path_manager.py
+"""Working directory and path management utilities.
+
+This module provides centralized path handling to ensure all tools work
+within the same working directory structure and validate paths consistently.
+"""
+
+from __future__ import annotations
+import os
+from pathlib import Path
+from typing import Optional, Union
+import structlog
+
+logger = structlog.get_logger()
+
+class WorkingDirectoryManager:
+    """Manages working directory state and path validation across all tools."""
+    
+    _instance: Optional['WorkingDirectoryManager'] = None
+    _base_dir: Optional[Path] = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if self._base_dir is None:
+            # Always use the project root directory (ai_solution_architecture)
+            # regardless of where tools are called from
+            current = Path.cwd()
+            if current.name == "prototype":
+                self._base_dir = current.parent.parent  # capstone/prototype -> ai_solution_architecture
+            elif current.name == "capstone":
+                self._base_dir = current.parent  # capstone -> ai_solution_architecture  
+            elif (current / "capstone").exists():
+                self._base_dir = current  # already in ai_solution_architecture
+            else:
+                # Fallback: search upwards for capstone directory
+                search_path = current
+                while search_path.parent != search_path:
+                    if (search_path / "capstone").exists():
+                        self._base_dir = search_path
+                        break
+                    search_path = search_path.parent
+                else:
+                    # Ultimate fallback
+                    self._base_dir = current
+            
+            logger.info("working_directory_initialized", base_dir=str(self._base_dir))
+    
+    @property
+    def base_directory(self) -> Path:
+        """Get the base working directory."""
+        return self._base_dir
+    
+    def get_repos_directory(self) -> Path:
+        """Get the repos subdirectory, creating it if needed."""
+        repos_dir = self._base_dir / "repos"
+        repos_dir.mkdir(exist_ok=True)
+        return repos_dir
+    
+    def validate_path_in_working_dir(self, path: Union[str, Path]) -> Path:
+        """Validate that a path is within the working directory.
+        
+        Args:
+            path: Path to validate (absolute or relative)
+            
+        Returns:
+            Normalized absolute Path object within working directory
+            
+        Raises:
+            ValueError: If path is outside working directory
+        """
+        path_obj = Path(path)
+        
+        # Convert to absolute path relative to base directory
+        if not path_obj.is_absolute():
+            abs_path = self._base_dir / path_obj
+        else:
+            abs_path = path_obj
+        
+        # Resolve any .. or . components
+        abs_path = abs_path.resolve()
+        
+        # Validate it's within base directory
+        try:
+            abs_path.relative_to(self._base_dir.resolve())
+        except ValueError:
+            raise ValueError(f"Path '{path}' is outside working directory '{self._base_dir}'")
+        
+        return abs_path
+    
+    def get_relative_path(self, path: Union[str, Path]) -> Path:
+        """Get path relative to working directory.
+        
+        Args:
+            path: Path to convert
+            
+        Returns:
+            Path relative to working directory
+        """
+        abs_path = self.validate_path_in_working_dir(path)
+        return abs_path.relative_to(self._base_dir.resolve())
+    
+    def ensure_subdirectory(self, subdir: str) -> Path:
+        """Ensure a subdirectory exists within working directory.
+        
+        Args:
+            subdir: Subdirectory name/path
+            
+        Returns:
+            Absolute path to subdirectory
+        """
+        subdir_path = self.validate_path_in_working_dir(subdir)
+        subdir_path.mkdir(parents=True, exist_ok=True)
+        return subdir_path
+
+
+# Global singleton instance
+_wd_manager = WorkingDirectoryManager()
+
+def get_working_directory() -> Path:
+    """Get the current working directory."""
+    return _wd_manager.base_directory
+
+def get_repos_directory() -> Path:
+    """Get the repos subdirectory."""
+    return _wd_manager.get_repos_directory()
+
+def validate_path(path: Union[str, Path]) -> Path:
+    """Validate that a path is within the working directory."""
+    return _wd_manager.validate_path_in_working_dir(path)
+
+def get_relative_path(path: Union[str, Path]) -> Path:
+    """Get path relative to working directory."""
+    return _wd_manager.get_relative_path(path)
+
+def ensure_subdirectory(subdir: str) -> Path:
+    """Ensure a subdirectory exists within working directory."""
+    return _wd_manager.ensure_subdirectory(subdir)
+
+
+
+// Relative Path: prototype\tool_packages\docs_tools\__init__.py
+"""Documentation tools package."""
+
+from .docs_ops import generate_documentation
+from .specs import DOCS_TOOLS
+
+__all__ = [
+    "generate_documentation",
+    "DOCS_TOOLS",
+]
+
+
+
+// Relative Path: prototype\tool_packages\docs_tools\docs_ops.py
+"""Documentation operations implementation."""
+
+from __future__ import annotations
+from typing import Any, Dict
+import asyncio
+
+
+async def generate_documentation(project_name: str = None, **kwargs) -> Dict[str, Any]:
+    """Generate documentation for a project."""
+    await asyncio.sleep(1)
+    name = project_name or "project"
+    return {
+        "success": True,
+        "artifacts": [f"docs/{name}-api.md", f"docs/{name}-operations.md"],
+    }
+
+
+
+// Relative Path: prototype\tool_packages\docs_tools\specs.py
+"""Documentation tools specifications."""
+
+from typing import List
+from ...tools import ToolSpec
+from .docs_ops import generate_documentation
+
+DOCS_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="generate_documentation",
+        description="Generate documentation",
+        input_schema={
+            "type": "object",
+            "properties": {"project_name": {"type": "string"}},
+            "required": [],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=generate_documentation,
+        is_async=True,
+        timeout=10,
+        aliases=["doc-generator"],
+    ),
+]
+
+
+
+// Relative Path: prototype\tool_packages\file_tools\__init__.py
+"""File management tools package."""
+
+from .file_ops import (
+    file_create,
+    file_read,
+    file_write,
+    file_edit,
+    file_delete,
+    file_list_directory,
+)
+from .specs import FILE_TOOLS
+
+__all__ = [
+    "file_create",
+    "file_read",
+    "file_write",
+    "file_edit",
+    "file_delete",
+    "file_list_directory",
+    "FILE_TOOLS",
+]
+
+
+
+// Relative Path: prototype\tool_packages\file_tools\file_ops.py
+"""File operations implementation."""
+
+from __future__ import annotations
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Optional
+import structlog
+
+logger = structlog.get_logger()
+
+
+async def file_create(path: str, content: str, **kwargs) -> Dict[str, Any]:
+    """Create a new file with specified content.
+    
+    Args:
+        path: File path to create
+        content: File content to write
+        
+    Returns:
+        Dict with success status and file info
+    """
+    logger.info("file_create_start", path=path, content_length=len(content))
+    
+    try:
+        file_path = Path(path)
+        
+        # Ensure parent directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Check if file already exists
+        if file_path.exists():
+            return {
+                "success": False,
+                "error": f"File already exists: {path}"
+            }
+        
+        # Write content to file
+        file_path.write_text(content, encoding="utf-8")
+        
+        logger.info("file_create_success", path=path, size=len(content))
+        return {
+            "success": True,
+            "path": str(file_path),
+            "size": len(content),
+            "message": f"File created: {path}"
+        }
+        
+    except Exception as e:
+        error = f"Failed to create file {path}: {str(e)}"
+        logger.error("file_create_failed", path=path, error=error)
+        return {"success": False, "error": error}
+
+
+async def file_read(path: str, **kwargs) -> Dict[str, Any]:
+    """Read content from a file.
+    
+    Args:
+        path: File path to read
+        
+    Returns:
+        Dict with success status and file content
+    """
+    logger.info("file_read_start", path=path)
+    
+    try:
+        file_path = Path(path)
+        
+        if not file_path.exists():
+            return {
+                "success": False,
+                "error": f"File does not exist: {path}"
+            }
+        
+        if not file_path.is_file():
+            return {
+                "success": False,
+                "error": f"Path is not a file: {path}"
+            }
+        
+        content = file_path.read_text(encoding="utf-8")
+        
+        logger.info("file_read_success", path=path, content_length=len(content))
+        return {
+            "success": True,
+            "path": str(file_path),
+            "content": content,
+            "size": len(content)
+        }
+        
+    except Exception as e:
+        error = f"Failed to read file {path}: {str(e)}"
+        logger.error("file_read_failed", path=path, error=error)
+        return {"success": False, "error": error}
+
+
+async def file_write(path: str, content: str, **kwargs) -> Dict[str, Any]:
+    """Write content to a file (overwrites existing content).
+    
+    Args:
+        path: File path to write
+        content: Content to write
+        
+    Returns:
+        Dict with success status and file info
+    """
+    logger.info("file_write_start", path=path, content_length=len(content))
+    
+    try:
+        file_path = Path(path)
+        
+        # Ensure parent directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write content to file
+        file_path.write_text(content, encoding="utf-8")
+        
+        logger.info("file_write_success", path=path, size=len(content))
+        return {
+            "success": True,
+            "path": str(file_path),
+            "size": len(content),
+            "message": f"File written: {path}"
+        }
+        
+    except Exception as e:
+        error = f"Failed to write file {path}: {str(e)}"
+        logger.error("file_write_failed", path=path, error=error)
+        return {"success": False, "error": error}
+
+
+async def file_edit(path: str, old_content: str, new_content: str, **kwargs) -> Dict[str, Any]:
+    """Edit a file by replacing old_content with new_content.
+    
+    Args:
+        path: File path to edit
+        old_content: Content to replace
+        new_content: Replacement content
+        
+    Returns:
+        Dict with success status and edit info
+    """
+    logger.info("file_edit_start", path=path, old_length=len(old_content), new_length=len(new_content))
+    
+    try:
+        file_path = Path(path)
+        
+        if not file_path.exists():
+            return {
+                "success": False,
+                "error": f"File does not exist: {path}"
+            }
+        
+        # Read current content
+        current_content = file_path.read_text(encoding="utf-8")
+        
+        # Check if old_content exists in file
+        if old_content not in current_content:
+            return {
+                "success": False,
+                "error": f"Old content not found in file: {path}"
+            }
+        
+        # Replace content
+        updated_content = current_content.replace(old_content, new_content)
+        
+        # Write updated content
+        file_path.write_text(updated_content, encoding="utf-8")
+        
+        logger.info("file_edit_success", path=path, old_size=len(current_content), new_size=len(updated_content))
+        return {
+            "success": True,
+            "path": str(file_path),
+            "old_size": len(current_content),
+            "new_size": len(updated_content),
+            "message": f"File edited: {path}"
+        }
+        
+    except Exception as e:
+        error = f"Failed to edit file {path}: {str(e)}"
+        logger.error("file_edit_failed", path=path, error=error)
+        return {"success": False, "error": error}
+
+
+async def file_delete(path: str, **kwargs) -> Dict[str, Any]:
+    """Delete a file.
+    
+    Args:
+        path: File path to delete
+        
+    Returns:
+        Dict with success status
+    """
+    logger.info("file_delete_start", path=path)
+    
+    try:
+        file_path = Path(path)
+        
+        if not file_path.exists():
+            return {
+                "success": False,
+                "error": f"File does not exist: {path}"
+            }
+        
+        if not file_path.is_file():
+            return {
+                "success": False,
+                "error": f"Path is not a file: {path}"
+            }
+        
+        file_path.unlink()
+        
+        logger.info("file_delete_success", path=path)
+        return {
+            "success": True,
+            "path": str(file_path),
+            "message": f"File deleted: {path}"
+        }
+        
+    except Exception as e:
+        error = f"Failed to delete file {path}: {str(e)}"
+        logger.error("file_delete_failed", path=path, error=error)
+        return {"success": False, "error": error}
+
+
+async def file_list_directory(path: str, **kwargs) -> Dict[str, Any]:
+    """List directory contents with metadata.
+    
+    Args:
+        path: Directory path to list
+        
+    Returns:
+        Dict with success status and list of tuples (name, type, size)
+        - name: file/directory name
+        - type: "File" or "Directory"
+        - size: file size in bytes or None for directories
+    """
+    logger.info("file_list_directory_start", path=path)
+    
+    try:
+        dir_path = Path(path)
+        
+        if not dir_path.exists():
+            return {
+                "success": False,
+                "error": f"Directory does not exist: {path}"
+            }
+        
+        if not dir_path.is_dir():
+            return {
+                "success": False,
+                "error": f"Path is not a directory: {path}"
+            }
+        
+        entries: List[Tuple[str, str, Optional[int]]] = []
+        
+        for item in dir_path.iterdir():
+            if item.is_file():
+                try:
+                    size = item.stat().st_size
+                except OSError:
+                    size = None
+                entries.append((item.name, "File", size))
+            elif item.is_dir():
+                entries.append((item.name, "Directory", None))
+        
+        # Sort entries: directories first, then files, alphabetically
+        entries.sort(key=lambda x: (x[1] == "File", x[0]))
+        
+        logger.info("file_list_directory_success", path=path, count=len(entries))
+        return {
+            "success": True,
+            "path": str(dir_path),
+            "entries": entries,
+            "count": len(entries)
+        }
+        
+    except Exception as e:
+        error = f"Failed to list directory {path}: {str(e)}"
+        logger.error("file_list_directory_failed", path=path, error=error)
+        return {"success": False, "error": error}
+
+
+
+// Relative Path: prototype\tool_packages\file_tools\specs.py
+"""File tools specifications."""
+
+from __future__ import annotations
+from typing import List
+
+from ...tools import ToolSpec
+from .file_ops import (
+    file_create,
+    file_read,
+    file_write,
+    file_edit,
+    file_delete,
+    file_list_directory,
+)
+
+
+FILE_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="file_create",
+        description="Create a new file with specified content",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path to create"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "File content to write"
+                }
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "path": {"type": "string"},
+                "size": {"type": "integer"},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=file_create,
+        is_async=True,
+        timeout=30,
+        aliases=["create_file"],
+    ),
+    
+    ToolSpec(
+        name="file_read",
+        description="Read content from a file",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path to read"
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+                "size": {"type": "integer"},
+                "error": {"type": "string"}
+            }
+        },
+        func=file_read,
+        is_async=True,
+        timeout=30,
+        aliases=["read_file"],
+    ),
+    
+    ToolSpec(
+        name="file_write",
+        description="Write content to a file (overwrites existing content)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path to write"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write"
+                }
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "path": {"type": "string"},
+                "size": {"type": "integer"},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=file_write,
+        is_async=True,
+        timeout=30,
+        aliases=["write_file"],
+    ),
+    
+    ToolSpec(
+        name="file_edit",
+        description="Edit a file by replacing old_content with new_content",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path to edit"
+                },
+                "old_content": {
+                    "type": "string",
+                    "description": "Content to replace"
+                },
+                "new_content": {
+                    "type": "string",
+                    "description": "Replacement content"
+                }
+            },
+            "required": ["path", "old_content", "new_content"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "path": {"type": "string"},
+                "old_size": {"type": "integer"},
+                "new_size": {"type": "integer"},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=file_edit,
+        is_async=True,
+        timeout=30,
+        aliases=["edit_file"],
+    ),
+    
+    ToolSpec(
+        name="file_delete",
+        description="Delete a file",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path to delete"
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "path": {"type": "string"},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=file_delete,
+        is_async=True,
+        timeout=30,
+        aliases=["delete_file"],
+    ),
+    
+    ToolSpec(
+        name="file_list_directory",
+        description="List directory contents with metadata. Returns list of tuples: (name, type, size) where type is 'File' or 'Directory' and size is bytes for files or None for directories",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory path to list"
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "path": {"type": "string"},
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": [
+                            {"type": "string"},  # name
+                            {"type": "string"},  # type
+                            {"type": ["integer", "null"]}  # size
+                        ]
+                    }
+                },
+                "count": {"type": "integer"},
+                "error": {"type": "string"}
+            }
+        },
+        func=file_list_directory,
+        is_async=True,
+        timeout=30,
+        aliases=["list_directory", "ls"],
+    ),
+]
+
+
+
+// Relative Path: prototype\tool_packages\git_tools\__init__.py
+"""Git repository tools package."""
+
+from .git_ops import (
+    create_repository,
+    setup_branch_protection,
+    create_git_repository_with_branch_protection,
+    git_commit,
+    git_push,
+    git_add_files,
+)
+from .specs import GIT_TOOLS
+
+__all__ = [
+    "create_repository",
+    "setup_branch_protection", 
+    "create_git_repository_with_branch_protection",
+    "git_commit",
+    "git_push",
+    "git_add_files",
+    "GIT_TOOLS",
+]
+
+
+
+// Relative Path: prototype\tool_packages\git_tools\git_ops.py
+"""Git operations implementation."""
+
+from __future__ import annotations
+import re
+from pathlib import Path
+import os
+import json
+import shutil
+from datetime import datetime
+import subprocess
+from typing import Any, Dict, List
+import structlog
+from ..common import get_repos_directory, validate_path, get_relative_path
+from ..common.execution_guard import validate_working_directory
+
+logger = structlog.get_logger()
+
+
+@validate_working_directory
+async def create_repository(name: str, visibility: str = "private", **kwargs) -> Dict[str, Any]:
+    """Create a real local Git repository with an initial commit.
+
+    Steps:
+    - Create directory ./<name>
+    - git init, set branch to 'main'
+    - write README.md and commit
+    - configure local user.name/email if missing
+    """
+    logger.info("create_repository_start", name=name, visibility=visibility)
+    
+    if not isinstance(name, str) or not name.strip():
+        error = "Missing or invalid repository name"
+        logger.error("validation_failed", error=error, reason="missing_or_invalid_name")
+        return {"success": False, "error": error}
+    
+    if any(char in name for char in "@!#$%^&*()"):
+        error = "Invalid repository name"
+        logger.error("validation_failed", error=error, reason="invalid_characters")
+        return {"success": False, "error": error}
+
+    git_path = shutil.which("git")
+    logger.info("git_executable_check", git_path=git_path)
+    if git_path is None:
+        error = "Git not found in PATH. Please install Git and retry."
+        logger.error("git_not_found", error=error)
+        return {
+            "success": False,
+            "error": error,
+        }
+
+    # Use centralized repos directory management
+    repos_base = get_repos_directory()
+    repo_dir = repos_base / name
+    logger.info("target_directory_check", repo_dir=str(repo_dir))
+    
+    # Check if this is a retry scenario (local repo exists but may not be pushed to GitHub)
+    is_retry_scenario = False
+    
+    if repo_dir.exists():
+        logger.info("directory_exists", repo_dir=str(repo_dir))
+        
+        # Check if it's a git repository with commits
+        git_dir = repo_dir / ".git"
+        if git_dir.exists():
+            logger.info(f"Found existing git repository at {repo_dir}")
+            # Check if there are commits
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), 
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    commit_hash = result.stdout.strip()
+                    logger.info(f"Found existing commit: {commit_hash}")
+                    
+                    # Check if remote origin exists
+                    remote_result = subprocess.run(
+                        ["git", "remote", "get-url", "origin"], cwd=str(repo_dir),
+                        capture_output=True, text=True, timeout=10
+                    )
+                    
+                    if remote_result.returncode != 0:
+                        logger.info("No remote origin found - this appears to be a retry scenario")
+                        is_retry_scenario = True
+                    else:
+                        remote_url = remote_result.stdout.strip()
+                        logger.info(f"Remote origin already configured: {remote_url}")
+                        # Repository already exists and is configured - return success
+                        return {
+                            "success": True,
+                            "repo_path": str(repo_dir),
+                            "default_branch": "main",
+                            "initial_commit": commit_hash,
+                            "remote_clone_url": remote_url,
+                            "note": "Repository already exists and is properly configured"
+                        }
+                else:
+                    logger.info("Git repository exists but has no commits")
+            except Exception as e:
+                logger.warning(f"Error checking existing git repository: {e}")
+        
+        if not is_retry_scenario and any(repo_dir.iterdir()):
+            error = f"Target directory '{repo_dir}' already exists and is not empty"
+            logger.error(error)
+            return {"success": False, "error": error}
+        elif not is_retry_scenario:
+            logger.info(f"Directory {repo_dir} exists but is empty - proceeding")
+    else:
+        logger.info(f"Creating directory {repo_dir}")
+        try:
+            repo_dir.mkdir(parents=True, exist_ok=False)
+            logger.info(f"Directory {repo_dir} created successfully")
+        except Exception as e:
+            error = f"Failed to create directory: {e}"
+            logger.error(error)
+            return {"success": False, "error": error}
+
+    def run_git(args: List[str]) -> Dict[str, Any]:
+        cmd = ["git"] + args
+        logger.info("git_command_start", command=" ".join(cmd), cwd=str(repo_dir))
+        
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=30
+            )
+            result_dict = {
+                "code": result.returncode, 
+                "stdout": result.stdout.strip(), 
+                "stderr": result.stderr.strip()
+            }
+        except subprocess.TimeoutExpired as e:
+            logger.error("git_command_timeout", command=" ".join(args), timeout=30)
+            result_dict = {"code": -1, "stdout": "", "stderr": "Command timed out after 30 seconds"}
+        except Exception as e:
+            logger.error("git_command_exception", command=" ".join(args), error=str(e))
+            result_dict = {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
+        
+        logger.info("git_command_result", command=" ".join(args), code=result_dict["code"], 
+                   stdout=result_dict["stdout"][:200], stderr=result_dict["stderr"][:200])
+        return result_dict
+
+    # Skip git init if this is a retry scenario
+    if not is_retry_scenario:
+        logger.info("git_init_start")
+        init_res = run_git(["init"])
+        if init_res["code"] != 0:
+            error = f"git init failed: {init_res['stderr']}"
+            logger.error("git_init_failed", error=error, stderr=init_res['stderr'])
+            return {"success": False, "error": error}
+        
+        logger.info("git_branch_setup_start")
+        branch_res = run_git(["branch", "-M", "main"])
+        if branch_res["code"] != 0:
+            error = f"setting branch failed: {branch_res['stderr']}"
+            logger.error("git_branch_failed", error=error, stderr=branch_res['stderr'])
+            return {"success": False, "error": error}
+    else:
+        logger.info("retry_scenario_detected", message="skipping git init and branch setup")
+
+    logger.info("Checking git user configuration")
+    cfg_email = run_git(["config", "--get", "user.email"])
+    if cfg_email["code"] != 0 or not cfg_email["stdout"]:
+        logger.info("Setting default user.email")
+        set_email = run_git(["config", "user.email", "idp@example.com"])
+        if set_email["code"] != 0:
+            error = f"git config user.email failed: {set_email['stderr']}"
+            logger.error(error)
+            return {"success": False, "error": error}
+    else:
+        logger.info(f"Using existing user.email: {cfg_email['stdout']}")
+        
+    cfg_name = run_git(["config", "--get", "user.name"])
+    if cfg_name["code"] != 0 or not cfg_name["stdout"]:
+        logger.info("Setting default user.name")
+        set_name = run_git(["config", "user.name", "IDP Copilot"])
+        if set_name["code"] != 0:
+            error = f"git config user.name failed: {set_name['stderr']}"
+            logger.error(error)
+            return {"success": False, "error": error}
+    else:
+        logger.info(f"Using existing user.name: {cfg_name['stdout']}")
+
+    # Handle README and commit creation (skip if retry scenario with existing commits)
+    if not is_retry_scenario:
+        logger.info("Creating README.md file")
+        try:
+            readme = repo_dir / "README.md"
+            if not readme.exists():
+                readme_content = f"# {name}\n\nCreated by IDP Copilot on {datetime.now().isoformat()}\n"
+                readme.write_text(readme_content, encoding="utf-8")
+                logger.info(f"README.md created with content: {readme_content[:50]}...")
+            else:
+                logger.info("README.md already exists - skipping creation")
+        except Exception as e:
+            error = f"Failed to write README.md: {e}"
+            logger.error(error)
+            return {"success": False, "error": error}
+
+        logger.info("Adding README.md to git staging area")
+        add_res = run_git(["add", "README.md"])
+        if add_res["code"] != 0:
+            error = f"git add failed: {add_res['stderr']}"
+            logger.error(error)
+            return {"success": False, "error": error}
+            
+        logger.info("Creating initial commit")
+        commit_res = run_git(["commit", "-m", "Initial commit"])
+        if commit_res["code"] != 0:
+            error = f"git commit failed: {commit_res['stderr']}"
+            logger.error(error)
+            return {"success": False, "error": error}
+    else:
+        logger.info("Retry scenario - skipping README creation and commit")
+        
+    logger.info("Getting current commit hash")
+    rev_res = run_git(["rev-parse", "HEAD"])
+    if rev_res["code"] != 0:
+        error = f"git rev-parse failed: {rev_res['stderr']}"
+        logger.error(error)
+        return {"success": False, "error": error}
+        
+    commit_hash = rev_res["stdout"]
+    logger.info(f"Current commit hash: {commit_hash}")
+
+    # Create remote on GitHub and push initial commit if token is available
+    logger.info("github_remote_start")
+    token = os.getenv("GITHUB_TOKEN")
+    org = os.getenv("GITHUB_ORG")
+    owner_env = os.getenv("GITHUB_OWNER")
+    
+    logger.info("github_env_check", 
+                github_token_set=bool(token), 
+                github_org=org, 
+                github_owner=owner_env)
+    
+    if not token:
+        error = "GITHUB_TOKEN is not set. Cannot create remote repository."
+        logger.warning("github_token_missing", error=error)
+        return {
+            "success": False,
+            "error": error,
+            "local_repo_created": True,
+            "repo_path": str(repo_dir),
+            "default_branch": "main",
+            "initial_commit": commit_hash,
+        }
+
+    import urllib.request
+    import urllib.error
+
+    api_url = f"https://api.github.com/user/repos"
+    if org:
+        api_url = f"https://api.github.com/orgs/{org}/repos"
+        logger.info(f"Using organization API endpoint: {api_url}")
+    else:
+        logger.info(f"Using user API endpoint: {api_url}")
+        
+    payload = {
+        "name": name,
+        "private": (str(visibility).lower() != "public"),
+        "auto_init": False,
+        "has_issues": True,
+        "has_projects": True,
+        "has_wiki": False,
+        "default_branch": "main",
+    }
+    logger.info(f"GitHub API payload: {payload}")
+    # Log request info with masked token
+    logger.info("github_api_headers", authorization_token_prefix=f"{token[:8]}...", user_agent="idp-copilot")
+    
+    req = urllib.request.Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",  # Use full token for actual request
+            "User-Agent": "idp-copilot", 
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    
+    logger.info("github_api_request_start", repo_name=name, api_url=api_url)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8")
+            repo_info = json.loads(body)
+            logger.info("github_repo_created", html_url=repo_info.get('html_url'))
+    except urllib.error.HTTPError as e:
+        logger.error("github_api_http_error", code=e.code, reason=e.reason)
+        try:
+            err_body = e.read().decode("utf-8")
+            err_json = json.loads(err_body)
+            msg = err_json.get("message", err_body)
+            logger.error("github_api_error_details", error_json=err_json)
+        except Exception:
+            msg = str(e)
+            logger.error("github_api_parse_error", error=str(e))
+            
+        return {
+            "success": False,
+            "error": f"GitHub repo creation failed: {msg}",
+            "local_repo_created": True,
+            "repo_path": str(repo_dir),
+            "default_branch": "main",
+            "initial_commit": commit_hash,
+        }
+    except Exception as e:
+        logger.error("github_api_unexpected_error", error=str(e))
+        return {
+            "success": False,
+            "error": f"GitHub repo creation failed: {str(e)}",
+            "local_repo_created": True,
+            "repo_path": str(repo_dir),
+            "default_branch": "main",
+            "initial_commit": commit_hash,
+        }
+
+    owner_login = ((repo_info or {}).get("owner") or {}).get("login") or owner_env or org or ""
+    logger.info(f"Determined repository owner: '{owner_login}' (from repo_info: {((repo_info or {}).get('owner') or {}).get('login')}, owner_env: {owner_env}, org: {org})")
+    
+    if not owner_login:
+        error = "Could not determine repository owner for remote URL."
+        logger.error(error)
+        return {
+            "success": False,
+            "error": error,
+            "local_repo_created": True,
+            "repo_path": str(repo_dir),
+            "default_branch": "main",
+            "initial_commit": commit_hash,
+        }
+
+    token_remote_url = f"https://x-access-token:{token}@github.com/{owner_login}/{name}.git"
+    clean_remote_url = f"https://github.com/{owner_login}/{name}.git"
+    logger.info(f"Remote URLs - token_url: https://x-access-token:***@github.com/{owner_login}/{name}.git, clean_url: {clean_remote_url}")
+
+    logger.info("git_remote_add_start")
+    add_remote = run_git(["remote", "add", "origin", token_remote_url])
+    if add_remote["code"] != 0:
+        error = f"git remote add failed: {add_remote['stderr']}"
+        logger.error("git_remote_add_failed", error=error, stderr=add_remote['stderr'])
+        return {"success": False, "error": error, "local_repo_created": True, "repo_path": str(repo_dir)}
+    
+    logger.info("git_push_start")
+    push_res = run_git(["push", "-u", "origin", "main"])
+    if push_res["code"] != 0:
+        error = f"git push failed: {push_res['stderr']}"
+        logger.error("git_push_failed", error=error, stderr=push_res['stderr'])
+        return {"success": False, "error": error, "local_repo_created": True, "repo_path": str(repo_dir)}
+    
+    logger.info("git_remote_cleanup_start")
+    set_url = run_git(["remote", "set-url", "origin", clean_remote_url])
+    if set_url["code"] != 0:
+        error = f"git remote set-url failed: {set_url['stderr']}"
+        logger.error("git_remote_cleanup_failed", error=error, stderr=set_url['stderr'])
+        return {"success": False, "error": error, "local_repo_created": True, "repo_path": str(repo_dir)}
+
+    logger.info("create_repository_success", local_path=str(repo_dir), remote_url=clean_remote_url)
+    
+    # Calculate relative path using centralized path manager
+    relative_path = get_relative_path(repo_dir)
+    
+    return {
+        "success": True,
+        "repo_path": str(repo_dir),
+        "relative_path": str(relative_path),
+        "default_branch": "main",
+        "initial_commit": commit_hash,
+        "remote_html_url": repo_info.get("html_url"),
+        "remote_clone_url": clean_remote_url,
+    }
+
+
+async def setup_branch_protection(repo_name: str, **kwargs) -> Dict[str, Any]:
+    """Setup branch protection rules for a repository."""
+    import asyncio
+    await asyncio.sleep(1)
+    return {
+        "success": True,
+        "rules": [
+            "require-pr-reviews",
+            "dismiss-stale-reviews",
+            "require-status-checks",
+        ],
+    }
+
+
+async def create_git_repository_with_branch_protection(
+    repo_name: str = None, visibility: str = "private", **kwargs
+) -> Dict[str, Any]:
+    """Create a Git repository with branch protection in one operation."""
+    visibility = kwargs.get("visibility", visibility)
+    name = repo_name or kwargs.get("name") or kwargs.get("project_name") or "unnamed"
+    create = await create_repository(name=name, visibility=visibility, **kwargs)
+    if not create.get("success"):
+        return create
+    protection = await setup_branch_protection(repo_name=name, **kwargs)
+    if not protection.get("success"):
+        return protection
+    return {"success": True, "repo": create, "branch_protection": protection}
+
+
+async def git_commit(repo_path: str, message: str, **kwargs) -> Dict[str, Any]:
+    """Create a Git commit in the specified repository.
+    
+    Args:
+        repo_path: Path to the Git repository
+        message: Commit message
+        
+    Returns:
+        Dict with success status and commit info
+    """
+    logger.info("git_commit_start", repo_path=repo_path, message=message)
+    
+    try:
+        repo_dir = Path(repo_path)
+        
+        if not repo_dir.exists():
+            return {
+                "success": False,
+                "error": f"Repository path does not exist: {repo_path}"
+            }
+        
+        git_dir = repo_dir / ".git"
+        if not git_dir.exists():
+            return {
+                "success": False,
+                "error": f"Not a git repository: {repo_path}"
+            }
+        
+        def run_git(args: List[str]) -> Dict[str, Any]:
+            cmd = ["git"] + args
+            logger.info("git_command_start", command=" ".join(cmd), cwd=str(repo_dir))
+            
+            try:
+                result = subprocess.run(
+                    cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=30
+                )
+                return {
+                    "code": result.returncode,
+                    "stdout": result.stdout.strip(),
+                    "stderr": result.stderr.strip()
+                }
+            except subprocess.TimeoutExpired:
+                logger.error("git_command_timeout", command=" ".join(args))
+                return {"code": -1, "stdout": "", "stderr": "Command timed out"}
+            except Exception as e:
+                logger.error("git_command_exception", command=" ".join(args), error=str(e))
+                return {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
+        
+        # Create commit
+        commit_res = run_git(["commit", "-m", message])
+        if commit_res["code"] != 0:
+            # Check if there are no changes to commit
+            if "nothing to commit" in commit_res["stdout"] or "nothing to commit" in commit_res["stderr"]:
+                return {
+                    "success": True,
+                    "repo_path": str(repo_dir),
+                    "message": "No changes to commit",
+                    "commit_hash": None
+                }
+            
+            error = f"git commit failed: {commit_res['stderr']}"
+            logger.error("git_commit_failed", error=error)
+            return {"success": False, "error": error}
+        
+        # Get commit hash
+        rev_res = run_git(["rev-parse", "HEAD"])
+        commit_hash = rev_res["stdout"] if rev_res["code"] == 0 else None
+        
+        logger.info("git_commit_success", repo_path=repo_path, commit_hash=commit_hash)
+        return {
+            "success": True,
+            "repo_path": str(repo_dir),
+            "commit_hash": commit_hash,
+            "message": message
+        }
+        
+    except Exception as e:
+        error = f"Failed to commit in repository {repo_path}: {str(e)}"
+        logger.error("git_commit_exception", repo_path=repo_path, error=error)
+        return {"success": False, "error": error}
+
+
+async def git_push(repo_path: str, remote: str = "origin", branch: str = "main", **kwargs) -> Dict[str, Any]:
+    """Push changes to remote repository.
+    
+    Args:
+        repo_path: Path to the Git repository
+        remote: Remote name (default: origin)
+        branch: Branch name (default: main)
+        
+    Returns:
+        Dict with success status and push info
+    """
+    logger.info("git_push_start", repo_path=repo_path, remote=remote, branch=branch)
+    
+    try:
+        repo_dir = Path(repo_path)
+        
+        if not repo_dir.exists():
+            return {
+                "success": False,
+                "error": f"Repository path does not exist: {repo_path}"
+            }
+        
+        git_dir = repo_dir / ".git"
+        if not git_dir.exists():
+            return {
+                "success": False,
+                "error": f"Not a git repository: {repo_path}"
+            }
+        
+        def run_git(args: List[str]) -> Dict[str, Any]:
+            cmd = ["git"] + args
+            logger.info("git_command_start", command=" ".join(cmd), cwd=str(repo_dir))
+            
+            try:
+                result = subprocess.run(
+                    cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=60
+                )
+                return {
+                    "code": result.returncode,
+                    "stdout": result.stdout.strip(),
+                    "stderr": result.stderr.strip()
+                }
+            except subprocess.TimeoutExpired:
+                logger.error("git_command_timeout", command=" ".join(args))
+                return {"code": -1, "stdout": "", "stderr": "Command timed out"}
+            except Exception as e:
+                logger.error("git_command_exception", command=" ".join(args), error=str(e))
+                return {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
+        
+        # Push to remote
+        push_res = run_git(["push", remote, branch])
+        if push_res["code"] != 0:
+            error = f"git push failed: {push_res['stderr']}"
+            logger.error("git_push_failed", error=error)
+            return {"success": False, "error": error}
+        
+        logger.info("git_push_success", repo_path=repo_path, remote=remote, branch=branch)
+        return {
+            "success": True,
+            "repo_path": str(repo_dir),
+            "remote": remote,
+            "branch": branch,
+            "message": f"Pushed to {remote}/{branch}"
+        }
+        
+    except Exception as e:
+        error = f"Failed to push repository {repo_path}: {str(e)}"
+        logger.error("git_push_exception", repo_path=repo_path, error=error)
+        return {"success": False, "error": error}
+
+
+async def git_add_files(repo_path: str, files: List[str], **kwargs) -> Dict[str, Any]:
+    """Add files to Git staging area.
+    
+    Args:
+        repo_path: Path to the Git repository
+        files: List of file paths to add
+        
+    Returns:
+        Dict with success status and add info
+    """
+    logger.info("git_add_files_start", repo_path=repo_path, file_count=len(files))
+    
+    try:
+        repo_dir = Path(repo_path)
+        
+        if not repo_dir.exists():
+            return {
+                "success": False,
+                "error": f"Repository path does not exist: {repo_path}"
+            }
+        
+        git_dir = repo_dir / ".git"
+        if not git_dir.exists():
+            return {
+                "success": False,
+                "error": f"Not a git repository: {repo_path}"
+            }
+        
+        if not files:
+            return {
+                "success": True,
+                "repo_path": str(repo_dir),
+                "files": [],
+                "message": "No files to add"
+            }
+        
+        def run_git(args: List[str]) -> Dict[str, Any]:
+            cmd = ["git"] + args
+            logger.info("git_command_start", command=" ".join(cmd), cwd=str(repo_dir))
+            
+            try:
+                result = subprocess.run(
+                    cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=30
+                )
+                return {
+                    "code": result.returncode,
+                    "stdout": result.stdout.strip(),
+                    "stderr": result.stderr.strip()
+                }
+            except subprocess.TimeoutExpired:
+                logger.error("git_command_timeout", command=" ".join(args))
+                return {"code": -1, "stdout": "", "stderr": "Command timed out"}
+            except Exception as e:
+                logger.error("git_command_exception", command=" ".join(args), error=str(e))
+                return {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
+        
+        # Add files to staging area
+        add_res = run_git(["add"] + files)
+        if add_res["code"] != 0:
+            error = f"git add failed: {add_res['stderr']}"
+            logger.error("git_add_files_failed", error=error)
+            return {"success": False, "error": error}
+        
+        logger.info("git_add_files_success", repo_path=repo_path, files=files)
+        return {
+            "success": True,
+            "repo_path": str(repo_dir),
+            "files": files,
+            "message": f"Added {len(files)} files to staging area"
+        }
+        
+    except Exception as e:
+        error = f"Failed to add files in repository {repo_path}: {str(e)}"
+        logger.error("git_add_files_exception", repo_path=repo_path, error=error)
+        return {"success": False, "error": error}
+
+
+
+// Relative Path: prototype\tool_packages\git_tools\specs.py
+"""Git tools specifications."""
+
+from typing import List
+from ...tools import ToolSpec
+from .git_ops import (
+    create_repository,
+    setup_branch_protection,
+    create_git_repository_with_branch_protection,
+    git_commit,
+    git_push,
+    git_add_files,
+)
+
+GIT_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="create_repository",
+        description="Creates local Git repo and GitHub remote, pushes initial commit",
+        input_schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "visibility": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=create_repository,
+        is_async=True,
+        timeout=10,
+        aliases=[],
+    ),
+    ToolSpec(
+        name="setup_branch_protection",
+        description="Setup branch rules",
+        input_schema={
+            "type": "object",
+            "properties": {"repo_name": {"type": "string"}},
+            "required": ["repo_name"],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=setup_branch_protection,
+        is_async=True,
+        timeout=5,
+        aliases=[],
+    ),
+    ToolSpec(
+        name="create_git_repository_with_branch_protection",
+        description="Create repo then apply standard branch protection",
+        input_schema={
+            "type": "object",
+            "properties": {"repo_name": {"type": "string"}, "visibility": {"type": "string"}},
+            "required": [],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=create_git_repository_with_branch_protection,
+        is_async=True,
+        timeout=20,
+        aliases=["git-repo-creator", "create-git-repo"],
+    ),
+    ToolSpec(
+        name="git_commit",
+        description="Create a Git commit in the specified repository",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "repo_path": {
+                    "type": "string",
+                    "description": "Path to the Git repository"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Commit message"
+                }
+            },
+            "required": ["repo_path", "message"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "repo_path": {"type": "string"},
+                "commit_hash": {"type": ["string", "null"]},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=git_commit,
+        is_async=True,
+        timeout=30,
+        aliases=["commit"],
+    ),
+    ToolSpec(
+        name="git_push",
+        description="Push changes to remote repository",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "repo_path": {
+                    "type": "string",
+                    "description": "Path to the Git repository"
+                },
+                "remote": {
+                    "type": "string",
+                    "description": "Remote name (default: origin)",
+                    "default": "origin"
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "Branch name (default: main)",
+                    "default": "main"
+                }
+            },
+            "required": ["repo_path"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "repo_path": {"type": "string"},
+                "remote": {"type": "string"},
+                "branch": {"type": "string"},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=git_push,
+        is_async=True,
+        timeout=60,
+        aliases=["push"],
+    ),
+    ToolSpec(
+        name="git_add_files",
+        description="Add files to Git staging area",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "repo_path": {
+                    "type": "string",
+                    "description": "Path to the Git repository"
+                },
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of file paths to add"
+                }
+            },
+            "required": ["repo_path", "files"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "repo_path": {"type": "string"},
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=git_add_files,
+        is_async=True,
+        timeout=30,
+        aliases=["add_files"],
+    ),
+]
+
+
+
+// Relative Path: prototype\tool_packages\k8s_tools\__init__.py
+"""Kubernetes tools package."""
+
+from .k8s_ops import (
+    generate_k8s_manifests,
+    create_k8s_namespace,
+    deploy_to_staging,
+)
+from .specs import K8S_TOOLS
+
+__all__ = [
+    "generate_k8s_manifests",
+    "create_k8s_namespace",
+    "deploy_to_staging",
+    "K8S_TOOLS",
+]
+
+
+
+// Relative Path: prototype\tool_packages\k8s_tools\k8s_ops.py
+"""Kubernetes operations implementation."""
+
+from __future__ import annotations
+from typing import Any, Dict
+import asyncio
+
+
+async def generate_k8s_manifests(service_name: str = None, **kwargs) -> Dict[str, Any]:
+    """Generate Kubernetes manifests for a service."""
+    await asyncio.sleep(1)
+    name = service_name or kwargs.get("project_name") or "service"
+    return {
+        "success": True,
+        "files": [
+            f"k8s/{name}-deployment.yaml",
+            f"k8s/{name}-service.yaml",
+            f"k8s/{name}-configmap.yaml",
+        ],
+    }
+
+
+async def create_k8s_namespace(name: str, **kwargs) -> Dict[str, Any]:
+    """Create a Kubernetes namespace with standard resources."""
+    await asyncio.sleep(1)
+    return {
+        "success": True,
+        "namespace": name,
+        "resources": ["namespace", "resource-quota", "network-policy"],
+    }
+
+
+async def deploy_to_staging(project: str, version: str = "latest", **kwargs) -> Dict[str, Any]:
+    """Deploy a project to staging environment."""
+    await asyncio.sleep(8)
+    return {
+        "success": True,
+        "environment": "staging",
+        "url": f"https://{project}-staging.company.io",
+        "version": version,
+    }
+
+
+
+// Relative Path: prototype\tool_packages\k8s_tools\specs.py
+"""Kubernetes tools specifications."""
+
+from typing import List
+from ...tools import ToolSpec
+from .k8s_ops import (
+    generate_k8s_manifests,
+    create_k8s_namespace,
+    deploy_to_staging,
+)
+
+K8S_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="create_k8s_namespace",
+        description="Create K8s namespace",
+        input_schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=create_k8s_namespace,
+        is_async=True,
+        timeout=10,
+        aliases=[],
+    ),
+    ToolSpec(
+        name="deploy_to_staging",
+        description="Deploy to staging",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}, "version": {"type": "string"}},
+            "required": ["project"],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=deploy_to_staging,
+        is_async=True,
+        timeout=45,
+        aliases=["k8s-deployer"],
+    ),
+    ToolSpec(
+        name="generate_k8s_manifests",
+        description="Generate K8s manifests",
+        input_schema={
+            "type": "object",
+            "properties": {"service_name": {"type": "string"}},
+            "required": [],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=generate_k8s_manifests,
+        is_async=True,
+        timeout=10,
+        aliases=["k8s-manifest-generator"],
+    ),
+]
+
+
+
+// Relative Path: prototype\tool_packages\project_tools\__init__.py
+"""Project management tools package."""
+
+from .project_ops import (
+    list_templates,
+    apply_template,
+    validate_project_name_and_type,
+    search_knowledge_base_for_guidelines,
+    discover_templates,
+    select_template,
+    apply_project_template,
+)
+from .specs import PROJECT_TOOLS
+
+__all__ = [
+    "list_templates",
+    "apply_template",
+    "validate_project_name_and_type", 
+    "search_knowledge_base_for_guidelines",
+    "discover_templates",
+    "select_template",
+    "apply_project_template",
+    "PROJECT_TOOLS",
+]
+
+
+
+// Relative Path: prototype\tool_packages\project_tools\project_ops.py
+"""Project operations implementation."""
+
+from __future__ import annotations
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import asyncio
+import structlog
+from ..common import get_working_directory, validate_path, get_relative_path
+from ..common.execution_guard import validate_working_directory
+
+logger = structlog.get_logger()
+
+
+async def list_templates(project_type: str = None, **kwargs) -> Dict[str, Any]:
+    """List available project templates."""
+    await asyncio.sleep(0.5)
+    templates = {
+        "microservice": ["fastapi-microservice", "spring-boot-service", "go-microservice"],
+        "library": ["python-library", "typescript-library", "java-library"],
+        "frontend": ["nextjs-app", "react-spa", "vue-app"],
+    }
+    if project_type and project_type in templates:
+        return {"success": True, "templates": {project_type: templates[project_type]}}
+    return {"success": True, "templates": templates}
+
+
+async def apply_template(template: str, target_path: str, **kwargs) -> Dict[str, Any]:
+    """Apply a project template to a target directory."""
+    await asyncio.sleep(3)
+    return {
+        "success": True,
+        "files_created": [
+            "src/main.py",
+            "tests/test_main.py",
+            "README.md",
+            "Dockerfile",
+        ],
+        "next_steps": ["Configure environment variables", "Update README"],
+    }
+
+
+async def validate_project_name_and_type(
+    project_name: str = None, project_type: str = None, programming_language: str = None, **kwargs
+) -> Dict[str, Any]:
+    """Validate project name and type according to standards."""
+    await asyncio.sleep(0)
+    if not project_name or not isinstance(project_name, str):
+        return {"success": False, "error": "Missing required parameter: project_name"}
+    name_pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    if not name_pattern.match(project_name):
+        return {
+            "success": False,
+            "error": "Invalid project name. Use kebab-case: lowercase letters, numbers, and single dashes.",
+        }
+    allowed_types = {"microservice", "library", "application", "frontend", "backend", "generic"}
+    if project_type and project_type not in allowed_types:
+        return {
+            "success": False,
+            "error": f"Unsupported project_type '{project_type}'. Allowed: {sorted(allowed_types)}",
+        }
+    details = {
+        "project_name": project_name,
+        "project_type": project_type or "microservice",
+        "programming_language": programming_language or "python",
+        "policy_checks": ["kebab-case", "allowed_type"],
+    }
+    return {"success": True, "result": details}
+
+
+async def search_knowledge_base_for_guidelines(
+    project_type: str = None, language: str = None, project_name: str = None, **kwargs
+) -> Dict[str, Any]:
+    """Search knowledge base for relevant guidelines and standards."""
+    try:
+        repo_root = get_working_directory()
+        base_paths = [
+            repo_root / "capstone" / "backend" / "documents" / "guidelines",
+            repo_root / "capstone" / "documents" / "guidelines",
+            repo_root / "capstone" / "backend" / "documents",
+        ]
+        keywords: List[str] = []
+        if project_type:
+            keywords.append(str(project_type).lower())
+        if language:
+            keywords.append(str(language).lower())
+        if project_name:
+            keywords.append(str(project_name).lower())
+        keywords.extend(["service", "microservice", "standards", "guidelines", "ci/cd", "cicd"])
+        matched: List[Dict[str, Any]] = []
+        scanned_files: List[str] = []
+        for base in base_paths:
+            if not base.exists() or not base.is_dir():
+                continue
+            for file in base.glob("**/*.md"):
+                scanned_files.append(str(file))
+                try:
+                    text = file.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                text_lower = text.lower()
+                filename_lower = file.name.lower()
+                score = 0
+                for kw in keywords:
+                    if kw and (kw in text_lower or kw in filename_lower):
+                        score += 1
+                title = None
+                for line in text.splitlines():
+                    if line.strip().startswith("#"):
+                        title = line.strip().lstrip("# ")
+                        break
+                if score > 0 or (not keywords and title):
+                    snippets: List[str] = []
+                    if keywords:
+                        for line in text.splitlines():
+                            line_l = line.lower()
+                            if any(kw in line_l for kw in keywords) and line.strip():
+                                snippets.append(line.strip())
+                                if len(snippets) >= 3:
+                                    break
+                    matched.append(
+                        {
+                            "file": str(file),
+                            "title": title or file.name,
+                            "score": score,
+                            "snippets": snippets,
+                        }
+                    )
+        matched.sort(key=lambda m: (-m.get("score", 0), m.get("title") or ""))
+        if not matched:
+            defaults = []
+            for default_name in [
+                "python-service-standards.md",
+                "cicd-pipeline-standards.md",
+                "go-service-standards.md",
+            ]:
+                for base in base_paths:
+                    candidate = base / default_name
+                    if candidate.exists():
+                        defaults.append(
+                            {
+                                "file": str(candidate),
+                                "title": default_name.replace("-", " ").replace(".md", "").title(),
+                                "score": 0,
+                                "snippets": [],
+                            }
+                        )
+            matched = defaults
+        return {"success": True, "result": {"searched_files": scanned_files, "matches": matched[:10]}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+async def discover_templates(template_dir: str = "./templates", **kwargs) -> Dict[str, Any]:
+    """Discover available templates in the template directory.
+    
+    Args:
+        template_dir: Directory containing template files
+        
+    Returns:
+        Dict with success status and list of templates
+    """
+    logger.info("discover_templates_start", template_dir=template_dir)
+    
+    try:
+        templates_path = Path(template_dir)
+        
+        if not templates_path.exists():
+            return {
+                "success": False,
+                "error": f"Template directory does not exist: {template_dir}"
+            }
+        
+        templates = []
+        for template_file in templates_path.glob("*.md"):
+            if template_file.name == "template-index.md":
+                continue
+                
+            try:
+                content = template_file.read_text(encoding="utf-8")
+                # Extract template metadata from markdown
+                name = template_file.stem
+                description = ""
+                architecture = ""
+                keywords = []
+                
+                lines = content.split('\n')
+                for i, line in enumerate(lines):
+                    line = line.strip()
+                    if line.startswith("## Description"):
+                        if i + 1 < len(lines):
+                            description = lines[i + 1].strip()
+                    elif line.startswith("## Architecture Pattern"):
+                        # Extract architecture patterns
+                        for j in range(i + 1, min(i + 5, len(lines))):
+                            arch_line = lines[j].strip()
+                            if arch_line.startswith("- "):
+                                architecture += arch_line[2:] + " "
+                
+                # Generate keywords from filename and content
+                name_parts = name.replace("-", " ").split()
+                keywords.extend(name_parts)
+                keywords.extend([part.lower() for part in name_parts])
+                
+                # Add common framework keywords
+                if "fastapi" in name.lower():
+                    keywords.extend(["api", "rest", "microservice", "async"])
+                if "flask" in name.lower():
+                    keywords.extend(["web", "wsgi", "orm"])
+                if "csharp" in name.lower() or "dotnet" in name.lower():
+                    keywords.extend(["api", "webapi", ".net", "c#"])
+                
+                templates.append({
+                    "name": name,
+                    "file": str(template_file),
+                    "description": description,
+                    "architecture": architecture.strip(),
+                    "keywords": list(set(keywords))  # Remove duplicates
+                })
+                
+            except Exception as e:
+                logger.warning("Failed to parse template", file=str(template_file), error=str(e))
+                continue
+        
+        logger.info("discover_templates_success", count=len(templates))
+        return {
+            "success": True,
+            "templates": templates,
+            "count": len(templates)
+        }
+        
+    except Exception as e:
+        error = f"Failed to discover templates: {str(e)}"
+        logger.error("discover_templates_failed", error=error)
+        return {"success": False, "error": error}
+
+
+async def select_template(user_input: str, template_dir: str = "./templates", **kwargs) -> Dict[str, Any]:
+    """Select the best matching template based on user input.
+    
+    Args:
+        user_input: User's project description/request
+        template_dir: Directory containing template files
+        
+    Returns:
+        Dict with template selection result and any clarification needed
+    """
+    logger.info("select_template_start", user_input=user_input, template_dir=template_dir)
+    
+    try:
+        # Discover available templates
+        discovery_result = await discover_templates(template_dir)
+        if not discovery_result["success"]:
+            return discovery_result
+        
+        templates = discovery_result["templates"]
+        if not templates:
+            return {
+                "success": False,
+                "error": "No templates found in template directory"
+            }
+        
+        # Normalize user input
+        input_lower = user_input.lower()
+        input_words = re.findall(r'\w+', input_lower)
+        
+        # Score templates based on keyword matches
+        scored_templates = []
+        for template in templates:
+            score = 0
+            matched_keywords = []
+            
+            for keyword in template["keywords"]:
+                if keyword.lower() in input_lower:
+                    score += 1
+                    matched_keywords.append(keyword)
+            
+            # Bonus points for exact matches
+            for word in input_words:
+                if word in template["keywords"]:
+                    score += 0.5
+            
+            if score > 0:
+                scored_templates.append({
+                    **template,
+                    "score": score,
+                    "matched_keywords": matched_keywords
+                })
+        
+        # Sort by score (highest first)
+        scored_templates.sort(key=lambda x: x["score"], reverse=True)
+        
+        if not scored_templates:
+            return {
+                "success": False,
+                "error": f"No templates match the input: {user_input}",
+                "available_templates": [t["name"] for t in templates]
+            }
+        
+        # Check for clear winner vs need for clarification
+        if len(scored_templates) == 1:
+            # Single match - proceed
+            selected = scored_templates[0]
+            logger.info("template_selected", template=selected["name"], score=selected["score"])
+            return {
+                "success": True,
+                "selected_template": selected,
+                "needs_clarification": False,
+                "message": f"Selected template: {selected['name']}"
+            }
+        
+        # Multiple matches - check if top score is significantly higher
+        top_score = scored_templates[0]["score"]
+        second_score = scored_templates[1]["score"] if len(scored_templates) > 1 else 0
+        
+        if top_score > second_score + 1:  # Clear winner
+            selected = scored_templates[0]
+            logger.info("template_selected_clear_winner", template=selected["name"], score=selected["score"])
+            return {
+                "success": True,
+                "selected_template": selected,
+                "needs_clarification": False,
+                "message": f"Selected template: {selected['name']} (best match)"
+            }
+        
+        # Need clarification - return top matches
+        top_matches = [t for t in scored_templates if t["score"] >= top_score - 0.5][:3]
+        
+        logger.info("template_clarification_needed", matches=len(top_matches))
+        return {
+            "success": True,
+            "selected_template": None,
+            "needs_clarification": True,
+            "top_matches": top_matches,
+            "message": f"Found {len(top_matches)} matching templates. Please clarify your preference.",
+            "clarification_options": [
+                {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "architecture": t["architecture"]
+                }
+                for t in top_matches
+            ]
+        }
+        
+    except Exception as e:
+        error = f"Failed to select template: {str(e)}"
+        logger.error("select_template_failed", error=error)
+        return {"success": False, "error": error}
+
+
+@validate_working_directory
+async def apply_project_template(template_file: str, target_dir: str, project_name: str, **kwargs) -> Dict[str, Any]:
+    """Apply a template to create project structure and files.
+    
+    Args:
+        template_file: Path to the template markdown file
+        target_dir: Target directory for the project
+        project_name: Name of the project
+        
+    Returns:
+        Dict with success status and list of created files
+    """
+    logger.info("apply_project_template_start", template_file=template_file, target_dir=target_dir, project_name=project_name)
+    
+    try:
+        template_path = Path(template_file)
+        target_path = Path(target_dir)
+        
+        # Validate target path using centralized path manager
+        try:
+            target_path = validate_path(target_dir)
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        
+        if not template_path.exists():
+            return {
+                "success": False,
+                "error": f"Template file does not exist: {template_file}"
+            }
+        
+        # Read template content
+        template_content = template_path.read_text(encoding="utf-8")
+        
+        # Parse template to extract file contents
+        created_files = []
+        
+        # Extract code blocks from markdown
+        import re
+        
+        # Find all code blocks with file paths
+        file_pattern = r'### (.+?)\n```(?:\w+)?\n(.*?)\n```'
+        matches = re.findall(file_pattern, template_content, re.DOTALL)
+        
+        for file_path, file_content in matches:
+            # Clean up file path
+            file_path = file_path.strip()
+            
+            # Skip non-file entries (like titles or descriptions)
+            if not ('.' in file_path or file_path.endswith('.py') or file_path.endswith('.cs') or 
+                    file_path.endswith('.md') or file_path.endswith('.txt') or file_path.endswith('.json') or
+                    file_path.endswith('.yml') or file_path.endswith('.yaml') or file_path.endswith('.dockerfile') or
+                    'Dockerfile' in file_path or 'requirements.txt' in file_path or '.gitignore' in file_path):
+                continue
+            
+            # Create full target path
+            full_path = target_path / file_path
+            
+            # Ensure directory exists
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Replace placeholders in content
+            processed_content = file_content.replace("{project_name}", project_name)
+            processed_content = processed_content.replace("{PROJECT_NAME}", project_name.upper())
+            processed_content = processed_content.replace("{Project_Name}", project_name.title())
+            
+            # Write file
+            full_path.write_text(processed_content, encoding="utf-8")
+            created_files.append(str(full_path))
+            
+            logger.info("file_created", path=str(full_path), size=len(processed_content))
+        
+        # Create additional structure files if needed (like __init__.py files)
+        if any('python' in template_file.lower() for template_file in [template_file]):
+            # Add __init__.py files to Python packages
+            python_dirs = set()
+            for file_path in created_files:
+                if file_path.endswith('.py'):
+                    dir_path = Path(file_path).parent
+                    python_dirs.add(dir_path)
+                    # Also add parent directories if they contain Python files
+                    for parent in dir_path.parents:
+                        if parent == target_path:
+                            break
+                        python_dirs.add(parent)
+            
+            for py_dir in python_dirs:
+                init_file = py_dir / "__init__.py"
+                if not init_file.exists():
+                    init_file.write_text("", encoding="utf-8")
+                    created_files.append(str(init_file))
+        
+        logger.info("apply_project_template_success", files_created=len(created_files))
+        return {
+            "success": True,
+            "files_created": created_files,
+            "project_path": str(target_path),
+            "message": f"Project template applied successfully. Created {len(created_files)} files."
+        }
+        
+    except Exception as e:
+        error = f"Failed to apply template: {str(e)}"
+        logger.error("apply_project_template_failed", error=error)
+        return {"success": False, "error": error}
+
+
+async def apply_template_and_commit(
+    template_file: str, 
+    target_dir: str, 
+    project_name: str, 
+    commit_message: str = "Apply template: generate project structure",
+    **kwargs
+) -> Dict[str, Any]:
+    """Apply template and automatically commit all generated files with proper path handling.
+    
+    This is a wrapper function that combines template application with git operations,
+    handling the file path conversion that was causing issues in the agent workflow.
+    
+    Args:
+        template_file: Path to the template markdown file
+        target_dir: Target directory for the project (should be a git repository)
+        project_name: Name of the project
+        commit_message: Git commit message
+        
+    Returns:
+        Dict with success status, commit info, and file details
+    """
+    logger.info("apply_template_and_commit_start", 
+                template_file=template_file, 
+                target_dir=target_dir, 
+                project_name=project_name)
+    
+    try:
+        from pathlib import Path
+        
+        # Step 1: Apply the template
+        template_result = await apply_project_template(
+            template_file=template_file,
+            target_dir=target_dir,
+            project_name=project_name
+        )
+        
+        if not template_result["success"]:
+            return template_result
+        
+        created_files = template_result["files_created"]
+        logger.info("template_applied_successfully", files_count=len(created_files))
+        
+        # Step 2: Convert absolute paths to relative paths for git
+        repo_path_obj = Path(target_dir)
+        relative_files = []
+        
+        for file_path in created_files:
+            path_obj = Path(file_path)
+            if path_obj.is_absolute():
+                try:
+                    rel_path = path_obj.relative_to(repo_path_obj)
+                    relative_files.append(str(rel_path))
+                except ValueError:
+                    # File is not within repo_path, use original path
+                    relative_files.append(file_path)
+            else:
+                relative_files.append(file_path)
+        
+        logger.info("file_paths_converted", 
+                   absolute_count=len(created_files),
+                   relative_count=len(relative_files))
+        
+        # Step 3: Add files to git staging area
+        from ..git_tools.git_ops import git_add_files, git_commit
+        
+        add_result = await git_add_files(repo_path=target_dir, files=relative_files)
+        if not add_result["success"]:
+            return {
+                "success": False,
+                "error": f"Failed to add files to git: {add_result.get('error')}",
+                "template_applied": True,
+                "files_created": created_files
+            }
+        
+        logger.info("files_added_to_git", files_count=len(relative_files))
+        
+        # Step 4: Commit the changes
+        commit_result = await git_commit(repo_path=target_dir, message=commit_message)
+        if not commit_result["success"]:
+            return {
+                "success": False,
+                "error": f"Failed to commit changes: {commit_result.get('error')}",
+                "template_applied": True,
+                "files_created": created_files,
+                "files_added": True
+            }
+        
+        logger.info("template_and_commit_success", 
+                   commit_hash=commit_result.get("commit_hash"),
+                   files_count=len(created_files))
+        
+        return {
+            "success": True,
+            "files_created": created_files,
+            "relative_files": relative_files,
+            "project_path": str(repo_path_obj),
+            "commit_hash": commit_result.get("commit_hash"),
+            "commit_message": commit_message,
+            "message": f"Template applied and committed successfully. Created {len(created_files)} files."
+        }
+        
+    except Exception as e:
+        error = f"Failed to apply template and commit: {str(e)}"
+        logger.error("apply_template_and_commit_failed", error=error)
+        return {"success": False, "error": error}
+
+
+
+// Relative Path: prototype\tool_packages\project_tools\specs.py
+"""Project tools specifications."""
+
+from typing import List
+from ...tools import ToolSpec
+from .project_ops import (
+    list_templates,
+    apply_template,
+    validate_project_name_and_type,
+    search_knowledge_base_for_guidelines,
+    discover_templates,
+    select_template,
+    apply_project_template,
+    apply_template_and_commit,
+)
+
+PROJECT_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="validate_project_name_and_type",
+        description="Validate project name and type",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project_name": {"type": "string"},
+                "project_type": {"type": "string"},
+                "programming_language": {"type": "string"},
+            },
+            "required": ["project_name"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        func=validate_project_name_and_type,
+        is_async=True,
+        timeout=5,
+        aliases=["project-validator"],
+    ),
+    ToolSpec(
+        name="list_templates",
+        description="List available templates",
+        input_schema={
+            "type": "object",
+            "properties": {"project_type": {"type": "string"}},
+            "required": [],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=list_templates,
+        is_async=True,
+        timeout=5,
+        aliases=[],
+    ),
+    ToolSpec(
+        name="apply_template",
+        description="Apply project template",
+        input_schema={
+            "type": "object",
+            "properties": {"template": {"type": "string"}, "target_path": {"type": "string"}},
+            "required": ["template", "target_path"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object"},
+        func=apply_template,
+        is_async=True,
+        timeout=15,
+        aliases=["template-applier"],
+    ),
+    ToolSpec(
+        name="search_knowledge_base_for_guidelines",
+        description="Searches local knowledge base for guidelines relevant to the project",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project_type": {"type": "string"},
+                "language": {"type": "string"},
+                "project_name": {"type": "string"},
+            },
+            "required": [],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=search_knowledge_base_for_guidelines,
+        is_async=True,
+        timeout=10,
+        aliases=["search_knowledge_base", "kb-search", "search-guidelines"],
+    ),
+    ToolSpec(
+        name="discover_templates",
+        description="Discover available templates in the template directory",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "template_dir": {
+                    "type": "string",
+                    "description": "Directory containing template files",
+                    "default": "./templates"
+                }
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "templates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "file": {"type": "string"},
+                            "description": {"type": "string"},
+                            "architecture": {"type": "string"},
+                            "keywords": {
+                                "type": "array",
+                                "items": {"type": "string"}
+                            }
+                        }
+                    }
+                },
+                "count": {"type": "integer"},
+                "error": {"type": "string"}
+            }
+        },
+        func=discover_templates,
+        is_async=True,
+        timeout=10,
+        aliases=["find_templates"],
+    ),
+    ToolSpec(
+        name="select_template",
+        description="Select the best matching template based on user input with clarification support",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "user_input": {
+                    "type": "string",
+                    "description": "User's project description/request"
+                },
+                "template_dir": {
+                    "type": "string",
+                    "description": "Directory containing template files",
+                    "default": "./templates"
+                }
+            },
+            "required": ["user_input"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "selected_template": {"type": ["object", "null"]},
+                "needs_clarification": {"type": "boolean"},
+                "top_matches": {
+                    "type": "array",
+                    "items": {"type": "object"}
+                },
+                "clarification_options": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "architecture": {"type": "string"}
+                        }
+                    }
+                },
+                "message": {"type": "string"},
+                "error": {"type": "string"},
+                "available_templates": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            }
+        },
+        func=select_template,
+        is_async=True,
+        timeout=15,
+        aliases=["choose_template", "match_template"],
+    ),
+    ToolSpec(
+        name="apply_project_template",
+        description="Apply a template to create project structure and files",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "template_file": {
+                    "type": "string",
+                    "description": "Path to the template markdown file"
+                },
+                "target_dir": {
+                    "type": "string",
+                    "description": "Target directory for the project"
+                },
+                "project_name": {
+                    "type": "string",
+                    "description": "Name of the project"
+                }
+            },
+            "required": ["template_file", "target_dir", "project_name"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "files_created": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "project_path": {"type": "string"},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=apply_project_template,
+        is_async=True,
+        timeout=30,
+        aliases=["create_from_template", "generate_project"],
+    ),
+    ToolSpec(
+        name="apply_template_and_commit",
+        description="Apply template and automatically commit all generated files (fixes file path issues)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "template_file": {
+                    "type": "string",
+                    "description": "Path to the template markdown file"
+                },
+                "target_dir": {
+                    "type": "string",
+                    "description": "Target directory for the project (should be a git repository)"
+                },
+                "project_name": {
+                    "type": "string",
+                    "description": "Name of the project"
+                },
+                "commit_message": {
+                    "type": "string",
+                    "description": "Git commit message",
+                    "default": "Apply template: generate project structure"
+                }
+            },
+            "required": ["template_file", "target_dir", "project_name"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "files_created": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "relative_files": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "project_path": {"type": "string"},
+                "commit_hash": {"type": ["string", "null"]},
+                "commit_message": {"type": "string"},
+                "message": {"type": "string"},
+                "error": {"type": "string"}
+            }
+        },
+        func=apply_template_and_commit,
+        is_async=True,
+        timeout=60,
+        aliases=["template_and_commit", "apply_template_with_git"],
+    ),
+]
+
+
+
+// Relative Path: prototype\tool_packages\__init__.py
+"""Tool packages for the IDP Copilot."""
+
+
+
+// Relative Path: prototype\__init__.py
+"""Prototype package exports.
+
+Exposes a unified ALL_TOOLS for convenience when composing agents.
+"""
+
+from .tools_builtin import BUILTIN_TOOLS, BUILTIN_TOOLS_SIMPLIFIED  # noqa: F401
+
+__all__ = [
+    "BUILTIN_TOOLS",
+    "BUILTIN_TOOLS_SIMPLIFIED",
+]
 
 
 
@@ -1474,15 +4382,16 @@ class ReActAgent:
         tools: List[ToolSpec] | None = None,
         max_steps: int = 50,
         mission: str | None = None,
-        prompt_overrides: Dict[str, Any] | None = None,
     ):
         """
         Initializes the ReActAgent with the given system prompt, LLM provider, tools, and maximum steps.
         Args:
             system_prompt: The system prompt for the LLM.
-            llm: The LLM provider.
+            llm: The LLM provider.            
             tools: The tools to use.
             max_steps: The maximum number of steps to take.
+            mission: The mission for the agent.
+
         """
         self.system_prompt_base = (system_prompt or "").strip()
         self.llm = llm
@@ -1492,7 +4401,6 @@ class ReActAgent:
 
         # New prompt composition fields
         self.mission_text: str | None = (mission or None)
-        self.prompt_overrides: Dict[str, Any] = dict(prompt_overrides or {})
 
         self.state = StateManager()
         self.feedback = FeedbackCollector()
@@ -1516,7 +4424,6 @@ class ReActAgent:
         try:
             self.logger.info(
                 "final_system_prompt",
-                mode=str(self.prompt_overrides.get("mode", "compose")),
                 prompt=self.final_system_prompt,
             )
         except Exception:
@@ -2511,10 +5418,6 @@ class ReActAgent:
           - compose (default): <GenericAgentSection> + <Mission> + <Tools>
           - legacy_full: use self.system_prompt_base 1:1 (back-compat path)
         """
-        mode = str(self.prompt_overrides.get("mode", "compose")).strip().lower()
-        if mode == "legacy_full":
-            return self.system_prompt_base
-
         # Generic section
         generic = (self.system_prompt_base or DEFAULT_GENERIC_PROMPT).strip()
 
@@ -3287,6 +6190,474 @@ class FeedbackCollector:
         
         return analysis
 
+
+
+
+// Relative Path: prototype\git_tools.py
+"""
+Git Tools Module - Extracted from tools_builtin.py
+
+Contains Git repository operations:
+- create_repository
+- setup_branch_protection  
+- create_git_repository_with_branch_protection
+"""
+from __future__ import annotations
+import asyncio
+import re
+from pathlib import Path
+import os
+import json
+import shutil
+from datetime import datetime
+import subprocess
+from typing import Any, Dict, List
+import structlog
+
+# Import ToolSpec with fallback strategy to avoid circular dependencies
+def _get_toolspec():
+    try:
+        # Try relative import first (when running as part of package)
+        from .tools import ToolSpec
+        return ToolSpec
+    except ImportError:
+        # Fallback for standalone execution
+        import sys
+        import os
+        sys.path.insert(0, os.path.dirname(__file__))
+        from tools import ToolSpec
+        return ToolSpec
+
+logger = structlog.get_logger()
+
+
+async def create_repository(name: str, visibility: str = "private", **kwargs) -> Dict[str, Any]:
+    """Create a real local Git repository with an initial commit.
+
+    Steps:
+    - Create directory ./<name>
+    - git init, set branch to 'main'
+    - write README.md and commit
+    - configure local user.name/email if missing
+    """
+    logger.info("create_repository_start", name=name, visibility=visibility)
+    
+    if not isinstance(name, str) or not name.strip():
+        error = "Missing or invalid repository name"
+        logger.error("validation_failed", error=error, reason="missing_or_invalid_name")
+        return {"success": False, "error": error}
+    
+    if any(char in name for char in "@!#$%^&*()"):
+        error = "Invalid repository name"
+        logger.error("validation_failed", error=error, reason="invalid_characters")
+        return {"success": False, "error": error}
+
+    git_path = shutil.which("git")
+    logger.info("git_executable_check", git_path=git_path)
+    if git_path is None:
+        error = "Git not found in PATH. Please install Git and retry."
+        logger.error("git_not_found", error=error)
+        return {
+            "success": False,
+            "error": error,
+        }
+
+    repo_dir = Path.cwd() / name
+    logger.info("target_directory_check", repo_dir=str(repo_dir))
+    
+    # Check if this is a retry scenario (local repo exists but may not be pushed to GitHub)
+    is_retry_scenario = False
+    
+    if repo_dir.exists():
+        logger.info("directory_exists", repo_dir=str(repo_dir))
+        
+        # Check if it's a git repository with commits
+        git_dir = repo_dir / ".git"
+        if git_dir.exists():
+            logger.info(f"Found existing git repository at {repo_dir}")
+            # Check if there are commits
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=str(repo_dir), 
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    commit_hash = result.stdout.strip()
+                    logger.info(f"Found existing commit: {commit_hash}")
+                    
+                    # Check if remote origin exists
+                    remote_result = subprocess.run(
+                        ["git", "remote", "get-url", "origin"], cwd=str(repo_dir),
+                        capture_output=True, text=True, timeout=10
+                    )
+                    
+                    if remote_result.returncode != 0:
+                        logger.info("No remote origin found - this appears to be a retry scenario")
+                        is_retry_scenario = True
+                    else:
+                        remote_url = remote_result.stdout.strip()
+                        logger.info(f"Remote origin already configured: {remote_url}")
+                        # Repository already exists and is configured - return success
+                        return {
+                            "success": True,
+                            "repo_path": str(repo_dir),
+                            "default_branch": "main",
+                            "initial_commit": commit_hash,
+                            "remote_clone_url": remote_url,
+                            "note": "Repository already exists and is properly configured"
+                        }
+                else:
+                    logger.info("Git repository exists but has no commits")
+            except Exception as e:
+                logger.warning(f"Error checking existing git repository: {e}")
+        
+        if not is_retry_scenario and any(repo_dir.iterdir()):
+            error = f"Target directory '{repo_dir}' already exists and is not empty"
+            logger.error(error)
+            return {"success": False, "error": error}
+        elif not is_retry_scenario:
+            logger.info(f"Directory {repo_dir} exists but is empty - proceeding")
+    else:
+        logger.info(f"Creating directory {repo_dir}")
+        try:
+            repo_dir.mkdir(parents=True, exist_ok=False)
+            logger.info(f"Directory {repo_dir} created successfully")
+        except Exception as e:
+            error = f"Failed to create directory: {e}"
+            logger.error(error)
+            return {"success": False, "error": error}
+
+    def run_git(args: List[str]) -> Dict[str, Any]:
+        cmd = ["git"] + args
+        logger.info("git_command_start", command=" ".join(cmd), cwd=str(repo_dir))
+        
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=30
+            )
+            result_dict = {
+                "code": result.returncode, 
+                "stdout": result.stdout.strip(), 
+                "stderr": result.stderr.strip()
+            }
+        except subprocess.TimeoutExpired as e:
+            logger.error("git_command_timeout", command=" ".join(args), timeout=30)
+            result_dict = {"code": -1, "stdout": "", "stderr": "Command timed out after 30 seconds"}
+        except Exception as e:
+            logger.error("git_command_exception", command=" ".join(args), error=str(e))
+            result_dict = {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
+        
+        logger.info("git_command_result", command=" ".join(args), code=result_dict["code"], 
+                   stdout=result_dict["stdout"][:200], stderr=result_dict["stderr"][:200])
+        return result_dict
+
+    # Skip git init if this is a retry scenario
+    if not is_retry_scenario:
+        logger.info("git_init_start")
+        init_res = run_git(["init"])
+        if init_res["code"] != 0:
+            error = f"git init failed: {init_res['stderr']}"
+            logger.error("git_init_failed", error=error, stderr=init_res['stderr'])
+            return {"success": False, "error": error}
+        
+        logger.info("git_branch_setup_start")
+        branch_res = run_git(["branch", "-M", "main"])
+        if branch_res["code"] != 0:
+            error = f"setting branch failed: {branch_res['stderr']}"
+            logger.error("git_branch_failed", error=error, stderr=branch_res['stderr'])
+            return {"success": False, "error": error}
+    else:
+        logger.info("retry_scenario_detected", message="skipping git init and branch setup")
+
+    logger.info("Checking git user configuration")
+    cfg_email = run_git(["config", "--get", "user.email"])
+    if cfg_email["code"] != 0 or not cfg_email["stdout"]:
+        logger.info("Setting default user.email")
+        set_email = run_git(["config", "user.email", "idp@example.com"])
+        if set_email["code"] != 0:
+            error = f"git config user.email failed: {set_email['stderr']}"
+            logger.error(error)
+            return {"success": False, "error": error}
+    else:
+        logger.info(f"Using existing user.email: {cfg_email['stdout']}")
+        
+    cfg_name = run_git(["config", "--get", "user.name"])
+    if cfg_name["code"] != 0 or not cfg_name["stdout"]:
+        logger.info("Setting default user.name")
+        set_name = run_git(["config", "user.name", "IDP Copilot"])
+        if set_name["code"] != 0:
+            error = f"git config user.name failed: {set_name['stderr']}"
+            logger.error(error)
+            return {"success": False, "error": error}
+    else:
+        logger.info(f"Using existing user.name: {cfg_name['stdout']}")
+
+    # Handle README and commit creation (skip if retry scenario with existing commits)
+    if not is_retry_scenario:
+        logger.info("Creating README.md file")
+        try:
+            readme = repo_dir / "README.md"
+            if not readme.exists():
+                readme_content = f"# {name}\n\nCreated by IDP Copilot on {datetime.now().isoformat()}\n"
+                readme.write_text(readme_content, encoding="utf-8")
+                logger.info(f"README.md created with content: {readme_content[:50]}...")
+            else:
+                logger.info("README.md already exists - skipping creation")
+        except Exception as e:
+            error = f"Failed to write README.md: {e}"
+            logger.error(error)
+            return {"success": False, "error": error}
+
+        logger.info("Adding README.md to git staging area")
+        add_res = run_git(["add", "README.md"])
+        if add_res["code"] != 0:
+            error = f"git add failed: {add_res['stderr']}"
+            logger.error(error)
+            return {"success": False, "error": error}
+            
+        logger.info("Creating initial commit")
+        commit_res = run_git(["commit", "-m", "Initial commit"])
+        if commit_res["code"] != 0:
+            error = f"git commit failed: {commit_res['stderr']}"
+            logger.error(error)
+            return {"success": False, "error": error}
+    else:
+        logger.info("Retry scenario - skipping README creation and commit")
+        
+    logger.info("Getting current commit hash")
+    rev_res = run_git(["rev-parse", "HEAD"])
+    if rev_res["code"] != 0:
+        error = f"git rev-parse failed: {rev_res['stderr']}"
+        logger.error(error)
+        return {"success": False, "error": error}
+        
+    commit_hash = rev_res["stdout"]
+    logger.info(f"Current commit hash: {commit_hash}")
+
+    # Create remote on GitHub and push initial commit if token is available
+    logger.info("github_remote_start")
+    token = os.getenv("GITHUB_TOKEN")
+    org = os.getenv("GITHUB_ORG")
+    owner_env = os.getenv("GITHUB_OWNER")
+    
+    logger.info("github_env_check", 
+                github_token_set=bool(token), 
+                github_org=org, 
+                github_owner=owner_env)
+    
+    if not token:
+        error = "GITHUB_TOKEN is not set. Cannot create remote repository."
+        logger.warning("github_token_missing", error=error)
+        return {
+            "success": False,
+            "error": error,
+            "local_repo_created": True,
+            "repo_path": str(repo_dir),
+            "default_branch": "main",
+            "initial_commit": commit_hash,
+        }
+
+    import urllib.request
+    import urllib.error
+
+    api_url = "https://api.github.com/user/repos"
+    if org:
+        api_url = f"https://api.github.com/orgs/{org}/repos"
+        logger.info(f"Using organization API endpoint: {api_url}")
+    else:
+        logger.info(f"Using user API endpoint: {api_url}")
+        
+    payload = {
+        "name": name,
+        "private": (str(visibility).lower() != "public"),
+        "auto_init": False,
+        "has_issues": True,
+        "has_projects": True,
+        "has_wiki": False,
+        "default_branch": "main",
+    }
+    logger.info(f"GitHub API payload: {payload}")
+    # Log request info with masked token
+    logger.info("github_api_headers", authorization_token_prefix=f"{token[:8]}...", user_agent="idp-copilot")
+    
+    req = urllib.request.Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",  # Use full token for actual request
+            "User-Agent": "idp-copilot", 
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    
+    logger.info("github_api_request_start", repo_name=name, api_url=api_url)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8")
+            repo_info = json.loads(body)
+            logger.info("github_repo_created", html_url=repo_info.get('html_url'))
+    except urllib.error.HTTPError as e:
+        logger.error("github_api_http_error", code=e.code, reason=e.reason)
+        try:
+            err_body = e.read().decode("utf-8")
+            err_json = json.loads(err_body)
+            msg = err_json.get("message", err_body)
+            logger.error("github_api_error_details", error_json=err_json)
+        except Exception:
+            msg = str(e)
+            logger.error("github_api_parse_error", error=str(e))
+            
+        return {
+            "success": False,
+            "error": f"GitHub repo creation failed: {msg}",
+            "local_repo_created": True,
+            "repo_path": str(repo_dir),
+            "default_branch": "main",
+            "initial_commit": commit_hash,
+        }
+    except Exception as e:
+        logger.error("github_api_unexpected_error", error=str(e))
+        return {
+            "success": False,
+            "error": f"GitHub repo creation failed: {str(e)}",
+            "local_repo_created": True,
+            "repo_path": str(repo_dir),
+            "default_branch": "main",
+            "initial_commit": commit_hash,
+        }
+
+    owner_login = ((repo_info or {}).get("owner") or {}).get("login") or owner_env or org or ""
+    logger.info(f"Determined repository owner: '{owner_login}' (from repo_info: {((repo_info or {}).get('owner') or {}).get('login')}, owner_env: {owner_env}, org: {org})")
+    
+    if not owner_login:
+        error = "Could not determine repository owner for remote URL."
+        logger.error(error)
+        return {
+            "success": False,
+            "error": error,
+            "local_repo_created": True,
+            "repo_path": str(repo_dir),
+            "default_branch": "main",
+            "initial_commit": commit_hash,
+        }
+
+    token_remote_url = f"https://x-access-token:{token}@github.com/{owner_login}/{name}.git"
+    clean_remote_url = f"https://github.com/{owner_login}/{name}.git"
+    logger.info(f"Remote URLs - token_url: https://x-access-token:***@github.com/{owner_login}/{name}.git, clean_url: {clean_remote_url}")
+
+    logger.info("git_remote_add_start")
+    add_remote = run_git(["remote", "add", "origin", token_remote_url])
+    if add_remote["code"] != 0:
+        error = f"git remote add failed: {add_remote['stderr']}"
+        logger.error("git_remote_add_failed", error=error, stderr=add_remote['stderr'])
+        return {"success": False, "error": error, "local_repo_created": True, "repo_path": str(repo_dir)}
+    
+    logger.info("git_push_start")
+    push_res = run_git(["push", "-u", "origin", "main"])
+    if push_res["code"] != 0:
+        error = f"git push failed: {push_res['stderr']}"
+        logger.error("git_push_failed", error=error, stderr=push_res['stderr'])
+        return {"success": False, "error": error, "local_repo_created": True, "repo_path": str(repo_dir)}
+    
+    logger.info("git_remote_cleanup_start")
+    set_url = run_git(["remote", "set-url", "origin", clean_remote_url])
+    if set_url["code"] != 0:
+        error = f"git remote set-url failed: {set_url['stderr']}"
+        logger.error("git_remote_cleanup_failed", error=error, stderr=set_url['stderr'])
+        return {"success": False, "error": error, "local_repo_created": True, "repo_path": str(repo_dir)}
+
+    logger.info("create_repository_success", local_path=str(repo_dir), remote_url=clean_remote_url)
+    
+    return {
+        "success": True,
+        "repo_path": str(repo_dir),
+        "default_branch": "main",
+        "initial_commit": commit_hash,
+        "remote_html_url": repo_info.get("html_url"),
+        "remote_clone_url": clean_remote_url,
+    }
+
+
+async def setup_branch_protection(repo_name: str, **kwargs) -> Dict[str, Any]:
+    await asyncio.sleep(1)
+    return {
+        "success": True,
+        "rules": [
+            "require-pr-reviews",
+            "dismiss-stale-reviews",
+            "require-status-checks",
+        ],
+    }
+
+
+async def create_git_repository_with_branch_protection(
+    repo_name: str = None, visibility: str = "private", **kwargs
+) -> Dict[str, Any]:
+    visibility = kwargs.get("visibility", visibility)
+    name = repo_name or kwargs.get("name") or kwargs.get("project_name") or "unnamed"
+    create = await create_repository(name=name, visibility=visibility, **kwargs)
+    if not create.get("success"):
+        return create
+    protection = await setup_branch_protection(repo_name=name, **kwargs)
+    if not protection.get("success"):
+        return protection
+    return {"success": True, "repo": create, "branch_protection": protection}
+
+
+# Lazy ToolSpec definitions to avoid circular imports
+def get_git_tools():
+    """Lazy loader for Git ToolSpec definitions to avoid import issues"""
+    ToolSpec = _get_toolspec()
+    
+    return [
+        ToolSpec(
+            name="create_repository",
+            description="Creates local Git repo and GitHub remote, pushes initial commit",
+            input_schema={
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "visibility": {"type": "string"}},
+                "required": ["name"],
+                "additionalProperties": True,
+            },
+            output_schema={"type": "object"},
+            func=create_repository,
+            is_async=True,
+            timeout=10,
+            aliases=[],
+        ),
+        ToolSpec(
+            name="setup_branch_protection",
+            description="Setup branch rules",
+            input_schema={
+                "type": "object",
+                "properties": {"repo_name": {"type": "string"}},
+                "required": ["repo_name"],
+                "additionalProperties": True,
+            },
+            output_schema={"type": "object"},
+            func=setup_branch_protection,
+            is_async=True,
+            timeout=5,
+            aliases=[],
+        ),
+        ToolSpec(
+            name="create_git_repository_with_branch_protection",
+            description="Create repo then apply standard branch protection",
+            input_schema={
+                "type": "object",
+                "properties": {"repo_name": {"type": "string"}, "visibility": {"type": "string"}},
+                "required": [],
+                "additionalProperties": True,
+            },
+            output_schema={"type": "object"},
+            func=create_git_repository_with_branch_protection,
+            is_async=True,
+            timeout=20,
+            aliases=["git-repo-creator", "create-git-repo"],
+        ),
+    ]
 
 
 
@@ -4119,6 +7490,182 @@ get_checklist_path = get_todolist_path    # type: ignore
 
 
 
+// Relative Path: prototype\tools_builtin.py
+"""Built-in tools for the IDP Copilot.
+
+This module provides a clean interface to all available tool packages
+without any fallback code or legacy implementations.
+"""
+
+from __future__ import annotations
+import asyncio
+from typing import Any, Dict, List
+import structlog
+
+from .tools import ToolSpec, merge_tool_specs
+from .agent import ReActAgent
+from .llm_provider import LLMProvider
+
+# Import all tool packages
+from .tool_packages.git_tools import GIT_TOOLS
+from .tool_packages.project_tools import PROJECT_TOOLS
+from .tool_packages.cicd_tools import CICD_TOOLS
+from .tool_packages.k8s_tools import K8S_TOOLS
+from .tool_packages.docs_tools import DOCS_TOOLS
+from .tool_packages.file_tools import FILE_TOOLS
+
+logger = structlog.get_logger()
+
+
+# ==== Sub-Agent Wrapper as Tool ====
+async def run_sub_agent(
+    *,
+    task: str,
+    inputs: Dict[str, Any] | None = None,
+    shared_context: Dict[str, Any] | None = None,
+    allowed_tools: List[str] | None = None,
+    budget: Dict[str, Any] | None = None,
+    resume_token: str | None = None,
+    answers: Dict[str, Any] | None = None,
+    agent_name: str | None = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Run a constrained sub-agent and return either a patch or need_user_input.
+
+    This wrapper expects the hosting orchestrator to pass in the orchestrator's LLMProvider via kwargs['llm']
+    and the base system prompt via kwargs['system_prompt'] for consistency.
+    """
+    llm: LLMProvider | None = kwargs.get("llm")
+    system_prompt: str = kwargs.get("system_prompt") or ""
+    if llm is None:
+        return {"success": False, "error": "Missing llm provider for sub-agent"}
+
+    # Construct tool whitelist index from BUILTIN_TOOLS
+    allow = [t for t in BUILTIN_TOOLS if (not allowed_tools) or (t.name in allowed_tools)]
+    subagent = ReActAgent(system_prompt=None, llm=llm, tools=allow, max_steps=int((budget or {}).get("max_steps", 12)), mission=system_prompt)
+
+    # Seed minimal context (ephemeral + child-session) to avoid state collision
+    parent_sid = (shared_context or {}).get("session_id") or "no-session"
+    subagent.session_id = f"{parent_sid}:sub:{(agent_name or 'subagent')}"
+    subagent.context = {
+        "user_request": task,
+        "known_answers_text": (shared_context or {}).get("known_answers_text", ""),
+        "facts": (shared_context or {}).get("facts", {}),
+        "version": int((shared_context or {}).get("version", 1)),
+        "suppress_markdown": True,
+        "ephemeral_state": True,
+        # tag for logging and ownership
+        "agent_name": agent_name or "subagent",
+    }
+
+    # Run a short loop
+    transcript: List[str] = []
+    async for chunk in subagent.process_request(task, session_id=subagent.session_id):
+        transcript.append(chunk)
+
+    # Inspect sub-agent state
+    if subagent.context.get("awaiting_user_input"):
+        return {
+            "success": False,
+            "need_user_input": subagent.context.get("awaiting_user_input"),
+            "state_token": "opaque",  # kept simple for v1
+        }
+
+    # Build a minimal patch reflecting only status updates against master tasks
+    patch = {
+        "base_version": int((shared_context or {}).get("version", 1)),
+        "agent_name": agent_name or "subagent",
+        "ops": []
+    }
+    master_tasks = list((shared_context or {}).get("tasks", []))
+    target_task_id = str((shared_context or {}).get("target_task_id") or "").strip() or None
+    wrapper_norm = (agent_name or "subagent").strip().lower().replace("-", "_").replace(" ", "_")
+    def _norm(s: str) -> str:
+        return (s or "").strip().lower().replace("-", "_").replace(" ", "_")
+    def _find_master_task_id_by_tool(tool_name: str) -> str | None:
+        # 0) Deterministic: prefer explicitly given target_task_id
+        if target_task_id:
+            return target_task_id
+        norm = _norm(tool_name)
+        # 1) Direct tool match
+        for mt in master_tasks:
+            tt = _norm(mt.get("tool"))
+            if tt and tt == norm:
+                return str(mt.get("id"))
+        # 2) Prefixed tool match: wrapper.action
+        for mt in master_tasks:
+            tt = _norm(mt.get("tool"))
+            if tt and tt == f"{wrapper_norm}.{norm}":
+                return str(mt.get("id"))
+        # 3) Fallback: match by executor_id + action
+        for mt in master_tasks:
+            exec_id = _norm(mt.get("executor_id"))
+            action = _norm(mt.get("action"))
+            if action == norm and (not exec_id or exec_id == wrapper_norm):
+                return str(mt.get("id"))
+        return None
+    for t in subagent.context.get("tasks", []):
+        status = str(t.get("status","")).upper()
+        tool_name = t.get("tool")
+        if tool_name and status in {"IN_PROGRESS","COMPLETED"}:
+            tid = _find_master_task_id_by_tool(tool_name)
+            if tid:
+                patch["ops"].append({"op":"update","task_id":tid,"fields":{"status":status}})
+
+    return {"success": True, "patch": patch, "result": {"transcript": "".join(transcript)}}
+
+
+# ==== Tool Collections ====
+
+# Merge all tool packages into unified collections
+BUILTIN_TOOLS: List[ToolSpec] = merge_tool_specs(
+    GIT_TOOLS,
+    PROJECT_TOOLS, 
+    CICD_TOOLS,
+    K8S_TOOLS,
+    DOCS_TOOLS,
+    FILE_TOOLS,
+)
+
+# Simplified tool set for basic operations
+BUILTIN_TOOLS_SIMPLIFIED: List[ToolSpec] = merge_tool_specs(
+    GIT_TOOLS[:1],  # Just create_repository
+    PROJECT_TOOLS[:1],  # Just validate_project_name_and_type
+)
+
+# Sub-agent tools
+AGENT_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="agent_scaffold_webservice",
+        description="Sub-agent: scaffolds a webservice using whitelisted tools",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string"},
+                "inputs": {"type": "object"},
+                "shared_context": {"type": "object"},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                "budget": {"type": "object"},
+                "resume_token": {"type": "string"},
+                "answers": {"type": "object"},
+            },
+            "required": ["task"],
+            "additionalProperties": True,
+        },
+        output_schema={"type": "object"},
+        func=run_sub_agent,
+        is_async=True,
+        timeout=120,
+        aliases=["agent_scaffold", "agent_webservice"],
+    )
+]
+
+# Export unified tool collections
+ALL_TOOLS: List[ToolSpec] = BUILTIN_TOOLS
+ALL_TOOLS_WITH_AGENTS: List[ToolSpec] = merge_tool_specs(BUILTIN_TOOLS, AGENT_TOOLS)
+
+
+
 // Relative Path: prototype\tools.py
 from __future__ import annotations
 
@@ -4262,836 +7809,6 @@ def merge_tool_specs(*tool_groups: List[ToolSpec]) -> List[ToolSpec]:
         for t in group or []:
             merged[_normalize(t.name)] = t
     return list(merged.values())
-
-
-
-
-
-// Relative Path: prototype\tools_builtin.py
-from __future__ import annotations
-import asyncio
-import re
-from pathlib import Path
-import os
-import json
-import shutil
-from datetime import datetime
-import asyncio.subprocess as asp
-from typing import Any, Dict, List
-
-from .tools import ToolSpec
-from .agent import ReActAgent
-from .llm_provider import LLMProvider
-from .tools import build_tool_index, execute_tool_by_name_from_index
-
-
-# ==== Tool Implementations (migrated from idp.py methods) ====
-
-
-async def create_repository(name: str, visibility: str = "private", **kwargs) -> Dict[str, Any]:
-    """Create a real local Git repository with an initial commit.
-
-    Steps:
-    - Create directory ./<name>
-    - git init, set branch to 'main'
-    - write README.md and commit
-    - configure local user.name/email if missing
-    """
-    if not isinstance(name, str) or not name.strip():
-        return {"success": False, "error": "Missing or invalid repository name"}
-    if any(char in name for char in "@!#$%^&*()"):
-        return {"success": False, "error": "Invalid repository name"}
-
-    if shutil.which("git") is None:
-        return {
-            "success": False,
-            "error": "Git not found in PATH. Please install Git and retry.",
-        }
-
-    repo_dir = Path.cwd() / name
-    if repo_dir.exists():
-        if any(repo_dir.iterdir()):
-            return {"success": False, "error": f"Target directory '{repo_dir}' already exists and is not empty"}
-    else:
-        try:
-            repo_dir.mkdir(parents=True, exist_ok=False)
-        except Exception as e:
-            return {"success": False, "error": f"Failed to create directory: {e}"}
-
-    async def run_git(args: List[str]) -> Dict[str, Any]:
-        proc = await asp.create_subprocess_exec(
-            "git", *args, cwd=str(repo_dir), stdout=asp.PIPE, stderr=asp.PIPE
-        )
-        out_b, err_b = await proc.communicate()
-        return {"code": proc.returncode, "stdout": out_b.decode().strip(), "stderr": err_b.decode().strip()}
-
-    init_res = await run_git(["init"])
-    if init_res["code"] != 0:
-        return {"success": False, "error": f"git init failed: {init_res['stderr']}"}
-
-    branch_res = await run_git(["branch", "-M", "main"])
-    if branch_res["code"] != 0:
-        return {"success": False, "error": f"setting branch failed: {branch_res['stderr']}"}
-
-    cfg_email = await run_git(["config", "--get", "user.email"])
-    if cfg_email["code"] != 0 or not cfg_email["stdout"]:
-        set_email = await run_git(["config", "user.email", "idp@example.com"])
-        if set_email["code"] != 0:
-            return {"success": False, "error": f"git config user.email failed: {set_email['stderr']}"}
-    cfg_name = await run_git(["config", "--get", "user.name"])
-    if cfg_name["code"] != 0 or not cfg_name["stdout"]:
-        set_name = await run_git(["config", "user.name", "IDP Copilot"])
-        if set_name["code"] != 0:
-            return {"success": False, "error": f"git config user.name failed: {set_name['stderr']}"}
-
-    try:
-        readme = repo_dir / "README.md"
-        if not readme.exists():
-            readme.write_text(
-                f"# {name}\n\nCreated by IDP Copilot on {datetime.now().isoformat()}\n",
-                encoding="utf-8",
-            )
-    except Exception as e:
-        return {"success": False, "error": f"Failed to write README.md: {e}"}
-
-    add_res = await run_git(["add", "README.md"])
-    if add_res["code"] != 0:
-        return {"success": False, "error": f"git add failed: {add_res['stderr']}"}
-    commit_res = await run_git(["commit", "-m", "Initial commit"])
-    if commit_res["code"] != 0:
-        return {"success": False, "error": f"git commit failed: {commit_res['stderr']}"}
-    rev_res = await run_git(["rev-parse", "HEAD"])
-    if rev_res["code"] != 0:
-        return {"success": False, "error": f"git rev-parse failed: {rev_res['stderr']}"}
-
-    # Create remote on GitHub and push initial commit if token is available
-    token = os.getenv("GITHUB_TOKEN")
-    org = os.getenv("GITHUB_ORG")
-    owner_env = os.getenv("GITHUB_OWNER")
-    if not token:
-        return {
-            "success": False,
-            "error": "GITHUB_TOKEN is not set. Cannot create remote repository.",
-            "local_repo_created": True,
-            "repo_path": str(repo_dir),
-            "default_branch": "main",
-            "initial_commit": rev_res["stdout"],
-        }
-
-    import urllib.request
-    import urllib.error
-
-    api_url = f"https://api.github.com/user/repos"
-    if org:
-        api_url = f"https://api.github.com/orgs/{org}/repos"
-    payload = {
-        "name": name,
-        "private": (str(visibility).lower() != "public"),
-        "auto_init": False,
-        "has_issues": True,
-        "has_projects": True,
-        "has_wiki": False,
-        "default_branch": "main",
-    }
-    req = urllib.request.Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "idp-copilot",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode("utf-8")
-            repo_info = json.loads(body)
-    except urllib.error.HTTPError as e:
-        try:
-            err_body = e.read().decode("utf-8")
-            err_json = json.loads(err_body)
-            msg = err_json.get("message", err_body)
-        except Exception:
-            msg = str(e)
-        return {
-            "success": False,
-            "error": f"GitHub repo creation failed: {msg}",
-            "local_repo_created": True,
-            "repo_path": str(repo_dir),
-            "default_branch": "main",
-            "initial_commit": rev_res["stdout"],
-        }
-
-    owner_login = ((repo_info or {}).get("owner") or {}).get("login") or owner_env or org or ""
-    if not owner_login:
-        return {
-            "success": False,
-            "error": "Could not determine repository owner for remote URL.",
-            "local_repo_created": True,
-            "repo_path": str(repo_dir),
-            "default_branch": "main",
-            "initial_commit": rev_res["stdout"],
-        }
-
-    token_remote_url = f"https://x-access-token:{token}@github.com/{owner_login}/{name}.git"
-    clean_remote_url = f"https://github.com/{owner_login}/{name}.git"
-
-    add_remote = await run_git(["remote", "add", "origin", token_remote_url])
-    if add_remote["code"] != 0:
-        return {"success": False, "error": f"git remote add failed: {add_remote['stderr']}", "local_repo_created": True, "repo_path": str(repo_dir)}
-    push_res = await run_git(["push", "-u", "origin", "main"])
-    if push_res["code"] != 0:
-        return {"success": False, "error": f"git push failed: {push_res['stderr']}", "local_repo_created": True, "repo_path": str(repo_dir)}
-    set_url = await run_git(["remote", "set-url", "origin", clean_remote_url])
-    if set_url["code"] != 0:
-        return {"success": False, "error": f"git remote set-url failed: {set_url['stderr']}", "local_repo_created": True, "repo_path": str(repo_dir)}
-
-    return {
-        "success": True,
-        "repo_path": str(repo_dir),
-        "default_branch": "main",
-        "initial_commit": rev_res["stdout"],
-        "remote_html_url": repo_info.get("html_url"),
-        "remote_clone_url": clean_remote_url,
-    }
-
-
-async def setup_branch_protection(repo_name: str, **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(1)
-    return {
-        "success": True,
-        "rules": [
-            "require-pr-reviews",
-            "dismiss-stale-reviews",
-            "require-status-checks",
-        ],
-    }
-
-
-async def create_git_repository_with_branch_protection(
-    repo_name: str = None, visibility: str = "private", **kwargs
-) -> Dict[str, Any]:
-    visibility = kwargs.get("visibility", visibility)
-    name = repo_name or kwargs.get("name") or kwargs.get("project_name") or "unnamed"
-    create = await create_repository(name=name, visibility=visibility, **kwargs)
-    if not create.get("success"):
-        return create
-    protection = await setup_branch_protection(repo_name=name, **kwargs)
-    if not protection.get("success"):
-        return protection
-    return {"success": True, "repo": create, "branch_protection": protection}
-
-
-async def list_templates(project_type: str = None, **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(0.5)
-    templates = {
-        "microservice": ["fastapi-microservice", "spring-boot-service", "go-microservice"],
-        "library": ["python-library", "typescript-library", "java-library"],
-        "frontend": ["nextjs-app", "react-spa", "vue-app"],
-    }
-    if project_type and project_type in templates:
-        return {"success": True, "templates": {project_type: templates[project_type]}}
-    return {"success": True, "templates": templates}
-
-
-async def apply_template(template: str, target_path: str, **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(3)
-    return {
-        "success": True,
-        "files_created": [
-            "src/main.py",
-            "tests/test_main.py",
-            "README.md",
-            "Dockerfile",
-        ],
-        "next_steps": ["Configure environment variables", "Update README"],
-    }
-
-
-async def setup_cicd(repo_path: str, pipeline_type: str = "github-actions", **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(2)
-    return {
-        "success": True,
-        "pipeline_file": f".github/workflows/ci.yml",
-        "stages": ["lint", "test", "build", "security-scan"],
-    }
-
-
-async def setup_observability(project_name: str = None, **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(1)
-    return {
-        "success": True,
-        "stack": ["prometheus", "grafana", "otel"],
-        "notes": "Integrated default dashboards and traces",
-    }
-
-
-async def run_tests(project_path: str, **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(5)
-    return {"success": True, "tests_run": 42, "tests_passed": 42, "coverage": "87%"}
-
-
-async def generate_k8s_manifests(service_name: str = None, **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(1)
-    name = service_name or kwargs.get("project_name") or "service"
-    return {
-        "success": True,
-        "files": [
-            f"k8s/{name}-deployment.yaml",
-            f"k8s/{name}-service.yaml",
-            f"k8s/{name}-configmap.yaml",
-        ],
-    }
-
-
-async def create_k8s_namespace(name: str, **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(1)
-    return {
-        "success": True,
-        "namespace": name,
-        "resources": ["namespace", "resource-quota", "network-policy"],
-    }
-
-
-async def deploy_to_staging(project: str, version: str = "latest", **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(8)
-    return {
-        "success": True,
-        "environment": "staging",
-        "url": f"https://{project}-staging.company.io",
-        "version": version,
-    }
-
-
-async def generate_documentation(project_name: str = None, **kwargs) -> Dict[str, Any]:
-    await asyncio.sleep(1)
-    name = project_name or "project"
-    return {
-        "success": True,
-        "artifacts": [f"docs/{name}-api.md", f"docs/{name}-operations.md"],
-    }
-
-
-async def validate_project_name_and_type(
-    project_name: str = None, project_type: str = None, programming_language: str = None, **kwargs
-) -> Dict[str, Any]:
-    await asyncio.sleep(0)
-    if not project_name or not isinstance(project_name, str):
-        return {"success": False, "error": "Missing required parameter: project_name"}
-    name_pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-    if not name_pattern.match(project_name):
-        return {
-            "success": False,
-            "error": "Invalid project name. Use kebab-case: lowercase letters, numbers, and single dashes.",
-        }
-    allowed_types = {"microservice", "library", "application", "frontend", "backend", "generic"}
-    if project_type and project_type not in allowed_types:
-        return {
-            "success": False,
-            "error": f"Unsupported project_type '{project_type}'. Allowed: {sorted(allowed_types)}",
-        }
-    details = {
-        "project_name": project_name,
-        "project_type": project_type or "microservice",
-        "programming_language": programming_language or "python",
-        "policy_checks": ["kebab-case", "allowed_type"],
-    }
-    return {"success": True, "result": details}
-
-
-async def search_knowledge_base_for_guidelines(
-    project_type: str = None, language: str = None, project_name: str = None, **kwargs
-) -> Dict[str, Any]:
-    try:
-        repo_root = Path.cwd()
-        base_paths = [
-            repo_root / "capstone" / "backend" / "documents" / "guidelines",
-            repo_root / "capstone" / "documents" / "guidelines",
-            repo_root / "capstone" / "backend" / "documents",
-        ]
-        keywords: List[str] = []
-        if project_type:
-            keywords.append(str(project_type).lower())
-        if language:
-            keywords.append(str(language).lower())
-        if project_name:
-            keywords.append(str(project_name).lower())
-        keywords.extend(["service", "microservice", "standards", "guidelines", "ci/cd", "cicd"])
-        matched: List[Dict[str, Any]] = []
-        scanned_files: List[str] = []
-        for base in base_paths:
-            if not base.exists() or not base.is_dir():
-                continue
-            for file in base.glob("**/*.md"):
-                scanned_files.append(str(file))
-                try:
-                    text = file.read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    continue
-                text_lower = text.lower()
-                filename_lower = file.name.lower()
-                score = 0
-                for kw in keywords:
-                    if kw and (kw in text_lower or kw in filename_lower):
-                        score += 1
-                title = None
-                for line in text.splitlines():
-                    if line.strip().startswith("#"):
-                        title = line.strip().lstrip("# ")
-                        break
-                if score > 0 or (not keywords and title):
-                    snippets: List[str] = []
-                    if keywords:
-                        for line in text.splitlines():
-                            line_l = line.lower()
-                            if any(kw in line_l for kw in keywords) and line.strip():
-                                snippets.append(line.strip())
-                                if len(snippets) >= 3:
-                                    break
-                    matched.append(
-                        {
-                            "file": str(file),
-                            "title": title or file.name,
-                            "score": score,
-                            "snippets": snippets,
-                        }
-                    )
-        matched.sort(key=lambda m: (-m.get("score", 0), m.get("title") or ""))
-        if not matched:
-            defaults = []
-            for default_name in [
-                "python-service-standards.md",
-                "cicd-pipeline-standards.md",
-                "go-service-standards.md",
-            ]:
-                for base in base_paths:
-                    candidate = base / default_name
-                    if candidate.exists():
-                        defaults.append(
-                            {
-                                "file": str(candidate),
-                                "title": default_name.replace("-", " ").replace(".md", "").title(),
-                                "score": 0,
-                                "snippets": [],
-                            }
-                        )
-            matched = defaults
-        return {"success": True, "result": {"searched_files": scanned_files, "matches": matched[:10]}}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-# ==== Tool Specs ====
-
-
-BUILTIN_TOOLS: List[ToolSpec] = [
-    ToolSpec(
-        name="create_repository",
-        description="Creates local Git repo and GitHub remote, pushes initial commit",
-        input_schema={
-            "type": "object",
-            "properties": {"name": {"type": "string"}, "visibility": {"type": "string"}},
-            "required": ["name"],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=create_repository,
-        is_async=True,
-        timeout=10,
-        aliases=[],
-    ),
-    ToolSpec(
-        name="validate_project_name_and_type",
-        description="Validate project name and type",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "project_name": {"type": "string"},
-                "project_type": {"type": "string"},
-                "programming_language": {"type": "string"},
-            },
-            "required": ["project_name"],
-            "additionalProperties": False,
-        },
-        output_schema={"type": "object"},
-        func=validate_project_name_and_type,
-        is_async=True,
-        timeout=5,
-        aliases=["project-validator"],
-    ),    
-    ToolSpec(
-        name="setup_branch_protection",
-        description="Setup branch rules",
-        input_schema={
-            "type": "object",
-            "properties": {"repo_name": {"type": "string"}},
-            "required": ["repo_name"],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=setup_branch_protection,
-        is_async=True,
-        timeout=5,
-        aliases=[],
-    ),
-    ToolSpec(
-        name="create_git_repository_with_branch_protection",
-        description="Create repo then apply standard branch protection",
-        input_schema={
-            "type": "object",
-            "properties": {"repo_name": {"type": "string"}, "visibility": {"type": "string"}},
-            "required": [],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=create_git_repository_with_branch_protection,
-        is_async=True,
-        timeout=20,
-        aliases=["git-repo-creator", "create-git-repo"],
-    ),
-    
-    ToolSpec(
-        name="list_templates",
-        description="List available templates",
-        input_schema={
-            "type": "object",
-            "properties": {"project_type": {"type": "string"}},
-            "required": [],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=list_templates,
-        is_async=True,
-        timeout=5,
-        aliases=[],
-    ),
-    ToolSpec(
-        name="apply_template",
-        description="Apply project template",
-        input_schema={
-            "type": "object",
-            "properties": {"template": {"type": "string"}, "target_path": {"type": "string"}},
-            "required": ["template", "target_path"],
-            "additionalProperties": False,
-        },
-        output_schema={"type": "object"},
-        func=apply_template,
-        is_async=True,
-        timeout=15,
-        aliases=["template-applier"],
-    ),
-    ToolSpec(
-        name="setup_cicd_pipeline",
-        description="Setup CI/CD pipeline",
-        input_schema={
-            "type": "object",
-            "properties": {"repo_path": {"type": "string"}, "pipeline_type": {"type": "string"}},
-            "required": ["repo_path"],
-            "additionalProperties": False,
-        },
-        output_schema={"type": "object"},
-        func=setup_cicd,
-        is_async=True,
-        timeout=20,
-        aliases=["ci-cd-configurator"],
-    ),
-    ToolSpec(
-        name="run_initial_tests",
-        description="Run initial test suite",
-        input_schema={
-            "type": "object",
-            "properties": {"project_path": {"type": "string"}},
-            "required": ["project_path"],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=run_tests,
-        is_async=True,
-        timeout=30,
-        aliases=["test-runner"],
-    ),
-    ToolSpec(
-        name="create_k8s_namespace",
-        description="Create K8s namespace",
-        input_schema={
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "required": ["name"],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=create_k8s_namespace,
-        is_async=True,
-        timeout=10,
-        aliases=[],
-    ),
-    ToolSpec(
-        name="deploy_to_staging",
-        description="Deploy to staging",
-        input_schema={
-            "type": "object",
-            "properties": {"project": {"type": "string"}, "version": {"type": "string"}},
-            "required": ["project"],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=deploy_to_staging,
-        is_async=True,
-        timeout=45,
-        aliases=["k8s-deployer"],
-    ),
-    ToolSpec(
-        name="search_knowledge_base_for_guidelines",
-        description="Searches local knowledge base for guidelines relevant to the project",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "project_type": {"type": "string"},
-                "language": {"type": "string"},
-                "project_name": {"type": "string"},
-            },
-            "required": [],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=search_knowledge_base_for_guidelines,
-        is_async=True,
-        timeout=10,
-        aliases=["search_knowledge_base", "kb-search", "search-guidelines"],
-    ),
-    ToolSpec(
-        name="setup_observability",
-        description="Setup monitoring & logging",
-        input_schema={
-            "type": "object",
-            "properties": {"project_name": {"type": "string"}},
-            "required": [],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=setup_observability,
-        is_async=True,
-        timeout=10,
-        aliases=["observability-integrator"],
-    ),
-    ToolSpec(
-        name="generate_k8s_manifests",
-        description="Generate K8s manifests",
-        input_schema={
-            "type": "object",
-            "properties": {"service_name": {"type": "string"}},
-            "required": [],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=generate_k8s_manifests,
-        is_async=True,
-        timeout=10,
-        aliases=["k8s-manifest-generator"],
-    ),
-    ToolSpec(
-        name="generate_documentation",
-        description="Generate documentation",
-        input_schema={
-            "type": "object",
-            "properties": {"project_name": {"type": "string"}},
-            "required": [],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=generate_documentation,
-        is_async=True,
-        timeout=10,
-        aliases=["doc-generator"],
-    ),
-]
-
-
-
-BUILTIN_TOOLS_SIMPLIFIED: List[ToolSpec] = [
-    ToolSpec(
-        name="create_repository",
-        description="Creates local Git repo and GitHub remote, pushes initial commit",
-        input_schema={
-            "type": "object",
-            "properties": {"name": {"type": "string"}, "visibility": {"type": "string"}},
-            "required": ["name"],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=create_repository,
-        is_async=True,
-        timeout=10,
-        aliases=[],
-    ),
-    ToolSpec(
-        name="validate_project_name_and_type",
-        description="Validate project name and type",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "project_name": {"type": "string"},
-                "project_type": {"type": "string"},
-                "programming_language": {"type": "string"},
-            },
-            "required": ["project_name"],
-            "additionalProperties": False,
-        },
-        output_schema={"type": "object"},
-        func=validate_project_name_and_type,
-        is_async=True,
-        timeout=5,
-        aliases=["project-validator"],
-    )
-]
-
-# Expose combined tool list for agent construction where needed
-ALL_TOOLS: List[ToolSpec] = BUILTIN_TOOLS
-
-
-# ===== Sub-Agent Wrapper(s) as Tools =====
-async def run_sub_agent(
-    *,
-    task: str,
-    inputs: Dict[str, Any] | None = None,
-    shared_context: Dict[str, Any] | None = None,
-    allowed_tools: List[str] | None = None,
-    budget: Dict[str, Any] | None = None,
-    resume_token: str | None = None,
-    answers: Dict[str, Any] | None = None,
-    agent_name: str | None = None,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """Run a constrained sub-agent and return either a patch or need_user_input.
-
-    This wrapper expects the hosting orchestrator to pass in the orchestrator's LLMProvider via kwargs['llm']
-    and the base system prompt via kwargs['system_prompt'] for consistency.
-    """
-    llm: LLMProvider | None = kwargs.get("llm")
-    system_prompt: str = kwargs.get("system_prompt") or ""
-    if llm is None:
-        return {"success": False, "error": "Missing llm provider for sub-agent"}
-
-    # Construct tool whitelist index from BUILTIN_TOOLS
-    allow = [t for t in BUILTIN_TOOLS if (not allowed_tools) or (t.name in allowed_tools)]
-    subagent = ReActAgent(system_prompt=None, llm=llm, tools=allow, max_steps=int((budget or {}).get("max_steps", 12)), mission=system_prompt)
-
-    # Seed minimal context (ephemeral + child-session) to avoid state collision
-    parent_sid = (shared_context or {}).get("session_id") or "no-session"
-    subagent.session_id = f"{parent_sid}:sub:{(agent_name or 'subagent')}"
-    subagent.context = {
-        "user_request": task,
-        "known_answers_text": (shared_context or {}).get("known_answers_text", ""),
-        "facts": (shared_context or {}).get("facts", {}),
-        "version": int((shared_context or {}).get("version", 1)),
-        "suppress_markdown": True,
-        "ephemeral_state": True,
-        # tag for logging and ownership
-        "agent_name": agent_name or "subagent",
-    }
-
-    # Run a short loop
-    transcript: List[str] = []
-    async for chunk in subagent.process_request(task, session_id=subagent.session_id):
-        transcript.append(chunk)
-
-    # Inspect sub-agent state
-    if subagent.context.get("awaiting_user_input"):
-        return {
-            "success": False,
-            "need_user_input": subagent.context.get("awaiting_user_input"),
-            "state_token": "opaque",  # kept simple for v1
-        }
-
-    # Build a minimal patch reflecting only status updates against master tasks
-    patch = {
-        "base_version": int((shared_context or {}).get("version", 1)),
-        "agent_name": agent_name or "subagent",
-        "ops": []
-    }
-    master_tasks = list((shared_context or {}).get("tasks", []))
-    target_task_id = str((shared_context or {}).get("target_task_id") or "").strip() or None
-    wrapper_norm = (agent_name or "subagent").strip().lower().replace("-", "_").replace(" ", "_")
-    def _norm(s: str) -> str:
-        return (s or "").strip().lower().replace("-", "_").replace(" ", "_")
-    def _find_master_task_id_by_tool(tool_name: str) -> str | None:
-        # 0) Deterministic: prefer explicitly given target_task_id
-        if target_task_id:
-            return target_task_id
-        norm = _norm(tool_name)
-        # 1) Direct tool match
-        for mt in master_tasks:
-            tt = _norm(mt.get("tool"))
-            if tt and tt == norm:
-                return str(mt.get("id"))
-        # 2) Prefixed tool match: wrapper.action
-        for mt in master_tasks:
-            tt = _norm(mt.get("tool"))
-            if tt and tt == f"{wrapper_norm}.{norm}":
-                return str(mt.get("id"))
-        # 3) Fallback: match by executor_id + action
-        for mt in master_tasks:
-            exec_id = _norm(mt.get("executor_id"))
-            action = _norm(mt.get("action"))
-            if action == norm and (not exec_id or exec_id == wrapper_norm):
-                return str(mt.get("id"))
-        return None
-    for t in subagent.context.get("tasks", []):
-        status = str(t.get("status","")).upper()
-        tool_name = t.get("tool")
-        if tool_name and status in {"IN_PROGRESS","COMPLETED"}:
-            tid = _find_master_task_id_by_tool(tool_name)
-            if tid:
-                patch["ops"].append({"op":"update","task_id":tid,"fields":{"status":status}})
-
-    return {"success": True, "patch": patch, "result": {"transcript": "".join(transcript)}}
-
-
-# Example sub-agent ToolSpec (scaffolder)
-AGENT_TOOLS: List[ToolSpec] = [
-    ToolSpec(
-        name="agent_scaffold_webservice",
-        description="Sub-agent: scaffolds a webservice using whitelisted tools",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "task": {"type": "string"},
-                "inputs": {"type": "object"},
-                "shared_context": {"type": "object"},
-                "allowed_tools": {"type": "array", "items": {"type": "string"}},
-                "budget": {"type": "object"},
-                "resume_token": {"type": "string"},
-                "answers": {"type": "object"},
-            },
-            "required": ["task"],
-            "additionalProperties": True,
-        },
-        output_schema={"type": "object"},
-        func=run_sub_agent,
-        is_async=True,
-        timeout=120,
-        aliases=["agent_scaffold", "agent_webservice"],
-    )
-]
-
-ALL_TOOLS_WITH_AGENTS: List[ToolSpec] = BUILTIN_TOOLS + AGENT_TOOLS
-
-
-
-// Relative Path: prototype\__init__.py
-"""Prototype package exports.
-
-Exposes a unified ALL_TOOLS for convenience when composing agents.
-"""
-
-from .tools_builtin import BUILTIN_TOOLS, BUILTIN_TOOLS_SIMPLIFIED  # noqa: F401
-
-__all__ = [
-    "BUILTIN_TOOLS",
-    "BUILTIN_TOOLS_SIMPLIFIED",
-]
 
 
 
