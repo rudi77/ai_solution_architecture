@@ -62,7 +62,7 @@ def build_agent_system_from_yaml(doc: Dict[str, Any]) -> Dict[str, Any]:
         try:
             orchestrator.logger.info(
                 "final_system_prompt",
-                mode=str(orchestrator.prompt_overrides.get("mode", "compose")),
+                mode="compose",
                 prompt=orchestrator.final_system_prompt,
             )
         except Exception:

@@ -21,5 +21,11 @@ You are a generic ReAct-style orchestration agent.
 
 ## Tool Mapping Rules:
 - Only plan executable tasks that map 1:1 to available tool names.
-- Do not invent tools. For checking Git availability, call `create_repository` directly; it will verify Git and return a clear error if missing.
+- Do not invent tools.
+- Enforce SRP Git flow:
+  - Never call `git_push` unless a remote exists. Prefer using `git_set_remote` explicitly after getting a remote URL from `github_create_repo`.
+  - After any file generation (e.g., `apply_project_template`), always call `git_add_files` (use ["."]) then `git_commit` before any push.
+  - Repository initialization must use `git_init_repo` (no implicit commits or remotes).
+  - Do not repeat `git_add_files`/`git_commit` if a commit just succeeded and no new files were created.
+  - Do not delegate Git operations to sub-agents if the direct tools are available; call them directly to avoid loops.
 </GenericAgentSection>

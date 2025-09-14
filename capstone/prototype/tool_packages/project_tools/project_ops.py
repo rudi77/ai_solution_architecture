@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import structlog
-from ..common import get_working_directory, validate_path, get_relative_path
+from ..common import get_working_directory, validate_path, get_relative_path, get_repos_directory
 from ..common.execution_guard import validate_working_directory
 
 logger = structlog.get_logger()
@@ -367,14 +367,26 @@ async def apply_project_template(template_file: str, target_dir: str, project_na
         template_path = Path(template_file)
         target_path = Path(target_dir)
         
-        # Validate target path using centralized path manager
-        try:
-            target_path = validate_path(target_dir)
-        except ValueError as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+        # Resolve/validate target path:
+        # - If relative, validate within working directory
+        # - If absolute and outside the working directory, redirect to repos/<project_name>
+        if not target_path.is_absolute():
+            try:
+                target_path = validate_path(target_dir)
+            except ValueError as e:
+                return {"success": False, "error": str(e)}
+        else:
+            base_dir = get_working_directory().resolve()
+            try:
+                _ = target_path.resolve().relative_to(base_dir)
+            except Exception:
+                logger.warning(
+                    "absolute_target_outside_base",
+                    provided=str(target_path),
+                    base=str(base_dir),
+                    action="redirect_to_repos"
+                )
+                target_path = get_repos_directory() / project_name
         
         if not template_path.exists():
             return {

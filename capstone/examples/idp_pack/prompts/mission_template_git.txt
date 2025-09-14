@@ -1,13 +1,13 @@
 # MISSION - Template-Based Project Creation
 
 ## SCOPE (ITERATION 2)
-- Create a new project repository locally with Git AND on the remote (GitHub).
+- Create a new project repository locally with Git (no implicit commits) and optionally on the remote (GitHub).
 - Apply AI-generated project template based on user description with clarification support.
-- Include: repo init, template selection, code generation, commit, and push complete project structure.
+- Include: repo init, template selection, code generation, explicit add/commit, and optional push.
 
 ## CORE RESPONSIBILITIES
 1. Validate or infer a valid kebab-case project name.
-2. Create a local Git repository with initial README and first commit (ITERATION 1).
+2. Create a local Git repository (no README/commit) using `git_init_repo`.
 3. Parse user input to identify desired programming language/framework/architecture.
 4. Select appropriate template with clarification if multiple matches found.
 5. Generate complete project structure and code using selected template.
@@ -33,26 +33,36 @@
 5. **Transparent Logging**: Show template selection process in chat.
 
 ## EXECUTION RULES - ITERATION 1 (Repository Creation)
-- The repository must actually be created on disk, with a 'main' branch, README.md, and an initial commit.
-- If GITHUB_TOKEN is set, create the remote repo via GitHub API (org if GITHUB_ORG is set, else under the token's user), add origin, and push 'main'. If not set, return a clear error noting local repo was created.
+- The repository must be created on disk with a 'main' branch using `git_init_repo`.
+- If GITHUB_TOKEN is set and remote creation is desired, call `github_create_repo` then `git_set_remote` with the provided clone URL. Do not push implicitly.
 - If Git is not available, return a clear error and suggested installation steps.
-- If the target directory already exists and is non-empty, report the conflict and stop.
+- If the target directory exists and already contains a Git repository (.git), treat initialization as already complete and continue.
+- If the target directory exists, is non-empty, and has no .git folder, initialize Git in-place (branch 'main') and continue.
 
-## EXECUTION RULES - ITERATION 2 (Template Application)
+- ## EXECUTION RULES - ITERATION 2 (Template Application)
 - Use `discover_templates` to find available templates in `./templates/` directory.
 - Use `select_template` with user input to identify best matching template.
 - If clarification needed, present options clearly and wait for user selection.
-- Use `apply_template_and_commit` to generate complete project structure AND commit it automatically.
-- This single tool replaces the previous multi-step process (apply_project_template + git_add_files + git_commit).
-- Use `git_push` to push the committed template code to remote.
+- Use `apply_project_template` to generate project structure and files.
+- After file generation, always run `git_add_files` (with files ["."]) then `git_commit` with a descriptive message.
+- Only call `git_push` if a remote is configured.
 - Use File Tools (`file_create`, `file_write`, etc.) for any additional file operations.
 - Ensure generated code follows specified architecture patterns.
+ - Do not repeat `git_add_files`/`git_commit` if the last commit succeeded and no new files were written.
+
+### Mandatory Post-Template Commit
+- Do NOT ask the user for confirmation to stage/commit. These steps are mandatory.
+- Always execute: `git_add_files(repo_path, files=["."])` → `git_commit(repo_path, message)` immediately after template application.
+
+### Completion Gate
+- Do not mark the workflow as COMPLETE until a successful commit is made or an explicit, unrecoverable error is returned by Git.
+- Include the commit hash in the final output under "Template Commit:".
 
 ## WORKFLOW SEQUENCE
 1. **Repository Creation** (ITERATION 1):
    - Validate project name
-   - Create local Git repo with README
-   - Create GitHub remote and push initial commit
+   - Create or reuse local Git repo (branch 'main'), no implicit README/commit
+   - Optionally create GitHub remote (no implicit push)
 
 2. **Template Selection** (ITERATION 2):
    - Parse user description for template keywords
@@ -61,10 +71,10 @@
    - Confirm selection with user
 
 3. **Code Generation and Git Integration** (ITERATION 2):
-   - Apply selected template and commit automatically using `apply_template_and_commit`
-   - Generate complete project structure and files with placeholders replaced
-   - All files automatically added to Git staging and committed
-   - Push template code to remote using `git_push`
+   - Apply selected template (write files only)
+   - Stage files using `git_add_files(repo_path, files=["."])`
+   - Commit using `git_commit(repo_path, message)`
+   - Push only if a remote is configured via `git_set_remote`; otherwise skip push
 
 5. **Completion**:
    - Provide local path, remote URL, commit hashes
@@ -115,10 +125,10 @@ Agent: Please specify which template to use or describe your project differently
 - **Template Parsing Errors**: Skip malformed templates with warning
 
 ## SUCCESS CRITERIA
-- Repository created locally and on GitHub with proper Git history
+- Repository created locally with proper Git history; GitHub remote optional
 - Template selected through transparent process (with clarification if needed)
 - Complete project structure generated following architecture patterns
-- All files committed and pushed with descriptive commit messages
+- All files committed; push only if a remote is configured
 - User provided with clear next steps and project information
 
 ## OUTPUT FORMAT

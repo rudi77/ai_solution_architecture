@@ -17,6 +17,164 @@ logger = structlog.get_logger()
 
 
 @validate_working_directory
+async def git_init_repo(name: str) -> Dict[str, Any]:
+    """Initialize a bare-bones local git repository under the repos directory.
+
+    - Creates repos/<name>
+    - git init and set default branch to main
+    - Ensures user.name and user.email are configured locally if missing
+    - Does NOT create files, commits, or remotes
+
+    Returns a dict with repo_path and default_branch.
+    """
+    logger.info("git_init_repo_start", name=name)
+    if not isinstance(name, str) or not name.strip():
+        return {"success": False, "error": "Missing or invalid repository name"}
+
+    git_path = shutil.which("git")
+    if git_path is None:
+        return {"success": False, "error": "Git not found in PATH. Please install Git and retry."}
+
+    repos_base = get_repos_directory()
+    repo_dir = repos_base / name
+    # Allow initializing into an existing non-empty directory as long as it's not already a Git repo.
+    # If it's already a Git repo, treat as success and return path.
+    if repo_dir.exists():
+        if (repo_dir / ".git").exists():
+            return {"success": True, "repo_path": str(repo_dir), "default_branch": "main"}
+    else:
+        try:
+            repo_dir.mkdir(parents=True, exist_ok=False)
+        except Exception as exc:
+            return {"success": False, "error": f"Failed to create directory: {exc}"}
+
+    def run_git(args: List[str]) -> Dict[str, Any]:
+        cmd = ["git"] + args
+        try:
+            res = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=30)
+            return {"code": res.returncode, "stdout": res.stdout.strip(), "stderr": res.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"code": -1, "stdout": "", "stderr": "Command timed out"}
+        except Exception as exc:  # noqa: BLE001
+            return {"code": -1, "stdout": "", "stderr": f"Command failed: {exc}"}
+
+    init_res = run_git(["init"])
+    if init_res["code"] != 0:
+        return {"success": False, "error": f"git init failed: {init_res['stderr']}"}
+    branch_res = run_git(["branch", "-M", "main"])
+    if branch_res["code"] != 0:
+        return {"success": False, "error": f"setting branch failed: {branch_res['stderr']}"}
+
+    # Ensure local git identity
+    if run_git(["config", "--get", "user.email"])["stdout"] == "":
+        set_email = run_git(["config", "user.email", "idp@example.com"])
+        if set_email["code"] != 0:
+            return {"success": False, "error": f"git config user.email failed: {set_email['stderr']}"}
+    if run_git(["config", "--get", "user.name"])["stdout"] == "":
+        set_name = run_git(["config", "user.name", "IDP Copilot"])
+        if set_name["code"] != 0:
+            return {"success": False, "error": f"git config user.name failed: {set_name['stderr']}"}
+
+    return {"success": True, "repo_path": str(repo_dir), "default_branch": "main"}
+
+
+@validate_working_directory
+async def github_create_repo(name: str, visibility: str = "private") -> Dict[str, Any]:
+    """Create a GitHub repository via API only.
+
+    - Uses GITHUB_TOKEN, optional GITHUB_ORG
+    - Returns html_url and clone_url
+    - Does NOT touch local git state
+    """
+    logger.info("github_create_repo_start", name=name, visibility=visibility)
+    token = os.getenv("GITHUB_TOKEN")
+    org = os.getenv("GITHUB_ORG")
+    if not token:
+        return {"success": False, "error": "GITHUB_TOKEN is not set."}
+
+    import urllib.request
+    import urllib.error
+
+    api_url = f"https://api.github.com/orgs/{org}/repos" if org else "https://api.github.com/user/repos"
+    payload = {
+        "name": name,
+        "private": (str(visibility).lower() != "public"),
+        "auto_init": False,
+        "has_issues": True,
+        "has_projects": True,
+        "has_wiki": False,
+        "default_branch": "main",
+    }
+    req = urllib.request.Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "idp-copilot",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8")
+            repo_info = json.loads(body)
+            owner_login = ((repo_info or {}).get("owner") or {}).get("login") or (org or "")
+            html_url = repo_info.get("html_url")
+            clone_url = f"https://github.com/{owner_login}/{name}.git" if owner_login else repo_info.get("clone_url")
+            return {
+                "success": True,
+                "html_url": html_url,
+                "clone_url": clone_url,
+                "owner": owner_login,
+            }
+    except urllib.error.HTTPError as e:  # noqa: PERF203
+        try:
+            err_body = e.read().decode("utf-8")
+            msg = json.loads(err_body).get("message", err_body)
+        except Exception:  # noqa: BLE001
+            msg = str(e)
+        return {"success": False, "error": f"GitHub repo creation failed: {msg}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": f"GitHub repo creation failed: {exc}"}
+
+
+@validate_working_directory
+async def git_set_remote(repo_path: str, remote_url: str, name: str = "origin") -> Dict[str, Any]:
+    """Add or update a git remote for the given repo.
+
+    - If remote exists, set-url; else add
+    - Does NOT push
+    """
+    logger.info("git_set_remote_start", repo_path=repo_path, remote_url=remote_url, name=name)
+    repo_dir = Path(repo_path)
+    if not (repo_dir.exists() and (repo_dir / ".git").exists()):
+        return {"success": False, "error": f"Not a git repository: {repo_path}"}
+
+    def run_git(args: List[str]) -> Dict[str, Any]:
+        cmd = ["git"] + args
+        try:
+            res = subprocess.run(cmd, cwd=str(repo_dir), capture_output=True, text=True, timeout=30)
+            return {"code": res.returncode, "stdout": res.stdout.strip(), "stderr": res.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            return {"code": -1, "stdout": "", "stderr": "Command timed out"}
+        except Exception as exc:  # noqa: BLE001
+            return {"code": -1, "stdout": "", "stderr": f"Command failed: {exc}"}
+
+    # Try add, fallback to set-url
+    add_res = run_git(["remote", "add", name, remote_url])
+    if add_res["code"] != 0:
+        if "already exists" in add_res["stderr"].lower():
+            set_res = run_git(["remote", "set-url", name, remote_url])
+            if set_res["code"] != 0:
+                return {"success": False, "error": f"git remote set-url failed: {set_res['stderr']}"}
+        else:
+            return {"success": False, "error": f"git remote add failed: {add_res['stderr']}"}
+
+    return {"success": True, "message": f"Remote '{name}' set to {remote_url}"}
+
+@validate_working_directory
 async def create_repository(name: str, visibility: str = "private", **kwargs) -> Dict[str, Any]:
     """Create a real local Git repository with an initial commit.
 
@@ -532,6 +690,18 @@ async def git_push(repo_path: str, remote: str = "origin", branch: str = "main",
                 logger.error("git_command_exception", command=" ".join(args), error=str(e))
                 return {"code": -1, "stdout": "", "stderr": f"Command failed: {str(e)}"}
         
+        # Ensure remote exists before pushing
+        remote_res = run_git(["remote"])
+        if remote_res["code"] != 0:
+            error = f"git remote query failed: {remote_res['stderr']}"
+            logger.error("git_push_failed", error=error)
+            return {"success": False, "error": error}
+        configured_remotes = set(remote_res["stdout"].split()) if remote_res["stdout"] else set()
+        if remote not in configured_remotes:
+            error = f"Remote '{remote}' is not configured for this repository"
+            logger.error("git_push_failed", error=error)
+            return {"success": False, "error": error}
+
         # Push to remote
         push_res = run_git(["push", remote, branch])
         if push_res["code"] != 0:

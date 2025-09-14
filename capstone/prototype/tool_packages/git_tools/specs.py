@@ -3,6 +3,9 @@
 from typing import List
 from ...tools import ToolSpec
 from .git_ops import (
+    git_init_repo,
+    github_create_repo,
+    git_set_remote,
     create_repository,
     setup_branch_protection,
     create_git_repository_with_branch_protection,
@@ -12,6 +15,82 @@ from .git_ops import (
 )
 
 GIT_TOOLS: List[ToolSpec] = [
+    ToolSpec(
+        name="git_init_repo",
+        description="Initialize a local git repository under repos/ without commits or remotes",
+        input_schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "repo_path": {"type": "string"},
+                "default_branch": {"type": "string"},
+                "error": {"type": "string"},
+            },
+        },
+        func=git_init_repo,
+        is_async=True,
+        timeout=10,
+        aliases=[],
+    ),
+    ToolSpec(
+        name="github_create_repo",
+        description="Create a GitHub repository via API only (no local git side-effects)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "visibility": {"type": "string", "enum": ["private", "public"]},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "html_url": {"type": "string"},
+                "clone_url": {"type": "string"},
+                "owner": {"type": "string"},
+                "error": {"type": "string"},
+            },
+        },
+        func=github_create_repo,
+        is_async=True,
+        timeout=20,
+        aliases=[],
+    ),
+    ToolSpec(
+        name="git_set_remote",
+        description="Add or update a git remote for a repository",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string"},
+                "remote_url": {"type": "string"},
+                "name": {"type": "string", "default": "origin"},
+            },
+            "required": ["repo_path", "remote_url"],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "message": {"type": "string"},
+                "error": {"type": "string"},
+            },
+        },
+        func=git_set_remote,
+        is_async=True,
+        timeout=10,
+        aliases=["set_remote"],
+    ),
     ToolSpec(
         name="create_repository",
         description="Creates local Git repo and GitHub remote, pushes initial commit",

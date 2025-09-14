@@ -171,7 +171,7 @@ agents:
     mission: |
 {_indent_block(mission_text)}
 
-    max_steps: 12
+    max_steps: 20
     model:
       provider: openai
       model: gpt-4.1
@@ -179,7 +179,7 @@ agents:
     tools:
       allow:
         - validate_project_name_and_type
-        - create_repository
+        - git_init_repo
         - discover_templates
         - select_template
         - apply_project_template
@@ -189,9 +189,11 @@ agents:
         - file_edit
         - file_delete
         - file_list_directory
+        - git_add_files
         - git_commit
         - git_push
-        - git_add_files
+        - github_create_repo
+        - git_set_remote
 """
 
     text = st.text_area("AgentSystem (YAML oder JSON)", value=default_yaml, height=320)

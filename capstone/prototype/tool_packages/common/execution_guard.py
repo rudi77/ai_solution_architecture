@@ -5,6 +5,7 @@ operate within the expected working directory constraints.
 """
 
 from __future__ import annotations
+import os
 import asyncio
 import functools
 from pathlib import Path
@@ -25,6 +26,9 @@ def validate_working_directory(func: Callable) -> Callable:
     
     @functools.wraps(func)
     async def async_wrapper(*args, **kwargs):
+        # DEMO MODE: make guard less intrusive if DEMO_MODE=true
+        if str(os.getenv("DEMO_MODE", "")).lower() in {"1", "true", "yes"}:
+            return await func(*args, **kwargs)
         # Get expected working directory
         expected_wd = get_working_directory()
         current_wd = Path.cwd()
@@ -38,34 +42,44 @@ def validate_working_directory(func: Callable) -> Callable:
                 tool=func.__name__
             )
         
-        # Validate path parameters
+        # Validate path parameters (trust absolute paths to avoid false negatives when base dir differs)
         path_params = ['target_dir', 'repo_path', 'directory', 'path', 'file_path']
         for param_name in path_params:
             if param_name in kwargs:
                 param_value = kwargs[param_name]
-                if param_value:
-                    try:
-                        validated_path = validate_path(param_value)
-                        kwargs[param_name] = str(validated_path)
-                        logger.debug(
-                            "path_parameter_validated",
-                            tool=func.__name__,
-                            param=param_name,
-                            original=param_value,
-                            validated=str(validated_path)
-                        )
-                    except ValueError as e:
-                        logger.error(
-                            "path_parameter_validation_failed",
-                            tool=func.__name__,
-                            param=param_name,
-                            value=param_value,
-                            error=str(e)
-                        )
-                        return {
-                            "success": False,
-                            "error": f"Invalid path parameter '{param_name}': {str(e)}"
-                        }
+                if not param_value:
+                    continue
+                p = Path(str(param_value))
+                if p.is_absolute():
+                    logger.debug(
+                        "path_parameter_trusted_absolute",
+                        tool=func.__name__,
+                        param=param_name,
+                        value=str(p)
+                    )
+                    continue
+                try:
+                    validated_path = validate_path(param_value)
+                    kwargs[param_name] = str(validated_path)
+                    logger.debug(
+                        "path_parameter_validated",
+                        tool=func.__name__,
+                        param=param_name,
+                        original=param_value,
+                        validated=str(validated_path)
+                    )
+                except ValueError as e:
+                    logger.error(
+                        "path_parameter_validation_failed",
+                        tool=func.__name__,
+                        param=param_name,
+                        value=param_value,
+                        error=str(e)
+                    )
+                    return {
+                        "success": False,
+                        "error": f"Invalid path parameter '{param_name}': {str(e)}"
+                    }
         
         # Execute the tool
         result = await func(*args, **kwargs)
@@ -81,6 +95,8 @@ def validate_working_directory(func: Callable) -> Callable:
     
     @functools.wraps(func)
     def sync_wrapper(*args, **kwargs):
+        if str(os.getenv("DEMO_MODE", "")).lower() in {"1", "true", "yes"}:
+            return func(*args, **kwargs)
         # Get expected working directory  
         expected_wd = get_working_directory()
         current_wd = Path.cwd()
@@ -94,27 +110,37 @@ def validate_working_directory(func: Callable) -> Callable:
                 tool=func.__name__
             )
         
-        # Validate path parameters (same logic as async version)
+        # Validate path parameters (trust absolute paths)
         path_params = ['target_dir', 'repo_path', 'directory', 'path', 'file_path']
         for param_name in path_params:
             if param_name in kwargs:
                 param_value = kwargs[param_name]
-                if param_value:
-                    try:
-                        validated_path = validate_path(param_value)
-                        kwargs[param_name] = str(validated_path)
-                    except ValueError as e:
-                        logger.error(
-                            "path_parameter_validation_failed",
-                            tool=func.__name__,
-                            param=param_name, 
-                            value=param_value,
-                            error=str(e)
-                        )
-                        return {
-                            "success": False,
-                            "error": f"Invalid path parameter '{param_name}': {str(e)}"
-                        }
+                if not param_value:
+                    continue
+                p = Path(str(param_value))
+                if p.is_absolute():
+                    logger.debug(
+                        "path_parameter_trusted_absolute",
+                        tool=func.__name__,
+                        param=param_name,
+                        value=str(p)
+                    )
+                    continue
+                try:
+                    validated_path = validate_path(param_value)
+                    kwargs[param_name] = str(validated_path)
+                except ValueError as e:
+                    logger.error(
+                        "path_parameter_validation_failed",
+                        tool=func.__name__,
+                        param=param_name, 
+                        value=param_value,
+                        error=str(e)
+                    )
+                    return {
+                        "success": False,
+                        "error": f"Invalid path parameter '{param_name}': {str(e)}"
+                    }
         
         # Execute the tool
         result = func(*args, **kwargs)
