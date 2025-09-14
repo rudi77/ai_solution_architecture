@@ -129,15 +129,16 @@ class ReActAgent:
         tools: List[ToolSpec] | None = None,
         max_steps: int = 50,
         mission: str | None = None,
-        prompt_overrides: Dict[str, Any] | None = None,
     ):
         """
         Initializes the ReActAgent with the given system prompt, LLM provider, tools, and maximum steps.
         Args:
             system_prompt: The system prompt for the LLM.
-            llm: The LLM provider.
+            llm: The LLM provider.            
             tools: The tools to use.
             max_steps: The maximum number of steps to take.
+            mission: The mission for the agent.
+
         """
         self.system_prompt_base = (system_prompt or "").strip()
         self.llm = llm
@@ -147,7 +148,6 @@ class ReActAgent:
 
         # New prompt composition fields
         self.mission_text: str | None = (mission or None)
-        self.prompt_overrides: Dict[str, Any] = dict(prompt_overrides or {})
 
         self.state = StateManager()
         self.feedback = FeedbackCollector()
@@ -171,7 +171,6 @@ class ReActAgent:
         try:
             self.logger.info(
                 "final_system_prompt",
-                mode=str(self.prompt_overrides.get("mode", "compose")),
                 prompt=self.final_system_prompt,
             )
         except Exception:
@@ -1166,10 +1165,6 @@ class ReActAgent:
           - compose (default): <GenericAgentSection> + <Mission> + <Tools>
           - legacy_full: use self.system_prompt_base 1:1 (back-compat path)
         """
-        mode = str(self.prompt_overrides.get("mode", "compose")).strip().lower()
-        if mode == "legacy_full":
-            return self.system_prompt_base
-
         # Generic section
         generic = (self.system_prompt_base or DEFAULT_GENERIC_PROMPT).strip()
 
