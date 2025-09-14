@@ -10,10 +10,13 @@ from datetime import datetime
 import subprocess
 from typing import Any, Dict, List
 import structlog
+from ..common import get_repos_directory, validate_path, get_relative_path
+from ..common.execution_guard import validate_working_directory
 
 logger = structlog.get_logger()
 
 
+@validate_working_directory
 async def create_repository(name: str, visibility: str = "private", **kwargs) -> Dict[str, Any]:
     """Create a real local Git repository with an initial commit.
 
@@ -45,7 +48,9 @@ async def create_repository(name: str, visibility: str = "private", **kwargs) ->
             "error": error,
         }
 
-    repo_dir = Path.cwd() / name
+    # Use centralized repos directory management
+    repos_base = get_repos_directory()
+    repo_dir = repos_base / name
     logger.info("target_directory_check", repo_dir=str(repo_dir))
     
     # Check if this is a retry scenario (local repo exists but may not be pushed to GitHub)
@@ -353,9 +358,13 @@ async def create_repository(name: str, visibility: str = "private", **kwargs) ->
 
     logger.info("create_repository_success", local_path=str(repo_dir), remote_url=clean_remote_url)
     
+    # Calculate relative path using centralized path manager
+    relative_path = get_relative_path(repo_dir)
+    
     return {
         "success": True,
         "repo_path": str(repo_dir),
+        "relative_path": str(relative_path),
         "default_branch": "main",
         "initial_commit": commit_hash,
         "remote_html_url": repo_info.get("html_url"),

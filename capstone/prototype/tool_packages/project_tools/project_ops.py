@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import structlog
+from ..common import get_working_directory, validate_path, get_relative_path
+from ..common.execution_guard import validate_working_directory
 
 logger = structlog.get_logger()
 
@@ -71,7 +73,7 @@ async def search_knowledge_base_for_guidelines(
 ) -> Dict[str, Any]:
     """Search knowledge base for relevant guidelines and standards."""
     try:
-        repo_root = Path.cwd()
+        repo_root = get_working_directory()
         base_paths = [
             repo_root / "capstone" / "backend" / "documents" / "guidelines",
             repo_root / "capstone" / "documents" / "guidelines",
@@ -347,6 +349,7 @@ async def select_template(user_input: str, template_dir: str = "./templates", **
         return {"success": False, "error": error}
 
 
+@validate_working_directory
 async def apply_project_template(template_file: str, target_dir: str, project_name: str, **kwargs) -> Dict[str, Any]:
     """Apply a template to create project structure and files.
     
@@ -363,6 +366,15 @@ async def apply_project_template(template_file: str, target_dir: str, project_na
     try:
         template_path = Path(template_file)
         target_path = Path(target_dir)
+        
+        # Validate target path using centralized path manager
+        try:
+            target_path = validate_path(target_dir)
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
         
         if not template_path.exists():
             return {
