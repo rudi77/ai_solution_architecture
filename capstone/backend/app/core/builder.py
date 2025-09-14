@@ -26,7 +26,24 @@ def build_agent_system_from_yaml(doc: Dict[str, Any]) -> Dict[str, Any]:
     system = doc.get("system", {})
     agents_cfg = doc.get("agents", [])
 
-    # Build orchestrator and sub-agents
+    # If there is exactly one agent, build single-agent instance directly (no orchestrator)
+    if isinstance(agents_cfg, list) and len(agents_cfg) == 1:
+        single_cfg = agents_cfg[0]
+        agent = _build_agent(single_cfg)
+        # Ensure tool indices and prompts are initialized
+        try:
+            agent.tool_index = build_tool_index(agent.tools)
+            agent.final_system_prompt = agent._build_final_system_prompt()
+            agent.executor_index = agent._build_executor_index()
+        except Exception:
+            pass
+        return {
+            "system": system,
+            "agents": {single_cfg.get("id", "agent"): single_cfg},
+            "instance": agent,
+        }
+
+    # Multi-agent legacy mode: try orchestrator + sub-agents composition if defined
     sub_agents: Dict[str, ReActAgent] = {}
     orchestrator_cfg = None
     for a in agents_cfg:
@@ -35,8 +52,24 @@ def build_agent_system_from_yaml(doc: Dict[str, Any]) -> Dict[str, Any]:
         else:
             sub_agents[a["id"]] = _build_agent(a)
 
+    # If no orchestrator provided, but multiple agents exist, pick the first as primary (single-agent fallback)
+    if orchestrator_cfg is None and agents_cfg:
+        primary = agents_cfg[0]
+        agent = _build_agent(primary)
+        try:
+            agent.tool_index = build_tool_index(agent.tools)
+            agent.final_system_prompt = agent._build_final_system_prompt()
+            agent.executor_index = agent._build_executor_index()
+        except Exception:
+            pass
+        return {
+            "system": system,
+            "agents": {primary.get("id", "agent"): primary},
+            "instance": agent,
+        }
+
     if orchestrator_cfg is None:
-        raise ValueError("orchestrator agent not defined")
+        raise ValueError("no agents defined")
 
     orchestrator = _build_agent(orchestrator_cfg)
 

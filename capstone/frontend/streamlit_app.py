@@ -133,45 +133,31 @@ def render_tab_agent_system(base_url: str) -> None:
         pad = " " * spaces
         return "\n".join(pad + line if line else pad for line in text.splitlines())
 
-    orch_text = _read_prompt(
-        "examples/idp_pack/prompts/orchestrator.txt",
-        "You are a generic orchestration agent.",
+    system_text = _read_prompt(
+        "examples/idp_pack/system_prompt_idp.txt",
+        "You are an IDP agent that plans and executes using available tools.",
     )
     mission_text = _read_prompt(
         "examples/idp_pack/prompts/mission_template_git.txt",
         "Create a repository with AI-generated project templates locally and on GitHub; includes template selection and code generation.",
     )
 
-    # Default YAML mirrors run_idp_cli.py structure and prompts
+    # Default YAML switched to single-agent configuration
     default_yaml = f"""
 version: 1
 system:
-  name: idp-template-orchestrator
+  name: idp-single-agent
 agents:
-  - id: orchestrator
-    role: orchestrator
-    description: Template-based project creation orchestrator
+  - id: idp_agent
+    role: worker
+    description: IDP agent that plans and executes with built-in tools
     system_prompt: |
-{_indent_block(orch_text)}
+{_indent_block(system_text)}
 
     mission: |
 {_indent_block(mission_text)}
 
     max_steps: 40
-    model:
-      provider: openai
-      model: gpt-4.1
-      temperature: 0.1
-    tools:
-      allow:
-        - agent_template_git
-  - id: agent_template_git
-    role: worker
-    description: Template-based project creation worker
-    mission: |
-{_indent_block(mission_text)}
-
-    max_steps: 20
     model:
       provider: openai
       model: gpt-4.1

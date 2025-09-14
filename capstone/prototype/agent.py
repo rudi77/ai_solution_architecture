@@ -783,6 +783,44 @@ class ReActAgent:
                 tool_params["shared_context"] = sc
         except Exception:
             pass
+        # Auto-fill common parameters from known context to avoid LLM fabrication errors
+        try:
+            if spec:
+                # If a repo_path is required or available and not provided, inject last known repo_path
+                if ("repo_path" in (props or {})) and ("repo_path" not in tool_params):
+                    last_repo = str(self.context.get("last_repo_path") or "").strip()
+                    if last_repo:
+                        tool_params["repo_path"] = last_repo
+                # If a remote_url is required and not provided, inject last known remote/clone url
+                if ("remote_url" in (props or {})) and ("remote_url" not in tool_params):
+                    last_remote = (
+                        str(self.context.get("last_remote_url") or "").strip()
+                        or str(self.context.get("last_clone_url") or "").strip()
+                    )
+                    if last_remote:
+                        tool_params["remote_url"] = last_remote
+
+                # Strengthen path normalization for wrongly-typed absolute paths (e.g., architect vs architecture)
+                try:
+                    from pathlib import Path as _Path
+                    last_repo_str = str(self.context.get("last_repo_path") or "").strip()
+                    last_repo_path = _Path(last_repo_str) if last_repo_str else None
+                    # Normalize repo_path if provided but invalid
+                    if "repo_path" in tool_params:
+                        rp = _Path(str(tool_params.get("repo_path") or ""))
+                        if (not rp.exists() or not (rp / ".git").exists()) and last_repo_path and last_repo_path.exists():
+                            # Prefer canonical last_repo_path which we know exists
+                            tool_params["repo_path"] = last_repo_str
+                    # Normalize generic directory targets to the known repo root when missing/invalid
+                    for dir_key in ("target_dir", "directory"):
+                        if dir_key in tool_params:
+                            dp = _Path(str(tool_params.get(dir_key) or ""))
+                            if (not dp.exists()) and last_repo_path and last_repo_path.exists():
+                                tool_params[dir_key] = last_repo_str
+                except Exception:
+                    pass
+        except Exception:
+            pass
         before_version = int(self.context.get("version", 1))
         result = await execute_tool_by_name_from_index(self.tool_index, norm, tool_params)
         duration = time.time() - started_at
@@ -798,6 +836,27 @@ class ReActAgent:
         success = bool(result.get("success"))
         status = "COMPLETED" if success else "FAILED"
         result_text = json.dumps(result, ensure_ascii=False)
+
+        # Persist common outputs for future tool calls (e.g., repo_path, clone_url)
+        try:
+            if success:
+                # Persist repo path from multiple possible keys
+                rp = (
+                    str(result.get("repo_path") or "").strip()
+                    or str(result.get("project_path") or "").strip()
+                )
+                if rp:
+                    self.context["last_repo_path"] = rp
+                # capture both clean and tokenized remote urls if present in various keys
+                for key in ["clone_url", "remote_clone_url", "html_url"]:
+                    val = str(result.get(key) or "").strip()
+                    if val:
+                        if key in {"clone_url", "remote_clone_url"}:
+                            self.context["last_clone_url"] = val
+                        else:
+                            self.context["last_remote_url"] = val
+        except Exception:
+            pass
 
         # Log end of tool call with status
         try:
