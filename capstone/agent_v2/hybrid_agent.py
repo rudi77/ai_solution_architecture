@@ -1257,7 +1257,7 @@ class HybridAgent:
     Production-ready agent that executes plans and manages tools.
     Clean separation: Agent handles execution, PlanManager handles planning.
     """
-    
+
     def __init__(
         self,
         api_key: str,
@@ -1272,11 +1272,11 @@ class HybridAgent:
         self.max_retries = max_retries
         self.enable_memory = enable_memory
         self.enable_planning = enable_planning
-        
+
         # Tool registry
         self.tools: Dict[str, Tool] = {}
         self._register_default_tools()
-        
+
         # Planning component (no circular reference)
         self.plan_manager = None
         if enable_planning:
@@ -1286,55 +1286,54 @@ class HybridAgent:
                 available_tools=self.tools,
                 save_dir=plan_save_dir
             )
-        
+
         # Current execution state
         self.current_plan: Optional[ExecutionPlan] = None
-        
+
         # Execution context and memory
         self.context: Dict[str, Any] = {}
         self.memory: List[ExecutionMemory] = []
         self.max_memory_size = 10
-        
+
         # Statistics
         self.stats = defaultdict(int)
-        
+
     def _register_default_tools(self):
         """Register the default tool set"""
         default_tools = [
             # File operations
             FileReadTool(),
             FileWriteTool(),
-            
+
             # Git operations
             GitTool(),
-            
+
             # System operations
             #ShellTool(),
             PowerShellTool(),
-            
+
             # Code execution
             PythonTool(),
-            
+
             # Web operations
             WebSearchTool(),
             WebFetchTool(),
-            
+
             # GitHub operations
             GitHubTool(),
         ]
-        
+
         for tool in default_tools:
             self.register_tool(tool)
-            
+
     def register_tool(self, tool: Tool):
         """Register a new tool"""
         self.tools[tool.name] = tool
         logger.info(f"Registered tool: {tool.name}")
-    
+
     def get_tools_schema(self) -> List[Dict]:
         """Generate OpenAI function calling schema for all tools"""
         schemas = []
-        
         for name, tool in self.tools.items():
             schema = {
                 "type": "function",
@@ -1345,17 +1344,16 @@ class HybridAgent:
                 }
             }
             schemas.append(schema)
-            
         return schemas
-    
+
     def _get_memory_context(self, limit: int = 3) -> str:
         """Get relevant memory context"""
         if not self.enable_memory or not self.memory:
             return ""
-        
+
         recent_memory = self.memory[-limit:]
         context_parts = []
-        
+
         for mem in recent_memory:
             success_rate = sum(1 for r in mem.results if r.success) / len(mem.results) * 100
             context_parts.append(
@@ -1363,37 +1361,186 @@ class HybridAgent:
                 f"Summary: {mem.summary}\n"
                 f"Success rate: {success_rate:.0f}%"
             )
-        
+
         return "\n\n".join(context_parts)
-    
+
+    def get_memory_context(self, limit: int = 3) -> str:
+        """Public accessor for external conversation orchestrators."""
+        return self._get_memory_context(limit=limit)
+
+    # -------- NEW: message-first execution API --------
+    async def run_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        max_iterations: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Execute using OpenAI function calling given an existing message history.
+        The Agent does NOT create system/user messages itself.
+
+        Returns:
+          - success: bool (true if all tool calls in the last turn succeeded or no tools were needed)
+          - results: list[TaskResult as dict]
+          - messages: updated message history
+          - needs_user_input: bool
+          - question: Optional[str] if the model requested info via {"ask_user": {...}}
+        """
+        results: List[TaskResult] = []
+        iteration = 0
+        needs_user_input = False
+        pending_question: Optional[str] = None
+
+        while iteration < max_iterations:
+            iteration += 1
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=self.get_tools_schema(),
+                    tool_choice="auto",
+                    temperature=0.7
+                )
+
+                message = response.choices[0].message
+                messages.append(message.dict())
+
+                # No tool calls -> maybe model is done or is asking the user
+                if not getattr(message, "tool_calls", None):
+                    # Try to parse {"ask_user": {...}} convention from assistant content
+                    content_text = (message.content or "")
+                    content_stripped = content_text.strip()
+                    if content_stripped.startswith("{") and "ask_user" in content_stripped:
+                        try:
+                            data = json.loads(content_stripped)
+                        except json.JSONDecodeError:
+                            # Handle cases where multiple JSON objects are concatenated
+                            data = None
+                            depth = 0
+                            start_idx = None
+                            in_string = False
+                            escape = False
+                            for idx, ch in enumerate(content_stripped):
+                                if escape:
+                                    escape = False
+                                    continue
+                                if ch == "\\":
+                                    escape = True
+                                    continue
+                                if ch == '"' and not escape:
+                                    in_string = not in_string
+                                if in_string:
+                                    continue
+                                if ch == "{":
+                                    if depth == 0:
+                                        start_idx = idx
+                                    depth += 1
+                                elif ch == "}":
+                                    depth -= 1
+                                    if depth == 0 and start_idx is not None:
+                                        first_json = content_stripped[start_idx:idx+1]
+                                        try:
+                                            data = json.loads(first_json)
+                                        except Exception:
+                                            data = None
+                                        break
+                        if isinstance(data, dict) and "ask_user" in data:
+                            q = data["ask_user"].get("question") or ""
+                            needs_user_input = True
+                            pending_question = q
+                    logger.info("No more tool calls issued by the model")
+                    break
+
+                # Execute tool calls
+                for tool_call in message.tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments)
+
+                    logger.info(f"Calling {tool_name} with args: {tool_args}")
+
+                    # Execute with retry
+                    task_result = await self._execute_tool_with_retry(
+                        tool_name,
+                        tool_args,
+                        task_id=tool_call.id
+                    )
+
+                    results.append(task_result)
+
+                    # Update context
+                    self.context[tool_call.id] = task_result.result
+
+                    # Add tool response to conversation
+                    tool_response = {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(task_result.result)
+                    }
+                    messages.append(tool_response)
+
+                    # If a critical failure occurs, stop this iteration batch
+                    if not task_result.success and "critical" in str(task_result.error).lower():
+                        logger.error(f"Critical failure: {task_result.error}")
+                        break
+
+            except Exception as e:
+                logger.error(f"Iteration {iteration} failed: {e}")
+                break
+
+        # Memory (optional, minimal): store a compact turn summary
+        if self.enable_memory and results:
+            self._store_memory("conversation_turn", results)
+
+        success_count = sum(1 for r in results if r.success)
+        return {
+            "success": success_count == len(results) if results else True,
+            "results": [
+                {
+                    "task_id": r.task_id,
+                    "tool": r.tool,
+                    "success": r.success,
+                    "result": r.result,
+                    "error": r.error,
+                    "retries": r.retries,
+                    "timestamp": r.timestamp.isoformat(),
+                }
+                for r in results
+            ],
+            "messages": messages,
+            "needs_user_input": needs_user_input,
+            "question": pending_question,
+            "iterations": iteration,
+            "stats": dict(self.stats),
+        }
+
+    # ------------- Planning path stays unchanged -------------
     async def execute_with_planning(self, goal: str) -> Dict[str, Any]:
         """Execute goal using planning system - Agent owns the execution loop"""
-        
+
         if not self.enable_planning or not self.plan_manager:
             return await self.execute_with_function_calling(goal)
-        
+
         try:
             # Create initial plan
             logger.info(f"Creating execution plan for: {goal}")
             plan = await self.plan_manager.create_plan(goal, self.context)
             self.current_plan = plan
-            
+
             # Agent controls the execution loop
             while plan.status == "active":
                 # Get next executable steps
                 next_steps = self.plan_manager.get_next_steps(plan)
-                
+
                 if not next_steps:
                     # Check completion or blocking
                     if self._all_steps_complete(plan):
                         plan.status = "completed"
                         break
-                    
+
                     # Check for blocked steps
                     blocked_steps = self.plan_manager.get_blocked_steps(plan)
                     if blocked_steps:
                         logger.warning(f"{len(blocked_steps)} steps blocked by failures")
-                        
+
                         # Decide on replanning
                         if self._should_replan(plan):
                             execution_state = self._get_execution_state(plan)
@@ -1403,23 +1550,23 @@ class HybridAgent:
                         else:
                             plan.status = "failed"
                             break
-                    
+
                     # No more steps available
                     break
-                
+
                 # Execute steps (parallel and sequential)
                 parallel_steps = [s for s in next_steps if s.can_parallel]
                 sequential_steps = [s for s in next_steps if not s.can_parallel]
-                
+
                 # Execute parallel steps
                 if parallel_steps:
                     tasks = [self._execute_step(step) for step in parallel_steps]
                     await asyncio.gather(*tasks)
-                
+
                 # Execute sequential steps
                 for step in sequential_steps:
                     await self._execute_step(step)
-                    
+
                     # Check for critical failure
                     if step.state == StepState.FAILED and step.required:
                         if self._should_replan(plan):
@@ -1427,11 +1574,11 @@ class HybridAgent:
                             plan = await self.plan_manager.replan(plan, execution_state)
                             self.current_plan = plan
                             break
-                
+
                 # Update and save plan after batch
                 plan.update_stats()
                 await self.plan_manager.save_plan(plan)
-            
+
             # Store in memory
             if self.enable_memory:
                 self._store_memory(goal, [
@@ -1444,7 +1591,7 @@ class HybridAgent:
                     )
                     for step in plan.steps
                 ])
-            
+
             return {
                 "success": plan.status == "completed",
                 "goal": goal,
@@ -1457,35 +1604,35 @@ class HybridAgent:
                 "plan_file": f"{self.plan_manager.save_dir}/plan_{plan.id}_v{plan.version}.md",
                 "stats": dict(self.stats)
             }
-            
+
         except Exception as e:
             logger.error(f"Planning execution failed: {e}")
             # Fallback to function calling
             return await self.execute_with_function_calling(goal)
-    
+
     async def _execute_step(self, step: PlanStep) -> bool:
         """Execute a single plan step - Agent's responsibility"""
-        
+
         logger.info(f"Executing step {step.id}: {step.description}")
-        
+
         # Update state
         started_at = datetime.now()
         self.plan_manager.update_step_state(
-            self.current_plan, 
-            step.id, 
+            self.current_plan,
+            step.id,
             StepState.IN_PROGRESS,
             started_at=started_at
         )
-        
+
         # Execute with retry
         result = await self._execute_tool_with_retry(
             step.tool,
             step.parameters,
             task_id=step.id
         )
-        
+
         completed_at = datetime.now()
-        
+
         if result.success:
             # Update plan through manager
             self.plan_manager.update_step_state(
@@ -1495,15 +1642,15 @@ class HybridAgent:
                 result=result.result,
                 completed_at=completed_at
             )
-            
+
             # Store result in plan context
             self.current_plan.context[step.id] = result.result
-            
+
             logger.info(f"Step {step.id} completed successfully")
             return True
         else:
             step.retry_count += 1
-            
+
             if step.retry_count < step.max_retries:
                 self.plan_manager.update_step_state(
                     self.current_plan,
@@ -1522,9 +1669,9 @@ class HybridAgent:
                     completed_at=completed_at
                 )
                 logger.error(f"Step {step.id} failed: {result.error}")
-            
+
             return False
-    
+
     def _all_steps_complete(self, plan: ExecutionPlan) -> bool:
         """Check if all steps are complete"""
         return all(
@@ -1532,32 +1679,32 @@ class HybridAgent:
             or (step.state == StepState.FAILED and not step.required)
             for step in plan.steps
         )
-    
+
     def _should_replan(self, plan: ExecutionPlan) -> bool:
         """Determine if replanning is needed"""
         # Don't replan if we've already tried multiple times
         if plan.version > 3:
             return False
-        
+
         # Replan if critical steps failed
-        failed_required = sum(1 for s in plan.steps 
-                            if s.state == StepState.FAILED and s.required)
-        
+        failed_required = sum(1 for s in plan.steps
+                              if s.state == StepState.FAILED and s.required)
+
         return failed_required > 0
-    
+
     def _get_execution_state(self, plan: ExecutionPlan) -> ExecutionState:
         """Get current execution state for replanning"""
-        
+
         completed_steps = [
             {"id": s.id, "description": s.description, "result": s.result}
             for s in plan.steps if s.state == StepState.COMPLETED
         ]
-        
+
         failed_steps = [
             {"id": s.id, "description": s.description, "error": s.error}
             for s in plan.steps if s.state == StepState.FAILED
         ]
-        
+
         return ExecutionState(
             completed_steps=completed_steps,
             failed_steps=failed_steps,
@@ -1566,7 +1713,7 @@ class HybridAgent:
             previous_plan_id=plan.id,
             version=plan.version
         )
-    
+
     async def _execute_tool_with_retry(
         self,
         tool_name: str,
@@ -1583,7 +1730,7 @@ class HybridAgent:
                 result={},
                 error=f"Tool '{tool_name}' not found"
             )
-        
+
         # Validate parameters
         valid, error = tool.validate_params(**parameters)
         if not valid:
@@ -1594,7 +1741,7 @@ class HybridAgent:
                 result={},
                 error=error
             )
-        
+
         # Try execution with retries
         last_error = None
         for attempt in range(self.max_retries):
@@ -1602,13 +1749,13 @@ class HybridAgent:
                 # Add context for Python tool
                 if tool_name == "python":
                     parameters["context"] = self.context
-                
+
                 # Execute tool
                 result = await tool.execute(**parameters)
-                
+
                 # Update statistics
                 self.stats[f"{tool_name}_calls"] += 1
-                
+
                 if result.get("success"):
                     self.stats[f"{tool_name}_success"] += 1
                     return TaskResult(
@@ -1618,9 +1765,9 @@ class HybridAgent:
                         result=result,
                         retries=attempt
                     )
-                
+
                 last_error = result.get("error", "Unknown error")
-                
+
                 # Try to fix parameters if we have more attempts
                 if attempt < self.max_retries - 1:
                     fixed_params = await self._fix_parameters(
@@ -1629,11 +1776,11 @@ class HybridAgent:
                     if fixed_params:
                         parameters.update(fixed_params)
                         logger.info(f"Retrying {tool_name} with fixed parameters")
-                
+
             except Exception as e:
                 last_error = str(e)
                 logger.error(f"Tool execution failed: {e}")
-        
+
         self.stats[f"{tool_name}_failures"] += 1
         return TaskResult(
             task_id=task_id or f"task_{datetime.now().timestamp()}",
@@ -1643,7 +1790,7 @@ class HybridAgent:
             error=last_error,
             retries=self.max_retries
         )
-    
+
     async def _fix_parameters(
         self,
         tool_name: str,
@@ -1654,14 +1801,14 @@ class HybridAgent:
         prompt = f"""
         Tool '{tool_name}' failed with error:
         {error}
-        
+
         Original parameters:
         {json.dumps(parameters, indent=2)}
-        
+
         Suggest corrected parameters that might fix this error.
         Return ONLY valid JSON with the corrected parameters.
         """
-        
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -1672,166 +1819,108 @@ class HybridAgent:
                 response_format={"type": "json_object"},
                 temperature=0.3
             )
-            
+
             return json.loads(response.choices[0].message.content)
-            
+
         except Exception as e:
             logger.error(f"Failed to fix parameters: {e}")
             return None
-    
+
+    # -------- Back-compat path (builds messages then delegates) --------
     async def execute_with_function_calling(
         self,
         goal: str,
         max_iterations: int = 10
     ) -> Dict[str, Any]:
-        """Execute goal using OpenAI function calling for tool selection"""
-        
+        """Execute goal using OpenAI function calling for tool selection (compat wrapper)."""
+
         # Initialize conversation with memory context
         memory_context = self._get_memory_context()
-        
+
         system_prompt = """You are an AI assistant that uses tools to complete tasks.
 Be efficient and combine operations when possible using the python tool.
 Previous context may be available to help guide your decisions."""
-        
+
         if memory_context:
             system_prompt += f"\n\nPrevious execution context:\n{memory_context}"
-        
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": goal}
         ]
-        
-        results = []
-        iteration = 0
-        
-        while iteration < max_iterations:
-            iteration += 1
-            
-            try:
-                # Call LLM with function calling
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=self.get_tools_schema(),
-                    tool_choice="auto",
-                    temperature=0.7
-                )
-                
-                message = response.choices[0].message
-                messages.append(message.dict())
-                
-                # Check if we're done
-                if not message.tool_calls:
-                    logger.info("No more tool calls needed")
-                    break
-                
-                # Execute tool calls
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
-                    
-                    logger.info(f"Calling {tool_name} with args: {tool_args}")
-                    
-                    # Execute with retry
-                    task_result = await self._execute_tool_with_retry(
-                        tool_name,
-                        tool_args,
-                        task_id=tool_call.id
-                    )
-                    
-                    results.append(task_result)
-                    
-                    # Update context
-                    self.context[tool_call.id] = task_result.result
-                    
-                    # Add tool response to conversation
-                    tool_response = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(task_result.result)
-                    }
-                    messages.append(tool_response)
-                    
-                    # Stop if critical failure
-                    if not task_result.success and "critical" in str(task_result.error).lower():
-                        logger.error(f"Critical failure: {task_result.error}")
-                        break
-                        
-            except Exception as e:
-                logger.error(f"Iteration {iteration} failed: {e}")
-                break
-        
-        # Store in memory
-        if self.enable_memory and results:
-            self._store_memory(goal, results)
-        
-        # Generate summary
-        success_count = sum(1 for r in results if r.success)
-        
+
+        result = await self.run_messages(messages, max_iterations=max_iterations)
+
+        # For BC: shape the classic return payload
+        results = result.get("results", [])
+        success_count = sum(1 for r in results if r.get("success"))
         return {
-            "success": success_count == len(results) if results else False,
+            "success": result.get("success", False),
             "goal": goal,
             "results": [
                 {
-                    "task_id": r.task_id,
-                    "tool": r.tool,
-                    "success": r.success,
-                    "error": r.error,
-                    "retries": r.retries
+                    "task_id": r["task_id"],
+                    "tool": r["tool"],
+                    "success": r["success"],
+                    "error": r["error"],
+                    "retries": r["retries"]
                 }
                 for r in results
             ],
             "summary": f"Executed {len(results)} tasks, {success_count} successful",
             "context": self.context,
-            "iterations": iteration,
-            "stats": dict(self.stats)
+            "iterations": result.get("iterations", 0),
+            "stats": dict(self.stats),
+            "needs_user_input": result.get("needs_user_input", False),
+            "question": result.get("question"),
+            "messages": result.get("messages"),
         }
-    
+
     async def resume_plan(self, plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
         """Resume execution of an existing plan"""
-        
+
         if not self.plan_manager:
             return {"success": False, "error": "Planning not enabled"}
-        
+
         # Load plan
         plan = await self.plan_manager.load_plan(plan_id, version)
         if not plan:
             return {"success": False, "error": f"Plan {plan_id} not found"}
-        
+
         logger.info(f"Resuming plan {plan_id} v{plan.version}")
         self.current_plan = plan
-        
+
         # Continue execution from current state
         return await self.execute_with_planning(plan.goal)
-    
+
     def _store_memory(self, goal: str, results: List[TaskResult]):
         """Store execution in memory"""
         summary = f"Completed {len(results)} tasks, " \
-                 f"{sum(1 for r in results if r.success)} successful"
-        
+                  f"{sum(1 for r in results if r.success)} successful"
+
         memory_entry = ExecutionMemory(
             goal=goal[:200],  # Truncate long goals
             summary=summary,
             results=results
         )
-        
+
         self.memory.append(memory_entry)
-        
+
         # Limit memory size
         if len(self.memory) > self.max_memory_size:
             self.memory.pop(0)
-    
+
     def get_statistics(self) -> Dict[str, Any]:
         """Get execution statistics"""
         total_calls = sum(v for k, v in self.stats.items() if k.endswith("_calls"))
         total_success = sum(v for k, v in self.stats.items() if k.endswith("_success"))
-        
+
         tool_stats = {}
         for tool_name in self.tools.keys():
             calls = self.stats.get(f"{tool_name}_calls", 0)
             success = self.stats.get(f"{tool_name}_success", 0)
             failures = self.stats.get(f"{tool_name}_failures", 0)
-            
+
             if calls > 0:
                 tool_stats[tool_name] = {
                     "calls": calls,
@@ -1839,7 +1928,7 @@ Previous context may be available to help guide your decisions."""
                     "failures": failures,
                     "success_rate": (success / calls) * 100
                 }
-        
+
         return {
             "total_calls": total_calls,
             "total_success": total_success,
@@ -1848,16 +1937,17 @@ Previous context may be available to help guide your decisions."""
             "memory_entries": len(self.memory),
             "current_plan": self.current_plan.id if self.current_plan else None
         }
-    
+
     def clear_context(self):
         """Clear execution context"""
         self.context.clear()
         logger.info("Context cleared")
-    
+
     def clear_memory(self):
         """Clear execution memory"""
         self.memory.clear()
         logger.info("Memory cleared")
+
 
 # ============================================
 # CUSTOM TOOL EXAMPLE
