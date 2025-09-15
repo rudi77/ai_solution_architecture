@@ -16,7 +16,7 @@ async def example_fastapi_project():
         raise ValueError("Please set OPENAI_API_KEY environment variable")
     
     # Create agent
-    agent = HybridAgent(api_key=api_key, model="gpt-4.1")
+    agent = HybridAgent(api_key=api_key, model="gpt-4.1-mini")
     
     # Define goal
     goal = """
@@ -27,25 +27,22 @@ async def example_fastapi_project():
     4. Create requirements.txt with necessary dependencies
     5. Add a comprehensive README.md
     6. Initialize git repository
-    7. Create initial commit
-    8. Create GitHub repository (if gh CLI is available)
+    7. Create GitHub repository (if gh CLI is available)
+    8. Create initial commit
+    9. Push the code to the GitHub repository
     """
     
-    # Execute with function calling (autonomous mode)
+    # Execute with planning (autonomous mode)
     print("Starting FastAPI project creation...")
-    result = await agent.execute_with_function_calling(goal)
+    result = await agent.execute_with_planning(goal)
     
     # Print results
     print(f"\nExecution {'succeeded' if result['success'] else 'failed'}")
-    print(f"Summary: {result['summary']}")
-    print(f"Total iterations: {result['iterations']}")
-    
-    # Print detailed results
-    for task_result in result['results']:
-        status = "✓" if task_result['success'] else "✗"
-        print(f"  {status} {task_result['tool']}: {task_result['task_id']}")
-        if task_result.get('error'):
-            print(f"    Error: {task_result['error']}")
+    print(f"Status: {result.get('status')}")
+    print(f"Plan ID: {result.get('plan_id')}")
+    print(f"Completed steps: {result.get('completed_steps')}/{result.get('total_steps')}")
+    if result.get('plan_file'):
+        print(f"Plan saved to: {result['plan_file']}")
     
     # Print statistics
     stats = agent.get_statistics()
