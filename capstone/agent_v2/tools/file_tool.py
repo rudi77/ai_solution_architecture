@@ -18,6 +18,21 @@ class FileReadTool(Tool):
         return "Read file contents safely with size limits and encoding detection"
     
     async def execute(self, path: str, encoding: str = "utf-8", max_size_mb: int = 10, **kwargs) -> Dict[str, Any]:
+        """
+        Read file contents safely with size limits and encoding detection
+
+        Args:
+            path: The path to the file to read
+            encoding: The encoding of the file
+            max_size_mb: The maximum size of the file in MB
+
+        Returns:
+            A dictionary with the following keys:
+            - success: True if the file was read successfully, False otherwise
+            - content: The contents of the file
+            - size: The size of the file in bytes
+            - path: The path to the file
+        """
         try:
             file_path = Path(path)
             
@@ -50,6 +65,22 @@ class FileWriteTool(Tool):
         return "Write content to file with backup and safety checks"
     
     async def execute(self, path: str, content: str, backup: bool = True, **kwargs) -> Dict[str, Any]:
+        """
+        Write content to file with backup and safety checks
+
+        Args:
+            path: The path to the file to write
+            content: The content to write to the file
+            backup: Whether to backup the existing file
+
+        Returns:
+            A dictionary with the following keys:
+            - success: True if the file was written successfully, False otherwise
+            - path: The path to the file
+            - size: The size of the file in bytes
+            - backed_up: Whether the existing file was backed up
+            - error: The error message if the file was not written successfully
+        """
         try:
             file_path = Path(path)
             
