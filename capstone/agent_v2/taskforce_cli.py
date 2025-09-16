@@ -2,8 +2,8 @@
 import asyncio
 import os
 import argparse
-from conversation_manager import ConversationManager
-from hybrid_agent import HybridAgent
+from capstone.agent_v2.conversation_manager import ConversationManager
+from capstone.agent_v2.hybrid_agent import HybridAgent
 
 async def main():
     parser = argparse.ArgumentParser(description="TaskForce CLI")
@@ -22,7 +22,7 @@ async def main():
     )
 
     cm = ConversationManager(session_id="local-cli", agent=agent)
-    cm.start(args.mission)
+    await cm.start(args.mission)
 
     print("TaskForce-CLI. Type 'exit' to quit.")
     while True:
@@ -44,7 +44,7 @@ async def main():
                 print(f"[{ok}] {r['tool']} -> {str(r['result'])[:140]}")
 
         # Also print the last assistant message (if any)
-        for m in reversed(cm.history()):
+        for m in reversed(cm.history):
             if m["role"] == "assistant":
                 print(f"Agent: {m['content'][:800]}")
                 break
