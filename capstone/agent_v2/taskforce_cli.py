@@ -1,15 +1,28 @@
 # taskforce_cli.py
 import asyncio
 import os
+import argparse
 from conversation_manager import ConversationManager
 from hybrid_agent import HybridAgent
 
 async def main():
+    parser = argparse.ArgumentParser(description="TaskForce CLI")
+    parser.add_argument("--mission", type=str, default=None, help="Initial mission text")
+    parser.add_argument("--model", type=str, default=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+    parser.add_argument("--temperature", type=float, default=float(os.getenv("OPENAI_TEMPERATURE", 0.7)))
+    args = parser.parse_args()
+
     api_key = os.getenv("OPENAI_API_KEY")
-    agent = HybridAgent(api_key=api_key, enable_planning=True, plan_save_dir="./execution_plans")
+    agent = HybridAgent(
+        api_key=api_key,
+        model=args.model,
+        enable_planning=True,
+        plan_save_dir="./execution_plans",
+        temperature=args.temperature,
+    )
 
     cm = ConversationManager(session_id="local-cli", agent=agent)
-    cm.start()  # no mission yet; user will type first
+    cm.start(args.mission)
 
     print("TaskForce-CLI. Type 'exit' to quit.")
     while True:
