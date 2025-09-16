@@ -3,9 +3,8 @@
 # ============================================
 
 from abc import ABC, abstractmethod
-from ast import Dict, List, Tuple
 import inspect
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List, Tuple
 
 
 class Tool(ABC):

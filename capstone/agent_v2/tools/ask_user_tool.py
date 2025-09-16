@@ -1,9 +1,7 @@
 # ============================================
 # ASK USER TOOL (first-class)
 # ============================================
-
-from ast import Dict, List
-from typing import Any
+from typing import Any, Dict, List
 from capstone.agent_v2.tool import Tool
 
 

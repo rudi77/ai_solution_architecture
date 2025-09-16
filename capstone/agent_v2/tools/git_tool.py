@@ -2,12 +2,11 @@
 # GIT TOOL
 # ============================================
 
-from ast import Dict, Tuple
 import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Optional
+from typing import Any, Optional, Dict, Tuple
 import urllib
 
 from capstone.agent_v2.tool import Tool
@@ -175,8 +174,17 @@ class GitHubTool(Tool):
                     data_bytes = json.dumps(body).encode("utf-8")
                     headers["Content-Type"] = "application/json"
                 req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    return resp.getcode(), resp.read().decode("utf-8")
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        return resp.getcode(), resp.read().decode("utf-8")
+                except urllib.error.HTTPError as e:
+                    try:
+                        detail = e.read().decode("utf-8")
+                    except Exception:
+                        detail = str(e)
+                    return e.code, detail
+                except urllib.error.URLError as e:
+                    return 0, f"URLError: {e.reason}"
             
             if action == "create_repo":
                 repo_name = kwargs.get("name")
@@ -194,13 +202,24 @@ class GitHubTool(Tool):
                     payload = json.loads(text) if text else {}
                 except Exception:
                     payload = {"raw": text}
+                error_msg = None
+                if not ok:
+                    # Surface useful validation errors (422) or auth issues
+                    base_msg = payload.get("message") if isinstance(payload, dict) else None
+                    errors = payload.get("errors") if isinstance(payload, dict) else None
+                    if status == 422 and errors:
+                        error_msg = f"Validation failed: {errors}"
+                    elif status in (401, 403):
+                        error_msg = base_msg or "Authentication/authorization failed. Check GITHUB_TOKEN scopes."
+                    else:
+                        error_msg = base_msg or text or f"HTTP {status}"
                 return {
                     "success": ok,
                     "repo_name": repo_name,
                     "response_status": status,
-                    "repo_full_name": payload.get("full_name"),
-                    "repo_html_url": payload.get("html_url"),
-                    "error": None if ok else payload.get("message", text)
+                    "repo_full_name": payload.get("full_name") if isinstance(payload, dict) else None,
+                    "repo_html_url": payload.get("html_url") if isinstance(payload, dict) else None,
+                    "error": error_msg,
                 }
             
             elif action == "list_repos":

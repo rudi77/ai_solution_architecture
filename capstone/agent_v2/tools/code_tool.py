@@ -1,9 +1,9 @@
 # ============================================
 # PYTHON CODE EXECUTION TOOL
 # ============================================
-
-from ast import Dict
-from typing import Any
+from typing import Any, Dict
+import os
+from pathlib import Path
 from capstone.agent_v2.tool import Tool
 
 
@@ -18,7 +18,7 @@ class PythonTool(Tool):
     def description(self) -> str:
         return "Execute Python code for complex logic, data processing, and custom operations. Code should set 'result' variable."
     
-    async def execute(self, code: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
+    async def execute(self, code: str, context: Dict[str, Any] = None, cwd: str = None, **kwargs) -> Dict[str, Any]:
         """
         Execute Python code in controlled namespace.
         Code has access to standard libraries and must set 'result' variable.
@@ -51,7 +51,26 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 """
         
+        # Optionally change working directory
+        original_cwd = os.getcwd()
+        cwd_path = None
+        if cwd is not None:
+            if not isinstance(cwd, str):
+                return {"success": False, "error": "cwd must be a string path"}
+            sanitized = cwd.strip()
+            if (sanitized.startswith('"') and sanitized.endswith('"')) or (sanitized.startswith("'") and sanitized.endswith("'")):
+                sanitized = sanitized[1:-1]
+            sanitized = os.path.expandvars(os.path.expanduser(sanitized))
+            if os.name == "nt":
+                sanitized = sanitized.replace("/", "\\")
+            p = Path(sanitized)
+            if not p.exists() or not p.is_dir():
+                return {"success": False, "error": f"cwd does not exist or is not a directory: {sanitized}"}
+            cwd_path = str(p)
+
         try:
+            if cwd_path:
+                os.chdir(cwd_path)
             # Execute imports
             exec(import_code, safe_namespace)
             
@@ -84,5 +103,11 @@ from typing import Dict, List, Any, Optional
                 "success": False,
                 "error": str(e),
                 "type": type(e).__name__,
-                "traceback": traceback.format_exc()
+                "traceback": traceback.format_exc(),
+                "cwd": cwd_path or original_cwd,
             }
+        finally:
+            try:
+                os.chdir(original_cwd)
+            except Exception:
+                pass
