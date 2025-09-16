@@ -42,6 +42,43 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
+# CONFIG & PROMPTS (policy)
+# ============================================
+
+@dataclass
+class AgentConfig:
+    """Lightweight agent configuration (policy, not transport)."""
+    model: str = "gpt-4.1-mini"
+    temperature: float = 0.7
+    tool_profile: Optional[str] = None
+
+
+class PromptLibrary:
+    """Reusable system prompt builder."""
+
+    @staticmethod
+    def build_system_prompt(memory_ctx: str, config: 'AgentConfig') -> str:
+        base = (
+            "You are TaskForce Agent — a pragmatic, tool-using assistant for software and DevOps tasks.\n\n"
+            "## Mission & Goals\n"
+            "- Break goals into minimal, verifiable steps.\n"
+            "- Prefer simple, deterministic actions that leave useful artifacts.\n\n"
+            "## Tool Use Policy\n"
+            "- Only call tools when necessary and with precise parameters.\n"
+            "- Validate preconditions.\n"
+            "- After each tool call: summarize briefly and plan the next step.\n\n"
+            "## Ask-User Protocol\n"
+            "- If missing required info, call the ask_user tool with: question and optional missing list.\n\n"
+            "## Output\n"
+            "- Keep responses short and factual.\n\n"
+            "## Safety\n"
+            "- Never run destructive commands. Prefer idempotent operations.\n"
+        )
+        if memory_ctx:
+            base += f"\nPrevious execution context:\n{memory_ctx}\n"
+        return base
+
+# ============================================
 # PLANNING COMPONENTS
 # ============================================
 
@@ -1226,6 +1263,35 @@ class GitHubTool(Tool):
             return {"success": False, "error": str(e)}
 
 # ============================================
+# ASK USER TOOL (first-class)
+# ============================================
+
+class AskUserTool(Tool):
+    """Model-invoked prompt to request missing info from a human."""
+
+    @property
+    def name(self) -> str:
+        return "ask_user"
+
+    @property
+    def description(self) -> str:
+        return "Ask the user for missing info to proceed. Returns a structured question payload."
+
+    @property
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "One clear question"},
+                "missing": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["question"],
+        }
+
+    async def execute(self, question: str, missing: List[str] = None, **kwargs) -> Dict[str, Any]:
+        return {"success": True, "question": question, "missing": missing or []}
+
+# ============================================
 # ORCHESTRATION COMPONENTS
 # ============================================
 
@@ -1265,13 +1331,18 @@ class HybridAgent:
         max_retries: int = 3,
         enable_memory: bool = True,
         enable_planning: bool = True,
-        plan_save_dir: str = "./plans"
+        plan_save_dir: str = "./plans",
+        *,
+        temperature: float = 0.7,
+        tool_profile: Optional[str] = None,
     ):
         self.client = openai.AsyncOpenAI(api_key=api_key)
         self.model = model
         self.max_retries = max_retries
         self.enable_memory = enable_memory
         self.enable_planning = enable_planning
+        self.temperature = float(temperature)
+        self.config = AgentConfig(model=self.model, temperature=self.temperature, tool_profile=tool_profile)
 
         # Tool registry
         self.tools: Dict[str, Tool] = {}
@@ -1297,6 +1368,14 @@ class HybridAgent:
 
         # Statistics
         self.stats = defaultdict(int)
+
+    def bootstrap_turn(self, mission: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return initial system message and optional mission/user message."""
+        system_prompt = PromptLibrary.build_system_prompt(self._get_memory_context(), self.config)
+        msgs: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        if mission:
+            msgs.append({"role": "user", "content": mission})
+        return msgs
 
     def _register_default_tools(self):
         """Register the default tool set"""
@@ -1325,6 +1404,10 @@ class HybridAgent:
 
         for tool in default_tools:
             self.register_tool(tool)
+
+        # Ensure ask_user tool exists
+        if "ask_user" not in self.tools:
+            self.register_tool(AskUserTool())
 
     def register_tool(self, tool: Tool):
         """Register a new tool"""
@@ -1398,55 +1481,14 @@ class HybridAgent:
                     messages=messages,
                     tools=self.get_tools_schema(),
                     tool_choice="auto",
-                    temperature=0.7
+                    temperature=self.temperature
                 )
 
                 message = response.choices[0].message
                 messages.append(message.dict())
 
-                # No tool calls -> maybe model is done or is asking the user
+                # No tool calls -> model turn is complete
                 if not getattr(message, "tool_calls", None):
-                    # Try to parse {"ask_user": {...}} convention from assistant content
-                    content_text = (message.content or "")
-                    content_stripped = content_text.strip()
-                    if content_stripped.startswith("{") and "ask_user" in content_stripped:
-                        try:
-                            data = json.loads(content_stripped)
-                        except json.JSONDecodeError:
-                            # Handle cases where multiple JSON objects are concatenated
-                            data = None
-                            depth = 0
-                            start_idx = None
-                            in_string = False
-                            escape = False
-                            for idx, ch in enumerate(content_stripped):
-                                if escape:
-                                    escape = False
-                                    continue
-                                if ch == "\\":
-                                    escape = True
-                                    continue
-                                if ch == '"' and not escape:
-                                    in_string = not in_string
-                                if in_string:
-                                    continue
-                                if ch == "{":
-                                    if depth == 0:
-                                        start_idx = idx
-                                    depth += 1
-                                elif ch == "}":
-                                    depth -= 1
-                                    if depth == 0 and start_idx is not None:
-                                        first_json = content_stripped[start_idx:idx+1]
-                                        try:
-                                            data = json.loads(first_json)
-                                        except Exception:
-                                            data = None
-                                        break
-                        if isinstance(data, dict) and "ask_user" in data:
-                            q = data["ask_user"].get("question") or ""
-                            needs_user_input = True
-                            pending_question = q
                     logger.info("No more tool calls issued by the model")
                     break
 
@@ -1456,6 +1498,26 @@ class HybridAgent:
                     tool_args = json.loads(tool_call.function.arguments)
 
                     logger.info(f"Calling {tool_name} with args: {tool_args}")
+
+                    # First-class ask_user handling
+                    if tool_name == "ask_user":
+                        q = str(tool_args.get("question") or "").strip()
+                        pending_question = q or pending_question
+                        needs_user_input = True
+                        # Echo structured payload via tool role for conversation integrity
+                        ask_payload = {"success": True, "question": q, "missing": tool_args.get("missing", [])}
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(ask_payload)
+                        })
+                        results.append(TaskResult(
+                            task_id=tool_call.id,
+                            tool=tool_name,
+                            success=True,
+                            result=ask_payload,
+                        ))
+                        continue
 
                     # Execute with retry
                     task_result = await self._execute_tool_with_retry(
