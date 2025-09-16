@@ -22,6 +22,14 @@ from enum import Enum
 import uuid
 import shutil
 
+from capstone.agent_v2.tool import Tool
+from capstone.agent_v2.tools.ask_user_tool import AskUserTool
+from capstone.agent_v2.tools.code_tool import PythonTool
+from capstone.agent_v2.tools.file_tool import FileReadTool, FileWriteTool
+from capstone.agent_v2.tools.git_tool import GitHubTool, GitTool
+from capstone.agent_v2.tools.shell_tool import PowerShellTool
+from capstone.agent_v2.tools.web_tool import WebFetchTool, WebSearchTool
+
 # Optional imports
 try:
     import aiohttp
@@ -555,741 +563,6 @@ Return the same JSON structure as before."""
         
         return ExecutionPlan.from_dict(data)
 
-# ============================================
-# BASE TOOL INTERFACE
-# ============================================
-
-class Tool(ABC):
-    """Base class for all tools"""
-    
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        pass
-    
-    @property
-    @abstractmethod
-    def description(self) -> str:
-        pass
-    
-    @property
-    def parameters_schema(self) -> Dict[str, Any]:
-        """Override to provide custom parameter schema for OpenAI function calling"""
-        return self._generate_schema_from_signature()
-    
-    def _generate_schema_from_signature(self) -> Dict[str, Any]:
-        """Auto-generate parameter schema from execute method signature"""
-        sig = inspect.signature(self.execute)
-        properties = {}
-        required = []
-        
-        for param_name, param in sig.parameters.items():
-            if param_name in ['self', 'kwargs']:
-                continue
-            
-            # Determine parameter type
-            param_type = "string"  # Default
-            param_desc = f"Parameter {param_name}"
-            
-            if param.annotation != inspect.Parameter.empty:
-                if param.annotation == int:
-                    param_type = "integer"
-                elif param.annotation == bool:
-                    param_type = "boolean"
-                elif param.annotation == float:
-                    param_type = "number"
-                elif param.annotation == Dict or param.annotation == dict:
-                    param_type = "object"
-                elif param.annotation == List or param.annotation == list:
-                    param_type = "array"
-            
-            properties[param_name] = {
-                "type": param_type,
-                "description": param_desc
-            }
-            
-            # Check if required
-            if param.default == inspect.Parameter.empty:
-                required.append(param_name)
-        
-        return {
-            "type": "object",
-            "properties": properties,
-            "required": required
-        }
-    
-    @abstractmethod
-    async def execute(self, **kwargs) -> Dict[str, Any]:
-        pass
-    
-    def validate_params(self, **kwargs) -> Tuple[bool, Optional[str]]:
-        """Validate parameters before execution"""
-        sig = inspect.signature(self.execute)
-        
-        for param_name, param in sig.parameters.items():
-            if param_name in ['self', 'kwargs']:
-                continue
-            
-            if param.default == inspect.Parameter.empty and param_name not in kwargs:
-                return False, f"Missing required parameter: {param_name}"
-        
-        return True, None
-
-# ============================================
-# FILE SYSTEM TOOLS
-# ============================================
-
-class FileReadTool(Tool):
-    """Safe file reading with size limits"""
-    
-    @property
-    def name(self) -> str:
-        return "file_read"
-    
-    @property
-    def description(self) -> str:
-        return "Read file contents safely with size limits and encoding detection"
-    
-    async def execute(self, path: str, encoding: str = "utf-8", max_size_mb: int = 10, **kwargs) -> Dict[str, Any]:
-        try:
-            file_path = Path(path)
-            
-            if not file_path.exists():
-                return {"success": False, "error": f"File not found: {path}"}
-            
-            file_size_mb = file_path.stat().st_size / (1024 * 1024)
-            if file_size_mb > max_size_mb:
-                return {"success": False, "error": f"File too large: {file_size_mb:.2f}MB > {max_size_mb}MB"}
-            
-            content = file_path.read_text(encoding=encoding)
-            return {
-                "success": True,
-                "content": content,
-                "size": len(content),
-                "path": str(file_path.absolute())
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-class FileWriteTool(Tool):
-    """Safe file writing with backup option"""
-    
-    @property
-    def name(self) -> str:
-        return "file_write"
-    
-    @property
-    def description(self) -> str:
-        return "Write content to file with backup and safety checks"
-    
-    async def execute(self, path: str, content: str, backup: bool = True, **kwargs) -> Dict[str, Any]:
-        try:
-            file_path = Path(path)
-            
-            # Backup existing file
-            if backup and file_path.exists():
-                backup_path = file_path.with_suffix(file_path.suffix + ".bak")
-                backup_path.write_text(file_path.read_text(), encoding='utf-8')
-            
-            # Create parent directories
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Write content
-            file_path.write_text(content, encoding='utf-8')
-            
-            return {
-                "success": True,
-                "path": str(file_path.absolute()),
-                "size": len(content),
-                "backed_up": backup and file_path.exists()
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-# ============================================
-# GIT TOOL
-# ============================================
-
-class GitTool(Tool):
-    """Comprehensive Git operations"""
-    
-    @property
-    def name(self) -> str:
-        return "git"
-    
-    @property
-    def description(self) -> str:
-        return "Execute git operations (init, add, commit, push, status, clone, etc.)"
-    
-    @property
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["init", "add", "commit", "push", "status", "clone", "remote"],
-                    "description": "Git operation to perform"
-                },
-                "repo_path": {
-                    "type": "string",
-                    "description": "Repository path (default: current directory)"
-                },
-                "message": {
-                    "type": "string",
-                    "description": "Commit message (for commit operation)"
-                },
-                "files": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Files to add (for add operation)"
-                },
-                "url": {
-                    "type": "string",
-                    "description": "Remote URL (for remote/clone operations)"
-                },
-                "branch": {
-                    "type": "string",
-                    "description": "Branch name"
-                }
-            },
-            "required": ["operation"]
-        }
-    
-    async def execute(self, operation: str, repo_path: str = ".", **kwargs) -> Dict[str, Any]:
-        try:
-            repo_path = Path(repo_path)
-            
-            # Build command based on operation
-            if operation == "init":
-                cmd = ["git", "init", "-b", kwargs.get("branch", "main")]
-            elif operation == "add":
-                files = kwargs.get("files", ["."])
-                cmd = ["git", "add"] + files
-            elif operation == "commit":
-                message = kwargs.get("message", "Commit via HybridAgent")
-                cmd = ["git", "commit", "-m", message]
-            elif operation == "push":
-                remote = kwargs.get("remote", "origin")
-                branch = kwargs.get("branch", "main")
-                cmd = ["git", "push", "-u", remote, branch]
-            elif operation == "status":
-                cmd = ["git", "status", "--short"]
-            elif operation == "clone":
-                url = kwargs.get("url")
-                if not url:
-                    return {"success": False, "error": "URL required for clone"}
-                cmd = ["git", "clone", url, str(repo_path)]
-            elif operation == "remote":
-                action = kwargs.get("action", "add")
-                if action == "add":
-                    cmd = ["git", "remote", "add", kwargs.get("name", "origin"), kwargs["url"]]
-                else:
-                    cmd = ["git", "remote", "-v"]
-            else:
-                return {"success": False, "error": f"Unknown operation: {operation}"}
-            
-            # Execute command
-            result = subprocess.run(
-                cmd,
-                cwd=repo_path if operation != "clone" else ".",
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            
-            return {
-                "success": result.returncode == 0,
-                "output": result.stdout,
-                "error": result.stderr if result.returncode != 0 else None,
-                "command": " ".join(cmd)
-            }
-            
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Command timed out"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-# ============================================
-# SHELL TOOL
-# ============================================
-
-class ShellTool(Tool):
-    """Execute shell commands with safety limits"""
-    
-    @property
-    def name(self) -> str:
-        return "shell"
-    
-    @property
-    def description(self) -> str:
-        return "Execute shell commands with timeout and safety limits"
-    
-    async def execute(self, command: str, timeout: int = 30, cwd: str = None, **kwargs) -> Dict[str, Any]:
-        try:
-            # Safety check - block dangerous commands
-            dangerous_patterns = [
-                "rm -rf /", "rm -rf /*", 
-                "dd if=/dev/zero", "dd if=/dev/random",
-                "format c:", "del /f /s /q",
-                ":(){ :|:& };:",  # Fork bomb
-                "> /dev/sda",
-                "mkfs.",
-            ]
-            
-            if any(pattern in command.lower() for pattern in dangerous_patterns):
-                return {"success": False, "error": "Command blocked for safety reasons"}
-            
-            # Execute command
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
-            )
-            
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout
-                )
-                
-                return {
-                    "success": process.returncode == 0,
-                    "stdout": stdout.decode() if stdout else "",
-                    "stderr": stderr.decode() if stderr else "",
-                    "returncode": process.returncode,
-                    "command": command
-                }
-            except asyncio.TimeoutError:
-                process.kill()
-                return {"success": False, "error": f"Command timed out after {timeout}s"}
-                
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-# ============================================
-# Power Shell Tool
-# ============================================
-
-class PowerShellTool(Tool):
-    """Execute PowerShell commands with safety limits"""
-    
-    @property
-    def name(self) -> str:
-        return "powershell"
-    
-    @property
-    def description(self) -> str:
-        return "Execute PowerShell commands with timeout and safety limits"
-
-    async def execute(self, command: str, timeout: int = 30, cwd: str = None, **kwargs) -> Dict[str, Any]:
-
-        # Safety check - block dangerous powershell commands (case-insensitive)
-        dangerous_patterns = [
-            "Remove-Item -Path * -Force",
-            "Remove-Item -Path * -Recurse",
-            "Remove-Item -Path * -Recurse -Force",
-            "Remove-Item -Path * -Recurse -Force",
-        ]
-        lower_cmd = command.lower()
-        lower_patterns = [p.lower() for p in dangerous_patterns]
-        if any(pattern in lower_cmd for pattern in lower_patterns):
-            return {"success": False, "error": "Command blocked for safety reasons"}
-
-        # Resolve PowerShell executable
-        shell_exe = shutil.which("pwsh") or shutil.which("powershell")
-        if not shell_exe:
-            return {"success": False, "error": "No PowerShell executable found (pwsh/powershell)"}
-
-        try:
-            # Execute command explicitly via PowerShell
-            process = await asyncio.create_subprocess_exec(
-                shell_exe,
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd
-            )
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-            
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout
-            )
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-            
-        return {
-            "success": process.returncode == 0,
-            "stdout": stdout.decode() if stdout else "",
-            "stderr": stderr.decode() if stderr else "",
-            "returncode": process.returncode,
-            "command": command
-        }
-
-
-# ============================================
-# PYTHON CODE EXECUTION TOOL
-# ============================================
-
-class PythonTool(Tool):
-    """Execute Python code for complex operations"""
-    
-    @property
-    def name(self) -> str:
-        return "python"
-    
-    @property
-    def description(self) -> str:
-        return "Execute Python code for complex logic, data processing, and custom operations. Code should set 'result' variable."
-    
-    async def execute(self, code: str, context: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
-        """
-        Execute Python code in controlled namespace.
-        Code has access to standard libraries and must set 'result' variable.
-        """
-        
-        # Create safe namespace
-        safe_namespace = {
-            "__builtins__": {
-                # Basic functions
-                "print": print, "len": len, "range": range, "enumerate": enumerate,
-                "str": str, "int": int, "float": float, "bool": bool,
-                "list": list, "dict": dict, "set": set, "tuple": tuple,
-                "sum": sum, "min": min, "max": max, "abs": abs,
-                "round": round, "sorted": sorted, "reversed": reversed,
-                "zip": zip, "map": map, "filter": filter,
-                "any": any, "all": all, "isinstance": isinstance,
-                "open": open,  # Use with caution
-                "__import__": __import__,
-            },
-            "context": context or {},
-        }
-        
-        # Import common libraries
-        import_code = """
-import os, sys, json, re, pathlib, shutil
-import subprocess, datetime, time, random
-import base64, hashlib, tempfile, csv
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
-"""
-        
-        try:
-            # Execute imports
-            exec(import_code, safe_namespace)
-            
-            # Execute user code
-            exec(code, safe_namespace)
-            
-            # Extract result
-            result_value = safe_namespace.get('result', None)
-            
-            # Get all user-defined variables
-            user_vars = {
-                k: v for k, v in safe_namespace.items()
-                if not k.startswith('_') 
-                and k not in ['os', 'sys', 'json', 're', 'pathlib', 'shutil',
-                             'subprocess', 'datetime', 'time', 'random',
-                             'base64', 'hashlib', 'tempfile', 'csv', 'Path',
-                             'timedelta', 'Dict', 'List', 'Any', 'Optional', 'context']
-            }
-            
-            return {
-                "success": True,
-                "result": result_value,
-                "variables": user_vars,
-                "context_updated": safe_namespace.get('context', {})
-            }
-            
-        except Exception as e:
-            import traceback
-            return {
-                "success": False,
-                "error": str(e),
-                "type": type(e).__name__,
-                "traceback": traceback.format_exc()
-            }
-
-# ============================================
-# WEB TOOLS
-# ============================================
-
-class WebSearchTool(Tool):
-    """Web search using DuckDuckGo (no API key required)"""
-    
-    @property
-    def name(self) -> str:
-        return "web_search"
-    
-    @property
-    def description(self) -> str:
-        return "Search the web using DuckDuckGo"
-    
-    async def execute(self, query: str, num_results: int = 5, **kwargs) -> Dict[str, Any]:
-        if not aiohttp:
-            return {"success": False, "error": "aiohttp not installed"}
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                params = {
-                    "q": query,
-                    "format": "json",
-                    "no_html": "1",
-                    "skip_disambig": "1"
-                }
-                
-                async with session.get(
-                    "https://api.duckduckgo.com/",
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    data = await response.json()
-                    
-                    results = []
-                    
-                    # Extract abstract if available
-                    if data.get("Abstract"):
-                        results.append({
-                            "title": data.get("Heading", ""),
-                            "snippet": data["Abstract"],
-                            "url": data.get("AbstractURL", "")
-                        })
-                    
-                    # Extract related topics
-                    for topic in data.get("RelatedTopics", [])[:num_results]:
-                        if isinstance(topic, dict) and "Text" in topic:
-                            results.append({
-                                "title": topic.get("Text", "").split(" - ")[0][:50],
-                                "snippet": topic.get("Text", ""),
-                                "url": topic.get("FirstURL", "")
-                            })
-                    
-                    return {
-                        "success": True,
-                        "query": query,
-                        "results": results[:num_results],
-                        "count": len(results)
-                    }
-                    
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-class WebFetchTool(Tool):
-    """Fetch content from URLs"""
-    
-    @property
-    def name(self) -> str:
-        return "web_fetch"
-    
-    @property
-    def description(self) -> str:
-        return "Fetch and extract content from a URL"
-    
-    async def execute(self, url: str, **kwargs) -> Dict[str, Any]:
-        if not aiohttp:
-            return {"success": False, "error": "aiohttp not installed"}
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=15)
-                ) as response:
-                    content = await response.text()
-                    
-                    # Simple HTML extraction
-                    if "text/html" in response.headers.get("Content-Type", ""):
-                        # Remove HTML tags (basic)
-                        text = re.sub('<script[^>]*>.*?</script>', '', content, flags=re.DOTALL)
-                        text = re.sub('<style[^>]*>.*?</style>', '', content, flags=re.DOTALL)
-                        text = re.sub('<[^>]+>', '', text)
-                        text = ' '.join(text.split())[:5000]  # Limit size
-                    else:
-                        text = content[:5000]
-                    
-                    return {
-                        "success": True,
-                        "url": url,
-                        "status": response.status,
-                        "content": text,
-                        "content_type": response.headers.get("Content-Type", ""),
-                        "length": len(content)
-                    }
-                    
-        except asyncio.TimeoutError:
-            return {"success": False, "error": "Request timed out"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-# ============================================
-# GITHUB TOOL
-# ============================================
-
-class GitHubTool(Tool):
-    """GitHub operations using GitHub REST API (requires GITHUB_TOKEN)"""
-    
-    @property
-    def name(self) -> str:
-        return "github"
-    
-    @property
-    def description(self) -> str:
-        return "GitHub operations (create/list/delete repos) using REST API. Requires GITHUB_TOKEN."
-    
-    @property
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["create_repo", "list_repos", "delete_repo"],
-                    "description": "GitHub action to perform"
-                },
-                "name": {
-                    "type": "string",
-                    "description": "Repository name"
-                },
-                "private": {
-                    "type": "boolean",
-                    "description": "Make repository private"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Repository description"
-                }
-            },
-            "required": ["action"]
-        }
-    
-    async def execute(self, action: str, **kwargs) -> Dict[str, Any]:
-        try:
-            token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
-            if not token:
-                return {"success": False, "error": "GITHUB_TOKEN environment variable is not set"}
-            
-            api_base = "https://api.github.com"
-            
-            def request(method: str, url: str, body: Optional[Dict[str, Any]] = None) -> Tuple[int, str]:
-                headers = {
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {token}",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                    "User-Agent": "HybridAgent"
-                }
-                data_bytes = None
-                if body is not None:
-                    data_bytes = json.dumps(body).encode("utf-8")
-                    headers["Content-Type"] = "application/json"
-                req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    return resp.getcode(), resp.read().decode("utf-8")
-            
-            if action == "create_repo":
-                repo_name = kwargs.get("name")
-                if not repo_name:
-                    return {"success": False, "error": "Repository name required"}
-                body = {
-                    "name": repo_name,
-                    "private": bool(kwargs.get("private", False)),
-                    "description": kwargs.get("description") or ""
-                }
-                status, text = request("POST", f"{api_base}/user/repos", body)
-                ok = status in (200, 201)
-                payload = {}
-                try:
-                    payload = json.loads(text) if text else {}
-                except Exception:
-                    payload = {"raw": text}
-                return {
-                    "success": ok,
-                    "repo_name": repo_name,
-                    "response_status": status,
-                    "repo_full_name": payload.get("full_name"),
-                    "repo_html_url": payload.get("html_url"),
-                    "error": None if ok else payload.get("message", text)
-                }
-            
-            elif action == "list_repos":
-                status, text = request("GET", f"{api_base}/user/repos?per_page=20")
-                ok = status == 200
-                repos = []
-                try:
-                    data = json.loads(text) if text else []
-                    repos = [item.get("full_name") for item in data if isinstance(item, dict)]
-                except Exception:
-                    repos = []
-                return {
-                    "success": ok,
-                    "repos": repos,
-                    "response_status": status,
-                    "error": None if ok else text
-                }
-            
-            elif action == "delete_repo":
-                full_name = kwargs.get("name")
-                if not full_name or "/" not in full_name:
-                    return {"success": False, "error": "Repository name must be in 'owner/repo' format"}
-                status, text = request("DELETE", f"{api_base}/repos/{full_name}")
-                ok = status in (200, 202, 204)
-                return {
-                    "success": ok,
-                    "repo_name": full_name,
-                    "response_status": status,
-                    "error": None if ok else text
-                }
-            
-            else:
-                return {"success": False, "error": f"Unknown action: {action}"}
-        except urllib.error.HTTPError as e:
-            try:
-                detail = e.read().decode("utf-8")
-            except Exception:
-                detail = str(e)
-            return {"success": False, "error": f"HTTPError {e.code}: {detail}"}
-        except urllib.error.URLError as e:
-            return {"success": False, "error": f"URLError: {e.reason}"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-# ============================================
-# ASK USER TOOL (first-class)
-# ============================================
-
-class AskUserTool(Tool):
-    """Model-invoked prompt to request missing info from a human."""
-
-    @property
-    def name(self) -> str:
-        return "ask_user"
-
-    @property
-    def description(self) -> str:
-        return "Ask the user for missing info to proceed. Returns a structured question payload."
-
-    @property
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "question": {"type": "string", "description": "One clear question"},
-                "missing": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["question"],
-        }
-
-    async def execute(self, question: str, missing: List[str] = None, **kwargs) -> Dict[str, Any]:
-        return {"success": True, "question": question, "missing": missing or []}
 
 # ============================================
 # ORCHESTRATION COMPONENTS
@@ -1400,14 +673,13 @@ class HybridAgent:
 
             # GitHub operations
             GitHubTool(),
+
+            AskUserTool(),
         ]
 
         for tool in default_tools:
             self.register_tool(tool)
 
-        # Ensure ask_user tool exists
-        if "ask_user" not in self.tools:
-            self.register_tool(AskUserTool())
 
     def register_tool(self, tool: Tool):
         """Register a new tool"""
@@ -1575,6 +847,172 @@ class HybridAgent:
         }
 
     # ------------- Planning path stays unchanged -------------
+    async def execute(self, goal: str, messages: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """Unified execute: always create a plan first and then execute it.
+
+        If during execution an `ask_user` step is encountered, return early with
+        needs_user_input=True and the question to present to the user.
+        """
+
+        needs_user_input = False
+        pending_question: Optional[str] = None
+        convo_messages: List[Dict[str, Any]] = list(messages) if messages else []
+
+        if not self.plan_manager:
+            # Initialize planning on-the-fly if it was disabled
+            self.plan_manager = PlanManager(
+                model_client=self.client,
+                model=self.model,
+                available_tools=self.tools,
+                save_dir="./plans"
+            )
+
+        try:
+            # Create initial plan
+            logger.info(f"Creating execution plan for: {goal}")
+            # Optionally enrich context with prior messages
+            planning_context = dict(self.context)
+            if convo_messages:
+                planning_context["messages"] = convo_messages[-10:]
+
+            plan = await self.plan_manager.create_plan(goal, planning_context)
+            self.current_plan = plan
+
+            # Agent controls the execution loop
+            while plan.status == "active":
+                # Get next executable steps
+                next_steps = self.plan_manager.get_next_steps(plan)
+
+                if not next_steps:
+                    # Check completion or blocking
+                    if self._all_steps_complete(plan):
+                        plan.status = "completed"
+                        break
+
+                    # Check for blocked steps
+                    blocked_steps = self.plan_manager.get_blocked_steps(plan)
+                    if blocked_steps:
+                        logger.warning(f"{len(blocked_steps)} steps blocked by failures")
+
+                        # Decide on replanning
+                        if self._should_replan(plan):
+                            execution_state = self._get_execution_state(plan)
+                            plan = await self.plan_manager.replan(plan, execution_state)
+                            self.current_plan = plan
+                            continue
+                        else:
+                            plan.status = "failed"
+                            break
+
+                    # No more steps available
+                    break
+
+                # Execute steps (parallel and sequential)
+                parallel_steps = [s for s in next_steps if s.can_parallel]
+                sequential_steps = [s for s in next_steps if not s.can_parallel]
+
+                # Execute parallel steps
+                if parallel_steps:
+                    tasks = [self._execute_step(step) for step in parallel_steps]
+                    await asyncio.gather(*tasks)
+
+                    # After execution, detect any ask_user in this batch
+                    for step in parallel_steps:
+                        if step.tool == "ask_user" and step.result and step.result.get("success"):
+                            pending_question = str(step.result.get("question") or "").strip() or pending_question
+                            if pending_question:
+                                needs_user_input = True
+                                # Echo structured payload via tool role for conversation integrity
+                                ask_payload = {"success": True, "question": pending_question, "missing": step.result.get("missing", [])}
+                                convo_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": step.id,
+                                    "content": json.dumps(ask_payload)
+                                })
+                                break
+
+                    if needs_user_input:
+                        # Save current state before returning
+                        plan.update_stats()
+                        await self.plan_manager.save_plan(plan)
+                        break
+
+                # Execute sequential steps
+                if not needs_user_input:
+                    for step in sequential_steps:
+                        await self._execute_step(step)
+
+                        # Check for user question
+                        if step.tool == "ask_user" and step.result and step.result.get("success"):
+                            pending_question = str(step.result.get("question") or "").strip() or pending_question
+                            needs_user_input = True if pending_question else False
+                            if needs_user_input:
+                                ask_payload = {"success": True, "question": pending_question, "missing": step.result.get("missing", [])}
+                                convo_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": step.id,
+                                    "content": json.dumps(ask_payload)
+                                })
+                            # Save current state before returning
+                            plan.update_stats()
+                            await self.plan_manager.save_plan(plan)
+                            break
+
+                        # Check for critical failure
+                        if step.state == StepState.FAILED and step.required:
+                            if self._should_replan(plan):
+                                execution_state = self._get_execution_state(plan)
+                                plan = await self.plan_manager.replan(plan, execution_state)
+                                self.current_plan = plan
+                                break
+
+                if needs_user_input:
+                    break
+
+                # Update and save plan after batch
+                plan.update_stats()
+                await self.plan_manager.save_plan(plan)
+
+            # Store in memory
+            if self.enable_memory:
+                self._store_memory(goal, [
+                    TaskResult(
+                        task_id=step.id,
+                        tool=step.tool,
+                        success=step.state == StepState.COMPLETED,
+                        result=step.result or {},
+                        error=step.error
+                    )
+                    for step in plan.steps
+                ])
+
+            return {
+                "success": plan.status == "completed",
+                "goal": goal,
+                "plan_id": plan.id,
+                "status": plan.status,
+                "completed_steps": plan.completed_steps,
+                "failed_steps": plan.failed_steps,
+                "total_steps": plan.total_steps,
+                "context": plan.context,
+                "plan_file": f"{self.plan_manager.save_dir}/plan_{plan.id}_v{plan.version}.md",
+                "stats": dict(self.stats),
+                "needs_user_input": needs_user_input,
+                "question": pending_question,
+                "messages": convo_messages,
+            }
+
+        except Exception as e:
+            logger.error(f"Unified execution failed: {e}")
+            # As a last resort, keep legacy behavior
+            legacy = await self.execute_with_function_calling(goal)
+            # Promote user prompt fields if present
+            return {
+                **legacy,
+                "needs_user_input": legacy.get("needs_user_input", False),
+                "question": legacy.get("question"),
+            }
+
     async def execute_with_planning(self, goal: str) -> Dict[str, Any]:
         """Execute goal using planning system - Agent owns the execution loop"""
 
@@ -1938,7 +1376,7 @@ Previous context may be available to help guide your decisions."""
             "messages": result.get("messages"),
         }
 
-    async def resume_plan(self, plan_id: str, version: Optional[int] = None) -> Dict[str, Any]:
+    async def resume_plan(self, plan_id: str, version: Optional[int] = None, messages: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """Resume execution of an existing plan"""
 
         if not self.plan_manager:
@@ -1953,7 +1391,7 @@ Previous context may be available to help guide your decisions."""
         self.current_plan = plan
 
         # Continue execution from current state
-        return await self.execute_with_planning(plan.goal)
+        return await self.execute(plan.goal, messages=messages)
 
     def _store_memory(self, goal: str, results: List[TaskResult]):
         """Store execution in memory"""
