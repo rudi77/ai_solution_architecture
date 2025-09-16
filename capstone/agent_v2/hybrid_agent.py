@@ -22,8 +22,8 @@ from enum import Enum
 import uuid
 import shutil
 
+#from capstone.agent_v2.tool import Tool
 from capstone.agent_v2.tool import Tool
-from capstone.agent_v2.tools.ask_user_tool import AskUserTool
 from capstone.agent_v2.tools.code_tool import PythonTool
 from capstone.agent_v2.tools.file_tool import FileReadTool, FileWriteTool
 from capstone.agent_v2.tools.git_tool import GitHubTool, GitTool
@@ -75,8 +75,6 @@ class PromptLibrary:
             "- Only call tools when necessary and with precise parameters.\n"
             "- Validate preconditions.\n"
             "- After each tool call: summarize briefly and plan the next step.\n\n"
-            "## Ask-User Protocol\n"
-            "- If missing required info, call the ask_user tool with: question and optional missing list.\n\n"
             "## Output\n"
             "- Keep responses short and factual.\n\n"
             "## Safety\n"
@@ -325,7 +323,10 @@ Create a comprehensive plan with:
 
 IMPORTANT:
 - For each step, the 'parameters' MUST strictly follow the tool's parameters_schema above, including all 'required' fields.
-- For the 'powershell' tool specifically, 'parameters' MUST include a 'command' string with a valid PowerShell command.
+- For the 'powershell' tool specifically:
+  - Use valid PowerShell syntax (not bash). Examples: New-Item -ItemType Directory -Path "C:\\path"; Set-Content; Get-ChildItem
+  - Always include a 'command' string that is executable under PowerShell
+  - Provide a 'cwd' when file operations depend on a working directory (default repo root if unsure)
 
 Return a JSON object with this structure:
 {{
@@ -673,8 +674,6 @@ class HybridAgent:
 
             # GitHub operations
             GitHubTool(),
-
-            AskUserTool(),
         ]
 
         for tool in default_tools:
@@ -723,392 +722,221 @@ class HybridAgent:
         """Public accessor for external conversation orchestrators."""
         return self._get_memory_context(limit=limit)
 
-    # -------- NEW: message-first execution API --------
-    async def run_messages(
+    # -------- Minimal next-action decision helper --------
+    async def _decide_next_action(
         self,
-        messages: List[Dict[str, Any]],
-        max_iterations: int = 10
+        step: 'PlanStep',
+        plan: 'ExecutionPlan',
+        mission: Optional[str],
+        messages: List[Dict[str, str]],
     ) -> Dict[str, Any]:
-        """
-        Execute using OpenAI function calling given an existing message history.
-        The Agent does NOT create system/user messages itself.
+        """Ask the model for the next action in strict JSON."""
+        tool_catalog = [
+            {
+                "name": name,
+                "description": tool.description,
+                "parameters_schema": tool.parameters_schema,
+            }
+            for name, tool in self.tools.items()
+        ]
 
-        Returns:
-          - success: bool (true if all tool calls in the last turn succeeded or no tools were needed)
-          - results: list[TaskResult as dict]
-          - messages: updated message history
-          - needs_user_input: bool
-          - question: Optional[str] if the model requested info via {"ask_user": {...}}
-        """
-        results: List[TaskResult] = []
-        iteration = 0
-        needs_user_input = False
-        pending_question: Optional[str] = None
+        system = (
+            "You are a pragmatic task executor. Prefer the simplest valid action.\n"
+            "Decide ONE action per turn, output STRICT JSON only."
+        )
 
-        while iteration < max_iterations:
-            iteration += 1
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=self.get_tools_schema(),
-                    tool_choice="auto",
-                    temperature=self.temperature
-                )
-
-                message = response.choices[0].message
-                messages.append(message.dict())
-
-                # No tool calls -> model turn is complete
-                if not getattr(message, "tool_calls", None):
-                    logger.info("No more tool calls issued by the model")
-                    break
-
-                # Execute tool calls
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
-
-                    logger.info(f"Calling {tool_name} with args: {tool_args}")
-
-                    # First-class ask_user handling
-                    if tool_name == "ask_user":
-                        q = str(tool_args.get("question") or "").strip()
-                        pending_question = q or pending_question
-                        needs_user_input = True
-                        # Echo structured payload via tool role for conversation integrity
-                        ask_payload = {"success": True, "question": q, "missing": tool_args.get("missing", [])}
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(ask_payload)
-                        })
-                        results.append(TaskResult(
-                            task_id=tool_call.id,
-                            tool=tool_name,
-                            success=True,
-                            result=ask_payload,
-                        ))
-                        continue
-
-                    # Execute with retry
-                    task_result = await self._execute_tool_with_retry(
-                        tool_name,
-                        tool_args,
-                        task_id=tool_call.id
-                    )
-
-                    results.append(task_result)
-
-                    # Update context
-                    self.context[tool_call.id] = task_result.result
-
-                    # Add tool response to conversation
-                    tool_response = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(task_result.result)
-                    }
-                    messages.append(tool_response)
-
-                    # If a critical failure occurs, stop this iteration batch
-                    if not task_result.success and "critical" in str(task_result.error).lower():
-                        logger.error(f"Critical failure: {task_result.error}")
-                        break
-
-            except Exception as e:
-                logger.error(f"Iteration {iteration} failed: {e}")
-                break
-
-        # Memory (optional, minimal): store a compact turn summary
-        if self.enable_memory and results:
-            self._store_memory("conversation_turn", results)
-
-        success_count = sum(1 for r in results if r.success)
-        return {
-            "success": success_count == len(results) if results else True,
-            "results": [
-                {
-                    "task_id": r.task_id,
-                    "tool": r.tool,
-                    "success": r.success,
-                    "result": r.result,
-                    "error": r.error,
-                    "retries": r.retries,
-                    "timestamp": r.timestamp.isoformat(),
-                }
-                for r in results
+        user_payload = {
+            "mission": mission,
+            "plan": {
+                "id": plan.id,
+                "goal": plan.goal,
+                "status": plan.status,
+                "context": plan.context,
+            },
+            "current_step": {
+                "id": step.id,
+                "description": step.description,
+                "tool": step.tool,
+                "parameters": step.parameters,
+                "required": step.required,
+                "depends_on": step.depends_on,
+            },
+            "messages": messages[-5:] if messages else [],
+            "tools": tool_catalog,
+            "response_schema": {
+                "needs_user_input": {"question": "string"},
+                "use_tool": {"name": "string", "args": {}},
+                "mark_complete": {"result": {}, "notes": "string"},
+                "fail": {"error": "string"},
+            },
+            "rules": [
+                "If you need info from user, ONLY set needs_user_input.question",
+                "If a tool is required, set use_tool with correct args",
+                "If no tool needed, set mark_complete",
+                "Return VALID JSON only, no markdown",
             ],
-            "messages": messages,
-            "needs_user_input": needs_user_input,
-            "question": pending_question,
-            "iterations": iteration,
-            "stats": dict(self.stats),
         }
 
+        try:
+            resp = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(user_payload)},
+                ],
+                response_format={"type": "json_object"},
+                temperature=self.temperature,
+            )
+            content = resp.choices[0].message.content
+            return json.loads(content)
+        except Exception as e:
+            logger.error(f"Decision failed: {e}")
+            return {"fail": {"error": str(e)}}
+
     # ------------- Planning path stays unchanged -------------
-    async def execute(self, goal: str, messages: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """Unified execute: always create a plan first and then execute it.
+    async def execute(
+        self,
+        mission: Optional[str] = None,
+        *,
+        session_id: str,
+        plan_id: Optional[str] = None,
+        user_message: Optional[str] = None,
+        max_iterations: int = 20
+    ) -> Dict[str, Any]:
+        """Execute next steps of a persistent plan or create it once."""
 
-        If during execution an `ask_user` step is encountered, return early with
-        needs_user_input=True and the question to present to the user.
-        """
-
-        needs_user_input = False
-        pending_question: Optional[str] = None
-        convo_messages: List[Dict[str, Any]] = list(messages) if messages else []
-
+        # Ensure plan manager exists
         if not self.plan_manager:
-            # Initialize planning on-the-fly if it was disabled
             self.plan_manager = PlanManager(
                 model_client=self.client,
                 model=self.model,
                 available_tools=self.tools,
-                save_dir="./plans"
+                save_dir="./plans",
             )
 
-        try:
-            # Create initial plan
-            logger.info(f"Creating execution plan for: {goal}")
-            # Optionally enrich context with prior messages
-            planning_context = dict(self.context)
-            if convo_messages:
-                planning_context["messages"] = convo_messages[-10:]
+        # Load or create plan
+        plan = await self._get_or_create_plan(
+            session_id=session_id,
+            plan_id=plan_id,
+            mission=mission,
+            user_message=user_message,
+        )
+        self.current_plan = plan
 
-            plan = await self.plan_manager.create_plan(goal, planning_context)
-            self.current_plan = plan
+        # Bootstrap minimal messages context
+        messages: List[Dict[str, str]] = []
+        if mission:
+            messages.append({"role": "user", "content": mission})
+        if user_message:
+            messages.append({"role": "user", "content": user_message})
 
-            # Agent controls the execution loop
-            while plan.status == "active":
-                # Get next executable steps
-                next_steps = self.plan_manager.get_next_steps(plan)
+        iterations = 0
+        needs_user_input = False
+        pending_question: Optional[str] = None
 
-                if not next_steps:
-                    # Check completion or blocking
-                    if self._all_steps_complete(plan):
-                        plan.status = "completed"
-                        break
+        while plan.status == "active" and iterations < max_iterations:
+            iterations += 1
 
-                    # Check for blocked steps
-                    blocked_steps = self.plan_manager.get_blocked_steps(plan)
-                    if blocked_steps:
-                        logger.warning(f"{len(blocked_steps)} steps blocked by failures")
+            # Determine next step
+            next_steps = self.plan_manager.get_next_steps(plan)
+            step = next_steps[0] if next_steps else None
+            if not step:
+                plan.status = "completed" if self._all_steps_complete(plan) else "failed"
+                break
 
-                        # Decide on replanning
-                        if self._should_replan(plan):
-                            execution_state = self._get_execution_state(plan)
-                            plan = await self.plan_manager.replan(plan, execution_state)
-                            self.current_plan = plan
-                            continue
-                        else:
-                            plan.status = "failed"
-                            break
+            # Ask model for next action
+            action = await self._decide_next_action(step, plan, mission, messages)
 
-                    # No more steps available
-                    break
-
-                # Execute steps (parallel and sequential)
-                parallel_steps = [s for s in next_steps if s.can_parallel]
-                sequential_steps = [s for s in next_steps if not s.can_parallel]
-
-                # Execute parallel steps
-                if parallel_steps:
-                    tasks = [self._execute_step(step) for step in parallel_steps]
-                    await asyncio.gather(*tasks)
-
-                    # After execution, detect any ask_user in this batch
-                    for step in parallel_steps:
-                        if step.tool == "ask_user" and step.result and step.result.get("success"):
-                            pending_question = str(step.result.get("question") or "").strip() or pending_question
-                            if pending_question:
-                                needs_user_input = True
-                                # Echo structured payload via tool role for conversation integrity
-                                ask_payload = {"success": True, "question": pending_question, "missing": step.result.get("missing", [])}
-                                convo_messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": step.id,
-                                    "content": json.dumps(ask_payload)
-                                })
-                                break
-
-                    if needs_user_input:
-                        # Save current state before returning
-                        plan.update_stats()
-                        await self.plan_manager.save_plan(plan)
-                        break
-
-                # Execute sequential steps
-                if not needs_user_input:
-                    for step in sequential_steps:
-                        await self._execute_step(step)
-
-                        # Check for user question
-                        if step.tool == "ask_user" and step.result and step.result.get("success"):
-                            pending_question = str(step.result.get("question") or "").strip() or pending_question
-                            needs_user_input = True if pending_question else False
-                            if needs_user_input:
-                                ask_payload = {"success": True, "question": pending_question, "missing": step.result.get("missing", [])}
-                                convo_messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": step.id,
-                                    "content": json.dumps(ask_payload)
-                                })
-                            # Save current state before returning
-                            plan.update_stats()
-                            await self.plan_manager.save_plan(plan)
-                            break
-
-                        # Check for critical failure
-                        if step.state == StepState.FAILED and step.required:
-                            if self._should_replan(plan):
-                                execution_state = self._get_execution_state(plan)
-                                plan = await self.plan_manager.replan(plan, execution_state)
-                                self.current_plan = plan
-                                break
-
-                if needs_user_input:
-                    break
-
-                # Update and save plan after batch
-                plan.update_stats()
+            if action.get("needs_user_input"):
+                q = (action["needs_user_input"].get("question") or "").strip()
                 await self.plan_manager.save_plan(plan)
+                needs_user_input = True
+                pending_question = q
+                break
 
-            # Store in memory
-            if self.enable_memory:
-                self._store_memory(goal, [
-                    TaskResult(
-                        task_id=step.id,
-                        tool=step.tool,
-                        success=step.state == StepState.COMPLETED,
-                        result=step.result or {},
-                        error=step.error
-                    )
-                    for step in plan.steps
-                ])
-
-            return {
-                "success": plan.status == "completed",
-                "goal": goal,
-                "plan_id": plan.id,
-                "status": plan.status,
-                "completed_steps": plan.completed_steps,
-                "failed_steps": plan.failed_steps,
-                "total_steps": plan.total_steps,
-                "context": plan.context,
-                "plan_file": f"{self.plan_manager.save_dir}/plan_{plan.id}_v{plan.version}.md",
-                "stats": dict(self.stats),
-                "needs_user_input": needs_user_input,
-                "question": pending_question,
-                "messages": convo_messages,
-            }
-
-        except Exception as e:
-            logger.error(f"Unified execution failed: {e}")
-            # As a last resort, keep legacy behavior
-            legacy = await self.execute_with_function_calling(goal)
-            # Promote user prompt fields if present
-            return {
-                **legacy,
-                "needs_user_input": legacy.get("needs_user_input", False),
-                "question": legacy.get("question"),
-            }
-
-    async def execute_with_planning(self, goal: str) -> Dict[str, Any]:
-        """Execute goal using planning system - Agent owns the execution loop"""
-
-        if not self.enable_planning or not self.plan_manager:
-            return await self.execute_with_function_calling(goal)
-
-        try:
-            # Create initial plan
-            logger.info(f"Creating execution plan for: {goal}")
-            plan = await self.plan_manager.create_plan(goal, self.context)
-            self.current_plan = plan
-
-            # Agent controls the execution loop
-            while plan.status == "active":
-                # Get next executable steps
-                next_steps = self.plan_manager.get_next_steps(plan)
-
-                if not next_steps:
-                    # Check completion or blocking
-                    if self._all_steps_complete(plan):
-                        plan.status = "completed"
-                        break
-
-                    # Check for blocked steps
-                    blocked_steps = self.plan_manager.get_blocked_steps(plan)
-                    if blocked_steps:
-                        logger.warning(f"{len(blocked_steps)} steps blocked by failures")
-
-                        # Decide on replanning
-                        if self._should_replan(plan):
-                            execution_state = self._get_execution_state(plan)
-                            plan = await self.plan_manager.replan(plan, execution_state)
-                            self.current_plan = plan
-                            continue
-                        else:
-                            plan.status = "failed"
-                            break
-
-                    # No more steps available
-                    break
-
-                # Execute steps (parallel and sequential)
-                parallel_steps = [s for s in next_steps if s.can_parallel]
-                sequential_steps = [s for s in next_steps if not s.can_parallel]
-
-                # Execute parallel steps
-                if parallel_steps:
-                    tasks = [self._execute_step(step) for step in parallel_steps]
-                    await asyncio.gather(*tasks)
-
-                # Execute sequential steps
-                for step in sequential_steps:
-                    await self._execute_step(step)
-
-                    # Check for critical failure
-                    if step.state == StepState.FAILED and step.required:
-                        if self._should_replan(plan):
-                            execution_state = self._get_execution_state(plan)
-                            plan = await self.plan_manager.replan(plan, execution_state)
-                            self.current_plan = plan
-                            break
-
-                # Update and save plan after batch
-                plan.update_stats()
+            if action.get("use_tool"):
+                tool_name = action["use_tool"].get("name")
+                args = action["use_tool"].get("args", {})
+                await self._run_tool_into_step(step, tool_name, args, plan)
                 await self.plan_manager.save_plan(plan)
+                continue
 
-            # Store in memory
-            if self.enable_memory:
-                self._store_memory(goal, [
-                    TaskResult(
-                        task_id=step.id,
-                        tool=step.tool,
-                        success=step.state == StepState.COMPLETED,
-                        result=step.result or {},
-                        error=step.error
-                    )
-                    for step in plan.steps
-                ])
+            if action.get("mark_complete"):
+                self.plan_manager.update_step_state(
+                    plan,
+                    step.id,
+                    StepState.COMPLETED,
+                    result=action["mark_complete"].get("result"),
+                    completed_at=datetime.now(),
+                )
+                await self.plan_manager.save_plan(plan)
+                continue
 
-            return {
-                "success": plan.status == "completed",
-                "goal": goal,
-                "plan_id": plan.id,
-                "status": plan.status,
-                "completed_steps": plan.completed_steps,
-                "failed_steps": plan.failed_steps,
-                "total_steps": plan.total_steps,
-                "context": plan.context,
-                "plan_file": f"{self.plan_manager.save_dir}/plan_{plan.id}_v{plan.version}.md",
-                "stats": dict(self.stats)
-            }
+            if action.get("fail"):
+                self.plan_manager.update_step_state(
+                    plan,
+                    step.id,
+                    StepState.FAILED,
+                    error=action["fail"].get("error", "Unknown failure"),
+                    completed_at=datetime.now(),
+                )
+                await self.plan_manager.save_plan(plan)
+                continue
 
-        except Exception as e:
-            logger.error(f"Planning execution failed: {e}")
-            # Fallback to function calling
-            return await self.execute_with_function_calling(goal)
+            # Fallback: if action empty, mark failed to avoid loop
+            self.plan_manager.update_step_state(
+                plan,
+                step.id,
+                StepState.FAILED,
+                error="No valid action returned",
+                completed_at=datetime.now(),
+            )
+            await self.plan_manager.save_plan(plan)
+
+        # Memory summary (optional)
+        if self.enable_memory and self.current_plan:
+            self._store_memory(self.current_plan.goal, [
+                TaskResult(
+                    task_id=s.id,
+                    tool=s.tool,
+                    success=s.state == StepState.COMPLETED,
+                    result=s.result or {},
+                    error=s.error,
+                ) for s in self.current_plan.steps
+            ])
+
+        return {
+            "success": plan.status == "completed",
+            "plan_id": plan.id,
+            "status": plan.status,
+            "needs_user_input": needs_user_input,
+            "question": pending_question,
+            "completed_steps": plan.completed_steps,
+            "failed_steps": plan.failed_steps,
+            "total_steps": plan.total_steps,
+            "messages": messages,
+        }
+
+    async def _get_or_create_plan(
+        self,
+        *,
+        session_id: str,
+        plan_id: Optional[str],
+        mission: Optional[str],
+        user_message: Optional[str],
+    ) -> 'ExecutionPlan':
+        """Load an existing plan or create a new one once per session."""
+        if plan_id:
+            loaded = await self.plan_manager.load_plan(plan_id)
+            if loaded:
+                return loaded
+        # Create new plan
+        context = {
+            "session_id": session_id,
+            "last_user_message": user_message,
+        }
+        plan = await self.plan_manager.create_plan(mission or "Untitled Mission", context=context)
+        return plan
 
     async def _execute_step(self, step: PlanStep) -> bool:
         """Execute a single plan step - Agent's responsibility"""
@@ -1214,6 +1042,31 @@ class HybridAgent:
             version=plan.version
         )
 
+    async def _run_tool_into_step(
+        self,
+        step: 'PlanStep',
+        tool_name: str,
+        args: Dict[str, Any],
+        plan: 'ExecutionPlan',
+    ) -> bool:
+        """Execute a tool and write state/contexts into the step/plan."""
+        logger.info(f"Executing tool {tool_name} for step {step.id}")
+        started_at = datetime.now()
+        self.plan_manager.update_step_state(plan, step.id, StepState.IN_PROGRESS, started_at=started_at)
+        result = await self._execute_tool_with_retry(tool_name, args, task_id=step.id)
+        completed_at = datetime.now()
+        if result.success:
+            self.plan_manager.update_step_state(
+                plan, step.id, StepState.COMPLETED, result=result.result, completed_at=completed_at
+            )
+            plan.context[step.id] = result.result
+            return True
+        else:
+            self.plan_manager.update_step_state(
+                plan, step.id, StepState.FAILED, error=result.error, completed_at=completed_at
+            )
+            return False
+
     async def _execute_tool_with_retry(
         self,
         tool_name: str,
@@ -1266,7 +1119,10 @@ class HybridAgent:
                         retries=attempt
                     )
 
-                last_error = result.get("error", "Unknown error")
+                # Derive a clearer error message when available
+                last_error = result.get("error") or result.get("stderr") or (
+                    f"Return code {result.get('returncode')}" if result.get("returncode") not in (None, 0) else "Unknown error"
+                )
 
                 # Try to fix parameters if we have more attempts
                 if attempt < self.max_retries - 1:
@@ -1297,16 +1153,22 @@ class HybridAgent:
         parameters: Dict[str, Any],
         error: str
     ) -> Optional[Dict[str, Any]]:
-        """Use LLM to fix parameters based on error"""
+        """Use LLM to fix parameters based on error. Include tool schema for guidance."""
+        tool = self.tools.get(tool_name)
+        schema = tool.parameters_schema if tool else {}
         prompt = f"""
-        Tool '{tool_name}' failed with error:
+        You are fixing parameters for the tool '{tool_name}'.
+        The tool's expected parameters_schema is:
+        {json.dumps(schema, indent=2)}
+
+        The last execution failed with this error message:
         {error}
 
-        Original parameters:
+        Original parameters were:
         {json.dumps(parameters, indent=2)}
 
-        Suggest corrected parameters that might fix this error.
-        Return ONLY valid JSON with the corrected parameters.
+        Provide corrected parameters that strictly conform to the parameters_schema.
+        Do not include any fields that are not in the schema. Return ONLY a valid JSON object.
         """
 
         try:
@@ -1390,8 +1252,22 @@ Previous context may be available to help guide your decisions."""
         logger.info(f"Resuming plan {plan_id} v{plan.version}")
         self.current_plan = plan
 
-        # Continue execution from current state
-        return await self.execute(plan.goal, messages=messages)
+        # Determine session and optional last user message
+        session_id = str(plan.context.get("session_id", plan.id))
+        last_user_message: Optional[str] = None
+        if messages:
+            for m in reversed(messages):
+                if isinstance(m, dict) and m.get("role") == "user":
+                    last_user_message = m.get("content")
+                    break
+
+        # Continue execution from current state using new signature
+        return await self.execute(
+            plan.goal,
+            session_id=session_id,
+            plan_id=plan.id,
+            user_message=last_user_message,
+        )
 
     def _store_memory(self, goal: str, results: List[TaskResult]):
         """Store execution in memory"""
@@ -1564,7 +1440,7 @@ async def main():
     print("Example 1: Web Application Development")
     print("=" * 60)
     
-    result = await agent.execute_with_planning(goal1)
+    result = await agent.execute(goal1, session_id="example1")
     
     print(f"Success: {result['success']}")
     print(f"Plan ID: {result.get('plan_id')}")
@@ -1584,7 +1460,7 @@ async def main():
     print("Example 2: Data Analysis Pipeline")
     print("=" * 60)
     
-    result = await agent.execute_with_planning(goal2)
+    result = await agent.execute(goal2, session_id="example2")
     
     print(f"Success: {result['success']}")
     print(f"Status: {result.get('status')}")
@@ -1603,8 +1479,9 @@ async def main():
     print("Example 4: Direct Execution with Function Calling")
     print("=" * 60)
     
-    result = await agent.execute_with_function_calling(
-        "Create a Python script that generates random passwords"
+    result = await agent.execute(
+        "Create a Python script that generates random passwords",
+        session_id="example4"
     )
     
     print(f"Success: {result['success']}")

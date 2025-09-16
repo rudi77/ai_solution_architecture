@@ -1,34 +1,25 @@
 # conversation_manager.py
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
-from datetime import datetime
+
 
 @dataclass
 class ConversationManager:
     session_id: str
     agent: Any
-    messages: List[Dict[str, Any]] = field(default_factory=list)
+    plan_id: Optional[str] = None
+    history: List[Dict[str, Any]] = field(default_factory=list)
 
-    def start(self, mission: Optional[str] = None):
-        self.messages = self.agent.bootstrap_turn(mission)
+    async def start(self, mission: str) -> Dict[str, Any]:
+        out = await self.agent.execute(mission, session_id=self.session_id, plan_id=self.plan_id)
+        self.plan_id = out.get("plan_id", self.plan_id)
+        return out
 
     async def user_says(self, text: str) -> Dict[str, Any]:
-        """Append user input and run a model turn."""
-        self.messages.append({"role": "user", "content": text})
-        result = await self.agent.run_messages(self.messages)
-        self.messages = result["messages"]
-        return {
-            "needs_user_input": result.get("needs_user_input", False),
-            "question": result.get("question"),
-            "results": result.get("results", []),
-        }
-
-    async def run_mission(self, mission: str) -> Dict[str, Any]:
-        """Kick off a mission and handle potential back-and-forth."""
-        self.start(mission)
-        result = await self.agent.run_messages(self.messages)
-        self.messages = result["messages"]
-        return result
-
-    def history(self) -> List[Dict[str, Any]]:
-        return list(self.messages)
+        out = await self.agent.execute(
+            session_id=self.session_id,
+            plan_id=self.plan_id,
+            user_message=text,
+        )
+        self.plan_id = out.get("plan_id", self.plan_id)
+        return out
