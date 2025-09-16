@@ -89,8 +89,15 @@ class PromptLibrary:
         return base
 
 # ============================================
-# PLANNING COMPONENTS
+# STATE & PLANNING COMPONENTS
 # ============================================
+
+class AgentState(Enum):
+    PLANNING = "planning"
+    EXECUTING = "executing"
+    WAITING_FOR_USER = "waiting_for_user"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 class StepState(Enum):
     """States for plan steps"""
@@ -111,29 +118,15 @@ class PlanStep:
     parameters: Dict[str, Any]
     state: StepState = StepState.PENDING
     depends_on: List[str] = field(default_factory=list)
-    required: bool = True
-    max_retries: int = 3
-    retry_count: int = 0
     
     # Execution details
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    
-    # Planning metadata
-    estimated_duration: Optional[int] = None  # seconds
-    priority: int = 0  # Higher = more important
-    can_parallel: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization"""
         data = asdict(self)
         data['state'] = self.state.value
-        if self.started_at:
-            data['started_at'] = self.started_at.isoformat()
-        if self.completed_at:
-            data['completed_at'] = self.completed_at.isoformat()
         return data
     
     @classmethod
@@ -142,10 +135,6 @@ class PlanStep:
         data = data.copy()
         if 'state' in data:
             data['state'] = StepState(data['state'])
-        if 'started_at' in data and data['started_at']:
-            data['started_at'] = datetime.fromisoformat(data['started_at'])
-        if 'completed_at' in data and data['completed_at']:
-            data['completed_at'] = datetime.fromisoformat(data['completed_at'])
         return cls(**data)
 
 @dataclass
@@ -219,7 +208,6 @@ class ExecutionPlan:
             md += f"- **ID:** `{step.id}`\n"
             md += f"- **Tool:** `{step.tool}`\n"
             md += f"- **State:** {step.state.value}\n"
-            md += f"- **Required:** {step.required}\n"
             
             if step.depends_on:
                 md += f"- **Dependencies:** {', '.join(f'`{d}`' for d in step.depends_on)}\n"
@@ -235,10 +223,6 @@ class ExecutionPlan:
                 if len(result_str) > 500:
                     result_str = result_str[:500] + "\n... (truncated)"
                 md += f"- **Result:**\n```json\n{result_str}\n```\n"
-            
-            if step.started_at and step.completed_at:
-                duration = (step.completed_at - step.started_at).total_seconds()
-                md += f"- **Duration:** {duration:.2f} seconds\n"
             
             md += "\n"
         
@@ -293,7 +277,16 @@ class PlanManager:
     No execution logic - purely planning and state management
     """
     
-    def __init__(self, model_client, model: str, available_tools: Dict[str, Any], save_dir: str = "./plans", *, verbose: bool = False, pretty: bool = True, redactor: Optional[Any] = None):
+    def __init__(self, 
+        model_client, 
+        model: str, 
+        available_tools: Dict[str, Any], 
+        save_dir: str = "./plans", 
+        *, 
+        verbose: bool = False, 
+        pretty: bool = True, 
+        redactor: Optional[Any] = None):
+        
         self.client = model_client  # For LLM calls
         self.model = model
         self.available_tools = available_tools  # Tool registry for planning
@@ -316,44 +309,38 @@ class PlanManager:
         if context:
             context_str = f"\nContext available:\n{json.dumps(context, indent=2)}"
         
-        prompt = f"""Create a detailed, step-by-step execution plan for this goal:
-{goal}
-{context_str}
-
-Available tools:
-{tools_desc}
-
-Create a comprehensive plan with:
-1. Clear, actionable steps
-2. Proper dependencies between steps
-3. Realistic parameter values
-4. Error handling considerations
-
-IMPORTANT:
-- For each step, the 'parameters' MUST strictly follow the tool's parameters_schema above, including all 'required' fields.
-- For the 'powershell' tool specifically:
-  - Use valid PowerShell syntax (not bash). Examples: New-Item -ItemType Directory -Path "C:\\path"; Set-Content; Get-ChildItem
-  - Always include a 'command' string that is executable under PowerShell
-  - Provide a 'cwd' when file operations depend on a working directory (default repo root if unsure)
-
-Return a JSON object with this structure:
-{{
+        structure_block = """
+{
   "steps": [
-    {{
+    {
       "id": "unique_step_id",
       "description": "Clear description of what this step does",
       "tool": "tool_name",
-      "parameters": {{}},
-      "depends_on": ["previous_step_id"],
-      "required": true/false,
-      "estimated_duration": seconds,
-      "priority": 0-10,
-      "can_parallel": false
-    }}
+      "parameters": {},
+      "depends_on": ["previous_step_id"]
+    }
   ],
   "notes": ["Any important considerations"]
-}}
+}
 """
+
+        prompt = (
+            "Create a concise, step-by-step execution plan for this goal:\n"
+            f"{goal}\n"
+            f"{context_str}\n\n"
+            "Available tools:\n"
+            f"{tools_desc}\n\n"
+            "Create a plan with:\n"
+            "1. Clear, actionable steps\n"
+            "2. Minimal per-step fields: id, description, tool, parameters, depends_on\n"
+            "3. Parameters must conform to the selected tool parameters_schema\n\n"
+            "PowerShell notes:\n"
+            "- Use valid PowerShell syntax (not bash). Examples: New-Item -ItemType Directory -Path \"C:\\path\"; Set-Content; Get-ChildItem\n"
+            "- Always include a 'command' string that is executable under PowerShell\n"
+            "- Provide a 'cwd' when file operations depend on a working directory (default repo root if unsure)\n\n"
+            "Return a JSON object with this structure:\n"
+            f"{structure_block}"
+        )
         
         try:
             if self.verbose and self.pretty:
@@ -426,11 +413,7 @@ Return a JSON object with this structure:
                     description=step_data.get("description", ""),
                     tool=step_data.get("tool", ""),
                     parameters=step_data.get("parameters", {}),
-                    depends_on=step_data.get("depends_on", []),
-                    required=step_data.get("required", True),
-                    estimated_duration=step_data.get("estimated_duration"),
-                    priority=step_data.get("priority", 0),
-                    can_parallel=step_data.get("can_parallel", False)
+                    depends_on=step_data.get("depends_on", [])
                 )
                 steps.append(step)
             
@@ -565,11 +548,7 @@ Return the same JSON structure as before."""
                     description=step_data.get("description", ""),
                     tool=step_data.get("tool", ""),
                     parameters=step_data.get("parameters", {}),
-                    depends_on=step_data.get("depends_on", []),
-                    required=step_data.get("required", True),
-                    estimated_duration=step_data.get("estimated_duration"),
-                    priority=step_data.get("priority", 0),
-                    can_parallel=step_data.get("can_parallel", False)
+                    depends_on=step_data.get("depends_on", [])
                 )
                 new_steps.append(step)
             
@@ -616,7 +595,7 @@ Return the same JSON structure as before."""
     
     def get_blocked_steps(self, plan: ExecutionPlan) -> List[PlanStep]:
         """Get steps blocked by failed dependencies"""
-        failed_ids = {s.id for s in plan.steps if s.state == StepState.FAILED and s.required}
+        failed_ids = {s.id for s in plan.steps if s.state == StepState.FAILED}
         blocked = []
         
         for step in plan.steps:
@@ -638,10 +617,7 @@ Return the same JSON structure as before."""
                 step.result = result
             if error is not None:
                 step.error = error
-            if started_at is not None:
-                step.started_at = started_at
-            if completed_at is not None:
-                step.completed_at = completed_at
+            # timestamps removed from PlanStep; ignore started_at/completed_at
             
             # Update plan statistics
             plan.update_stats()
@@ -753,6 +729,7 @@ class HybridAgent:
         # Tool registry
         self.tools: Dict[str, Tool] = {}
         self._register_default_tools()
+        self._sync_class_tools()
 
         # Planning component (no circular reference)
         self.plan_manager = None
@@ -841,6 +818,25 @@ class HybridAgent:
         self.tools[tool.name] = tool
         logger.info(f"Registered tool: {tool.name}")
 
+    # -------- Class-level tool decorator and registry --------
+    _tools: Dict[str, Tool] = {}
+
+    @classmethod
+    def tool(cls, name: str):
+        def decorator(tool_class):
+            instance = tool_class()
+            # Prefer instance.name if available to avoid mismatch
+            tool_name = getattr(instance, 'name', name)
+            cls._tools[tool_name] = instance
+            return tool_class
+        return decorator
+
+    def _sync_class_tools(self):
+        """Merge class-level registered tools into instance registry once."""
+        for name, tool in self.__class__._tools.items():
+            if name not in self.tools:
+                self.tools[name] = tool
+
     def get_tools_schema(self) -> List[Dict]:
         """Generate OpenAI function calling schema for all tools"""
         schemas = []
@@ -914,7 +910,6 @@ class HybridAgent:
                 "description": step.description,
                 "tool": step.tool,
                 "parameters": step.parameters,
-                "required": step.required,
                 "depends_on": step.depends_on,
             },
             "messages": messages[-5:] if messages else [],
@@ -927,7 +922,7 @@ class HybridAgent:
             },
             "rules": [
                 "If you need info from user, ONLY set needs_user_input.question",
-                "If a tool is required, set use_tool with correct args",
+                "If a tool is needed, set use_tool with correct args",
                 "If no tool needed, set mark_complete",
                 "Return VALID JSON only, no markdown",
             ],
@@ -1011,7 +1006,7 @@ class HybridAgent:
         user_message: Optional[str] = None,
         max_iterations: int = 20
     ) -> Dict[str, Any]:
-        """Execute next steps of a persistent plan or create it once."""
+        """State-driven execution with explicit AgentState transitions."""
 
         # Ensure plan manager exists
         if not self.plan_manager:
@@ -1042,64 +1037,84 @@ class HybridAgent:
         needs_user_input = False
         pending_question: Optional[str] = None
 
+        # Initialize state
+        state = AgentState.EXECUTING if plan.steps else AgentState.PLANNING
+
         while plan.status == "active" and iterations < max_iterations:
             iterations += 1
-
-            # Determine next step
-            next_steps = self.plan_manager.get_next_steps(plan)
-            step = next_steps[0] if next_steps else None
-            if not step:
-                plan.status = "completed" if self._all_steps_complete(plan) else "failed"
-                break
-
-            # Ask model for next action
-            action = await self._decide_next_action(step, plan, mission, messages)
-
-            if action.get("needs_user_input"):
-                q = (action["needs_user_input"].get("question") or "").strip()
-                await self.plan_manager.save_plan(plan)
-                needs_user_input = True
-                pending_question = q
-                break
-
-            if action.get("use_tool"):
-                tool_name = action["use_tool"].get("name")
-                args = action["use_tool"].get("args", {})
-                await self._run_tool_into_step(step, tool_name, args, plan)
-                await self.plan_manager.save_plan(plan)
-                continue
-
-            if action.get("mark_complete"):
-                self.plan_manager.update_step_state(
-                    plan,
-                    step.id,
-                    StepState.COMPLETED,
-                    result=action["mark_complete"].get("result"),
-                    completed_at=datetime.now(),
+            if state == AgentState.PLANNING:
+                # Create a plan if none
+                plan = await self._get_or_create_plan(
+                    session_id=session_id,
+                    plan_id=plan_id,
+                    mission=mission,
+                    user_message=user_message,
                 )
-                await self.plan_manager.save_plan(plan)
+                self.current_plan = plan
+                state = AgentState.EXECUTING
                 continue
 
-            if action.get("fail"):
+            if state == AgentState.EXECUTING:
+                next_steps = self.plan_manager.get_next_steps(plan)
+                step = next_steps[0] if next_steps else None
+                if not step:
+                    plan.status = "completed" if self._all_steps_complete(plan) else "failed"
+                    state = AgentState.COMPLETED if plan.status == "completed" else AgentState.FAILED
+                    break
+
+                action = await self._decide_next_action(step, plan, mission, messages)
+
+                if action.get("needs_user_input"):
+                    q = (action["needs_user_input"].get("question") or "").strip()
+                    await self.plan_manager.save_plan(plan)
+                    needs_user_input = True
+                    pending_question = q
+                    state = AgentState.WAITING_FOR_USER
+                    break
+
+                if action.get("use_tool"):
+                    tool_name = action["use_tool"].get("name")
+                    args = action["use_tool"].get("args", {})
+                    await self._run_tool_into_step(step, tool_name, args, plan)
+                    await self.plan_manager.save_plan(plan)
+                    continue
+
+                if action.get("mark_complete"):
+                    self.plan_manager.update_step_state(
+                        plan,
+                        step.id,
+                        StepState.COMPLETED,
+                        result=action["mark_complete"].get("result"),
+                    )
+                    await self.plan_manager.save_plan(plan)
+                    continue
+
+                if action.get("fail"):
+                    self.plan_manager.update_step_state(
+                        plan,
+                        step.id,
+                        StepState.FAILED,
+                        error=action["fail"].get("error", "Unknown failure"),
+                    )
+                    await self.plan_manager.save_plan(plan)
+                    continue
+
+                # Fallback: no valid action
                 self.plan_manager.update_step_state(
                     plan,
                     step.id,
                     StepState.FAILED,
-                    error=action["fail"].get("error", "Unknown failure"),
-                    completed_at=datetime.now(),
+                    error="No valid action returned",
                 )
                 await self.plan_manager.save_plan(plan)
                 continue
 
-            # Fallback: if action empty, mark failed to avoid loop
-            self.plan_manager.update_step_state(
-                plan,
-                step.id,
-                StepState.FAILED,
-                error="No valid action returned",
-                completed_at=datetime.now(),
-            )
-            await self.plan_manager.save_plan(plan)
+            if state == AgentState.WAITING_FOR_USER:
+                # We exit loop returning needs_user_input; UI will resume later
+                break
+
+            if state in (AgentState.COMPLETED, AgentState.FAILED):
+                break
 
         # Memory summary (optional)
         if self.enable_memory and self.current_plan:
@@ -1152,12 +1167,10 @@ class HybridAgent:
         logger.info(f"Executing step {step.id}: {step.description}")
 
         # Update state
-        started_at = datetime.now()
         self.plan_manager.update_step_state(
             self.current_plan,
             step.id,
-            StepState.IN_PROGRESS,
-            started_at=started_at
+            StepState.IN_PROGRESS
         )
 
         # Execute with retry
@@ -1167,16 +1180,13 @@ class HybridAgent:
             task_id=step.id
         )
 
-        completed_at = datetime.now()
-
         if result.success:
             # Update plan through manager
             self.plan_manager.update_step_state(
                 self.current_plan,
                 step.id,
                 StepState.COMPLETED,
-                result=result.result,
-                completed_at=completed_at
+                result=result.result
             )
 
             # Store result in plan context
@@ -1185,36 +1195,18 @@ class HybridAgent:
             logger.info(f"Step {step.id} completed successfully")
             return True
         else:
-            step.retry_count += 1
-
-            if step.retry_count < step.max_retries:
-                self.plan_manager.update_step_state(
-                    self.current_plan,
-                    step.id,
-                    StepState.RETRY,
-                    error=result.error,
-                    completed_at=completed_at
-                )
-                logger.warning(f"Step {step.id} failed, will retry ({step.retry_count}/{step.max_retries})")
-            else:
-                self.plan_manager.update_step_state(
-                    self.current_plan,
-                    step.id,
-                    StepState.FAILED,
-                    error=result.error,
-                    completed_at=completed_at
-                )
-                logger.error(f"Step {step.id} failed: {result.error}")
-
+            self.plan_manager.update_step_state(
+                self.current_plan,
+                step.id,
+                StepState.FAILED,
+                error=result.error
+            )
+            logger.error(f"Step {step.id} failed: {result.error}")
             return False
 
     def _all_steps_complete(self, plan: ExecutionPlan) -> bool:
         """Check if all steps are complete"""
-        return all(
-            step.state in [StepState.COMPLETED, StepState.SKIPPED]
-            or (step.state == StepState.FAILED and not step.required)
-            for step in plan.steps
-        )
+        return all(step.state in [StepState.COMPLETED, StepState.SKIPPED] for step in plan.steps)
 
     def _should_replan(self, plan: ExecutionPlan) -> bool:
         """Determine if replanning is needed"""
@@ -1223,8 +1215,7 @@ class HybridAgent:
             return False
 
         # Replan if critical steps failed
-        failed_required = sum(1 for s in plan.steps
-                              if s.state == StepState.FAILED and s.required)
+        failed_required = sum(1 for s in plan.steps if s.state == StepState.FAILED)
 
         return failed_required > 0
 
@@ -1265,13 +1256,11 @@ class HybridAgent:
                 logger.info(json.dumps({"tool": tool_name, "step": step.id, "phase": "invoke", "args": log_args}, ensure_ascii=False))
             except Exception:
                 pass
-        started_at = datetime.now()
-        self.plan_manager.update_step_state(plan, step.id, StepState.IN_PROGRESS, started_at=started_at)
+        self.plan_manager.update_step_state(plan, step.id, StepState.IN_PROGRESS)
         result = await self._execute_tool_with_retry(tool_name, args, task_id=step.id)
-        completed_at = datetime.now()
         if result.success:
             self.plan_manager.update_step_state(
-                plan, step.id, StepState.COMPLETED, result=result.result, completed_at=completed_at
+                plan, step.id, StepState.COMPLETED, result=result.result
             )
             plan.context[step.id] = result.result
             if self.config.verbose_logging:
@@ -1281,9 +1270,7 @@ class HybridAgent:
                     pass
             return True
         else:
-            self.plan_manager.update_step_state(
-                plan, step.id, StepState.FAILED, error=result.error, completed_at=completed_at
-            )
+            self.plan_manager.update_step_state(plan, step.id, StepState.FAILED, error=result.error)
             if self.config.verbose_logging:
                 try:
                     logger.info(json.dumps({"tool": tool_name, "step": step.id, "phase": "result", "success": False, "error": result.error}, ensure_ascii=False))
@@ -1350,8 +1337,7 @@ class HybridAgent:
                         task_id=task_id or f"task_{datetime.now().timestamp()}",
                         tool=tool_name,
                         success=True,
-                        result=result,
-                        retries=attempt
+                        result=result
                     )
 
                 # Derive a clearer error message when available
@@ -1401,7 +1387,6 @@ class HybridAgent:
                 "tool": s.tool,
                 "state": s.state.value,
                 "depends_on": s.depends_on,
-                "required": s.required,
                 "parameters": s.parameters,
             })
         if self.config.verbose_logging:
@@ -1433,20 +1418,14 @@ class HybridAgent:
         """Use LLM to fix parameters based on error. Include tool schema for guidance."""
         tool = self.tools.get(tool_name)
         schema = tool.parameters_schema if tool else {}
-        prompt = f"""
-        You are fixing parameters for the tool '{tool_name}'.
-        The tool's expected parameters_schema is:
-        {json.dumps(schema, indent=2)}
-
-        The last execution failed with this error message:
-        {error}
-
-        Original parameters were:
-        {json.dumps(parameters, indent=2)}
-
-        Provide corrected parameters that strictly conform to the parameters_schema.
-        Do not include any fields that are not in the schema. Return ONLY a valid JSON object.
-        """
+        prompt = (
+            "You are fixing parameters for the tool '" + tool_name + "'.\n"
+            "The tool's expected parameters_schema is:\n" + json.dumps(schema, indent=2) + "\n\n"
+            "The last execution failed with this error message:\n" + str(error) + "\n\n"
+            "Original parameters were:\n" + json.dumps(parameters, indent=2) + "\n\n"
+            "Provide corrected parameters that strictly conform to the parameters_schema.\n"
+            "Do not include any fields that are not in the schema. Return ONLY a valid JSON object."
+        )
 
         try:
             response = await self.client.chat.completions.create(
@@ -1476,9 +1455,11 @@ class HybridAgent:
         # Initialize conversation with memory context
         memory_context = self._get_memory_context()
 
-        system_prompt = """You are an AI assistant that uses tools to complete tasks.
-Be efficient and combine operations when possible using the python tool.
-Previous context may be available to help guide your decisions."""
+        system_prompt = (
+            "You are an AI assistant that uses tools to complete tasks.\n"
+            "Be efficient and combine operations when possible using the python tool.\n"
+            "Previous context may be available to help guide your decisions."
+        )
 
         if memory_context:
             system_prompt += f"\n\nPrevious execution context:\n{memory_context}"
@@ -1827,9 +1808,7 @@ async def advanced_example():
             # Print execution timeline
             print("\nExecution Timeline:")
             for step in plan.steps:
-                if step.started_at and step.completed_at:
-                    duration = (step.completed_at - step.started_at).total_seconds()
-                    print(f"  {step.description}: {duration:.2f}s")
+                print(f"  {step.description}: {step.state.value}")
     else:
         print(f"Pipeline failed: {result.get('status')}")
         print(f"Failed steps: {result.get('failed_steps')}")
