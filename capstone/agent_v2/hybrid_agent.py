@@ -59,6 +59,10 @@ class AgentConfig:
     model: str = "gpt-4.1-mini"
     temperature: float = 0.7
     tool_profile: Optional[str] = None
+    # Verbose diagnostics
+    verbose_logging: bool = True
+    pretty_logging: bool = True
+    redact_sensitive: bool = True
 
 
 class PromptLibrary:
@@ -289,12 +293,16 @@ class PlanManager:
     No execution logic - purely planning and state management
     """
     
-    def __init__(self, model_client, model: str, available_tools: Dict[str, Any], save_dir: str = "./plans"):
+    def __init__(self, model_client, model: str, available_tools: Dict[str, Any], save_dir: str = "./plans", *, verbose: bool = False, pretty: bool = True, redactor: Optional[Any] = None):
         self.client = model_client  # For LLM calls
         self.model = model
         self.available_tools = available_tools  # Tool registry for planning
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(exist_ok=True)
+        self.verbose = verbose
+        self.pretty = pretty
+        # redactor: callable that takes an object and returns a redacted copy
+        self._redactor = redactor
     
     async def create_plan(self, goal: str, context: Dict[str, Any] = None) -> ExecutionPlan:
         """Create a new execution plan"""
@@ -348,6 +356,37 @@ Return a JSON object with this structure:
 """
         
         try:
+            if self.verbose and self.pretty:
+                logger.info(
+                    "\n".join([
+                        "==== LLM REQUEST: create_plan ====",
+                        f"Model: {self.model}",
+                        f"Temperature: 0.5",
+                        "System:",
+                        "\"\"\"",
+                        "You are an expert execution planner. Create detailed, practical plans.",
+                        "\"\"\"",
+                        "User:",
+                        "\"\"\"",
+                        prompt,
+                        "\"\"\"",
+                    ])
+                )
+            elif self.verbose:
+                log_payload = {
+                    "endpoint": "chat.completions.create",
+                    "phase": "create_plan:request",
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert execution planner. Create detailed, practical plans."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.5,
+                }
+                if self._redactor:
+                    log_payload = self._redactor(log_payload)
+                logger.info(json.dumps(log_payload, ensure_ascii=False))
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -357,8 +396,27 @@ Return a JSON object with this structure:
                 response_format={"type": "json_object"},
                 temperature=0.5
             )
-            
-            plan_data = json.loads(response.choices[0].message.content)
+            raw_content = response.choices[0].message.content
+            if self.verbose and self.pretty:
+                logger.info(
+                    "\n".join([
+                        "==== LLM RESPONSE: create_plan ====",
+                        "Content:",
+                        "\"\"\"",
+                        raw_content,
+                        "\"\"\"",
+                    ])
+                )
+            plan_data = json.loads(raw_content)
+            if self.verbose and not self.pretty:
+                log_response = {
+                    "endpoint": "chat.completions.create",
+                    "phase": "create_plan:response",
+                    "content": plan_data,
+                }
+                if self._redactor:
+                    log_response = self._redactor(log_response)
+                logger.info(json.dumps(log_response, ensure_ascii=False))
             
             # Create plan steps
             steps = []
@@ -388,6 +446,11 @@ Return a JSON object with this structure:
             await self.save_plan(plan)
             
             logger.info(f"Created plan {plan.id} with {len(steps)} steps")
+            if self.verbose:
+                try:
+                    logger.info("PLAN MARKDOWN BEGIN\n" + plan.to_markdown() + "\nPLAN MARKDOWN END")
+                except Exception:
+                    pass
             return plan
             
         except Exception as e:
@@ -421,6 +484,37 @@ Create a new plan that:
 Return the same JSON structure as before."""
         
         try:
+            if self.verbose and self.pretty:
+                logger.info(
+                    "\n".join([
+                        "==== LLM REQUEST: replan ====",
+                        f"Model: {self.model}",
+                        f"Temperature: 0.7",
+                        "System:",
+                        "\"\"\"",
+                        "You are an expert at adaptive planning and problem-solving.",
+                        "\"\"\"",
+                        "User:",
+                        "\"\"\"",
+                        prompt,
+                        "\"\"\"",
+                    ])
+                )
+            elif self.verbose:
+                log_payload = {
+                    "endpoint": "chat.completions.create",
+                    "phase": "replan:request",
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert at adaptive planning and problem-solving."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.7,
+                }
+                if self._redactor:
+                    log_payload = self._redactor(log_payload)
+                logger.info(json.dumps(log_payload, ensure_ascii=False))
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -430,8 +524,27 @@ Return the same JSON structure as before."""
                 response_format={"type": "json_object"},
                 temperature=0.7
             )
-            
-            plan_data = json.loads(response.choices[0].message.content)
+            raw_content = response.choices[0].message.content
+            if self.verbose and self.pretty:
+                logger.info(
+                    "\n".join([
+                        "==== LLM RESPONSE: replan ====",
+                        "Content:",
+                        "\"\"\"",
+                        raw_content,
+                        "\"\"\"",
+                    ])
+                )
+            plan_data = json.loads(raw_content)
+            if self.verbose:
+                log_response = {
+                    "endpoint": "chat.completions.create",
+                    "phase": "replan:response",
+                    "content": plan_data,
+                }
+                if self._redactor:
+                    log_response = self._redactor(log_response)
+                logger.info(json.dumps(log_response, ensure_ascii=False))
             
             # Create new plan steps
             new_steps = []
@@ -474,6 +587,11 @@ Return the same JSON structure as before."""
             await self.save_plan(new_plan)
             
             logger.info(f"Created new plan version {new_plan.version} with {len(new_steps)} steps")
+            if self.verbose:
+                try:
+                    logger.info("PLAN MARKDOWN BEGIN\n" + new_plan.to_markdown() + "\nPLAN MARKDOWN END")
+                except Exception:
+                    pass
             return new_plan
             
         except Exception as e:
@@ -609,6 +727,8 @@ class HybridAgent:
         *,
         temperature: float = 0.7,
         tool_profile: Optional[str] = None,
+        verbose_logging: Optional[bool] = None,
+        redact_sensitive: Optional[bool] = None,
     ):
         self.client = openai.AsyncOpenAI(api_key=api_key)
         self.model = model
@@ -616,7 +736,19 @@ class HybridAgent:
         self.enable_memory = enable_memory
         self.enable_planning = enable_planning
         self.temperature = float(temperature)
-        self.config = AgentConfig(model=self.model, temperature=self.temperature, tool_profile=tool_profile)
+        # Determine verbosity/redaction from args or env
+        env_verbose = os.getenv("AGENT_VERBOSE", "").lower() in ("1", "true", "yes", "on")
+        env_redact = os.getenv("AGENT_REDACT", "").lower() not in ("0", "false", "no", "off")
+        verbose_flag = env_verbose if verbose_logging is None else bool(verbose_logging)
+        redact_flag = env_redact if redact_sensitive is None else bool(redact_sensitive)
+
+        self.config = AgentConfig(
+            model=self.model,
+            temperature=self.temperature,
+            tool_profile=tool_profile,
+            verbose_logging=verbose_flag,
+            redact_sensitive=redact_flag,
+        )
 
         # Tool registry
         self.tools: Dict[str, Tool] = {}
@@ -629,7 +761,10 @@ class HybridAgent:
                 model_client=self.client,
                 model=self.model,
                 available_tools=self.tools,
-                save_dir=plan_save_dir
+                save_dir=plan_save_dir,
+                verbose=self.config.verbose_logging,
+                pretty=self.config.pretty_logging,
+                redactor=(self._redact_payload if self.config.redact_sensitive else None),
             )
 
         # Current execution state
@@ -650,6 +785,27 @@ class HybridAgent:
         if mission:
             msgs.append({"role": "user", "content": mission})
         return msgs
+
+    # ---------------- Verbose diagnostics helpers ----------------
+    def _redact_payload(self, obj: Any) -> Any:
+        """Shallow redactor for sensitive fields in logs."""
+        try:
+            if isinstance(obj, dict):
+                redacted = {}
+                for k, v in obj.items():
+                    key_lower = str(k).lower()
+                    if key_lower in ("authorization", "api_key", "token", "password"):
+                        redacted[k] = "***REDACTED***"
+                    elif key_lower in ("messages", "content") and self.config.redact_sensitive is False:
+                        redacted[k] = v
+                    else:
+                        redacted[k] = self._redact_payload(v)
+                return redacted
+            if isinstance(obj, list):
+                return [self._redact_payload(i) for i in obj]
+            return obj
+        except Exception:
+            return obj
 
     def _register_default_tools(self):
         """Register the default tool set"""
@@ -778,6 +934,36 @@ class HybridAgent:
         }
 
         try:
+            if self.config.verbose_logging and self.plan_manager and getattr(self.plan_manager, "pretty", False):
+                logger.info(
+                    "\n".join([
+                        "==== LLM REQUEST: decide_next_action ====",
+                        f"Model: {self.model}",
+                        f"Temperature: {self.temperature}",
+                        "System:",
+                        "\"\"\"",
+                        system,
+                        "\"\"\"",
+                        "User:",
+                        "\"\"\"",
+                        json.dumps(user_payload),
+                        "\"\"\"",
+                    ])
+                )
+            elif self.config.verbose_logging:
+                req_log = {
+                    "endpoint": "chat.completions.create",
+                    "phase": "decide_next_action:request",
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": json.dumps(user_payload)},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": self.temperature,
+                }
+                payload = self._redact_payload(req_log) if self.config.redact_sensitive else req_log
+                logger.info(json.dumps(payload, ensure_ascii=False))
             resp = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -788,6 +974,28 @@ class HybridAgent:
                 temperature=self.temperature,
             )
             content = resp.choices[0].message.content
+            if self.config.verbose_logging and self.plan_manager and getattr(self.plan_manager, "pretty", False):
+                logger.info(
+                    "\n".join([
+                        "==== LLM RESPONSE: decide_next_action ====",
+                        "Content:",
+                        "\"\"\"",
+                        content,
+                        "\"\"\"",
+                    ])
+                )
+            elif self.config.verbose_logging:
+                try:
+                    parsed = json.loads(content)
+                except Exception:
+                    parsed = {"raw": content}
+                res_log = {
+                    "endpoint": "chat.completions.create",
+                    "phase": "decide_next_action:response",
+                    "content": parsed,
+                }
+                payload = self._redact_payload(res_log) if self.config.redact_sensitive else res_log
+                logger.info(json.dumps(payload, ensure_ascii=False))
             return json.loads(content)
         except Exception as e:
             logger.error(f"Decision failed: {e}")
@@ -1051,6 +1259,12 @@ class HybridAgent:
     ) -> bool:
         """Execute a tool and write state/contexts into the step/plan."""
         logger.info(f"Executing tool {tool_name} for step {step.id}")
+        if self.config.verbose_logging:
+            try:
+                log_args = self._redact_payload(args) if self.config.redact_sensitive else args
+                logger.info(json.dumps({"tool": tool_name, "step": step.id, "phase": "invoke", "args": log_args}, ensure_ascii=False))
+            except Exception:
+                pass
         started_at = datetime.now()
         self.plan_manager.update_step_state(plan, step.id, StepState.IN_PROGRESS, started_at=started_at)
         result = await self._execute_tool_with_retry(tool_name, args, task_id=step.id)
@@ -1060,11 +1274,21 @@ class HybridAgent:
                 plan, step.id, StepState.COMPLETED, result=result.result, completed_at=completed_at
             )
             plan.context[step.id] = result.result
+            if self.config.verbose_logging:
+                try:
+                    logger.info(json.dumps({"tool": tool_name, "step": step.id, "phase": "result", "success": True, "result": result.result}, ensure_ascii=False))
+                except Exception:
+                    pass
             return True
         else:
             self.plan_manager.update_step_state(
                 plan, step.id, StepState.FAILED, error=result.error, completed_at=completed_at
             )
+            if self.config.verbose_logging:
+                try:
+                    logger.info(json.dumps({"tool": tool_name, "step": step.id, "phase": "result", "success": False, "error": result.error}, ensure_ascii=False))
+                except Exception:
+                    pass
             return False
 
     async def _execute_tool_with_retry(
@@ -1104,6 +1328,12 @@ class HybridAgent:
                     parameters["context"] = self.context
 
                 # Execute tool
+                if self.config.verbose_logging:
+                    try:
+                        log_params = self._redact_payload(parameters) if self.config.redact_sensitive else parameters
+                        logger.info(json.dumps({"tool": tool_name, "phase": "attempt", "attempt": attempt + 1, "params": log_params}, ensure_ascii=False))
+                    except Exception:
+                        pass
                 result = await tool.execute(**parameters)
 
                 # Update statistics
@@ -1111,6 +1341,11 @@ class HybridAgent:
 
                 if result.get("success"):
                     self.stats[f"{tool_name}_success"] += 1
+                    if self.config.verbose_logging:
+                        try:
+                            logger.info(json.dumps({"tool": tool_name, "phase": "attempt_result", "attempt": attempt + 1, "success": True, "result": result}, ensure_ascii=False))
+                        except Exception:
+                            pass
                     return TaskResult(
                         task_id=task_id or f"task_{datetime.now().timestamp()}",
                         tool=tool_name,
@@ -1138,6 +1373,11 @@ class HybridAgent:
                 logger.error(f"Tool execution failed: {e}")
 
         self.stats[f"{tool_name}_failures"] += 1
+        if self.config.verbose_logging:
+            try:
+                logger.info(json.dumps({"tool": tool_name, "phase": "final_failure", "error": last_error}, ensure_ascii=False))
+            except Exception:
+                pass
         return TaskResult(
             task_id=task_id or f"task_{datetime.now().timestamp()}",
             tool=tool_name,
@@ -1146,6 +1386,43 @@ class HybridAgent:
             error=last_error,
             retries=self.max_retries
         )
+
+    # ---------------- Introspection helpers for tasks/plan ----------------
+    def get_task_list(self) -> List[Dict[str, Any]]:
+        """Return a concise view of current plan steps (task list)."""
+        plan = self.current_plan
+        if not plan:
+            return []
+        tasks = []
+        for s in plan.steps:
+            tasks.append({
+                "id": s.id,
+                "description": s.description,
+                "tool": s.tool,
+                "state": s.state.value,
+                "depends_on": s.depends_on,
+                "required": s.required,
+                "parameters": s.parameters,
+            })
+        if self.config.verbose_logging:
+            try:
+                logger.info(json.dumps({"phase": "task_list", "tasks": tasks}, ensure_ascii=False))
+            except Exception:
+                pass
+        return tasks
+
+    def get_plan_markdown(self) -> Optional[str]:
+        """Return the current plan as markdown."""
+        plan = self.current_plan
+        if not plan:
+            return None
+        md = plan.to_markdown()
+        if self.config.verbose_logging:
+            try:
+                logger.info("PLAN MARKDOWN BEGIN\n" + md + "\nPLAN MARKDOWN END")
+            except Exception:
+                pass
+        return md
 
     async def _fix_parameters(
         self,
@@ -1424,16 +1701,23 @@ async def main():
         api_key=api_key,
         model="gpt-4.1",
         enable_planning=True,
-        plan_save_dir="./execution_plans"
+        plan_save_dir="./execution_plans",
+        verbose_logging=True,
+        redact_sensitive=True
     )
     
     # Example 1: Create and deploy a web application
     goal1 = """
-    Create a simple Flask web application with:
-    1. A homepage with a contact form
-    2. Store submissions in a SQLite database
-    3. Initialize Git repository
-    4. Create GitHub repository and push code
+    Create a new fastapi project called "payment-api" with the following features:
+    1. Create the project directory structure
+    2. Set up a FastAPI application with proper structure (routers, models, services)
+    3. Add health check and basic CRUD endpoints
+    4. Create requirements.txt with necessary dependencies
+    5. Add a comprehensive README.md
+    6. Initialize git repository
+    7. Create GitHub repository (if gh CLI is available)
+    8. Create initial commit
+    9. Push the code to the GitHub repository
     """
     
     print("=" * 60)
@@ -1448,62 +1732,62 @@ async def main():
     print(f"Plan saved to: {result.get('plan_file')}")
     
     # Example 2: Data analysis with dynamic replanning
-    goal2 = """
-    Analyze CSV files in the 'data' directory:
-    1. Read all CSV files
-    2. Generate summary statistics
-    3. Create visualizations
-    4. Write a comprehensive report
-    """
+#    " goal2 = """
+#     Analyze CSV files in the 'data' directory:
+#     1. Read all CSV files
+#     2. Generate summary statistics
+#     3. Create visualizations
+#     4. Write a comprehensive report
+#     """
     
-    print("\n" + "=" * 60)
-    print("Example 2: Data Analysis Pipeline")
-    print("=" * 60)
+#     print("\n" + "=" * 60)
+#     print("Example 2: Data Analysis Pipeline")
+#     print("=" * 60)
     
-    result = await agent.execute(goal2, session_id="example2")
+#     result = await agent.execute(goal2, session_id="example2")
     
-    print(f"Success: {result['success']}")
-    print(f"Status: {result.get('status')}")
+#     print(f"Success: {result['success']}")
+#     print(f"Status: {result.get('status')}")
     
-    # Example 3: Resume a previous plan
-    if result.get('plan_id'):
-        print("\n" + "=" * 60)
-        print("Example 3: Resuming Previous Plan")
-        print("=" * 60)
+#     # Example 3: Resume a previous plan
+#     if result.get('plan_id'):
+#         print("\n" + "=" * 60)
+#         print("Example 3: Resuming Previous Plan")
+#         print("=" * 60)
         
-        resume_result = await agent.resume_plan(result['plan_id'])
-        print(f"Resume Success: {resume_result['success']}")
+#         resume_result = await agent.resume_plan(result['plan_id'])
+#         print(f"Resume Success: {resume_result['success']}")
     
-    # Example 4: Direct execution without planning
-    print("\n" + "=" * 60)
-    print("Example 4: Direct Execution with Function Calling")
-    print("=" * 60)
+#     # Example 4: Direct execution without planning
+#     print("\n" + "=" * 60)
+#     print("Example 4: Direct Execution with Function Calling")
+#     print("=" * 60)
     
-    result = await agent.execute(
-        "Create a Python script that generates random passwords",
-        session_id="example4"
-    )
+#     result = await agent.execute(
+#         "Create a Python script that generates random passwords",
+#         session_id="example4"
+#     )
     
-    print(f"Success: {result['success']}")
-    print(f"Tasks executed: {len(result['results'])}")
-    print(f"Summary: {result['summary']}")
+#     print(f"Success: {result['success']}")
+#     print(f"Tasks executed: {len(result['results'])}")
+#     print(f"Summary: {result['summary']}")
     
-    # Get execution statistics
-    print("\n" + "=" * 60)
-    print("Execution Statistics")
-    print("=" * 60)
+#     # Get execution statistics
+#     print("\n" + "=" * 60)
+#     print("Execution Statistics")
+#     print("=" * 60)
     
-    stats = agent.get_statistics()
-    print(f"Total tool calls: {stats['total_calls']}")
-    print(f"Success rate: {stats['overall_success_rate']:.1f}%")
-    print(f"Memory entries: {stats['memory_entries']}")
+#     stats = agent.get_statistics()
+#     print(f"Total tool calls: {stats['total_calls']}")
+#     print(f"Success rate: {stats['overall_success_rate']:.1f}%")
+#     print(f"Memory entries: {stats['memory_entries']}")
     
-    if stats['tools']:
-        print("\nTool usage:")
-        for tool, tool_stats in stats['tools'].items():
-            print(f"  {tool}:")
-            print(f"    Calls: {tool_stats['calls']}")
-            print(f"    Success rate: {tool_stats['success_rate']:.1f}%")
+#     if stats['tools']:
+#         print("\nTool usage:")
+#         for tool, tool_stats in stats['tools'].items():
+#             print(f"  {tool}:")
+#             print(f"    Calls: {tool_stats['calls']}")
+#             print(f"    Success rate: {tool_stats['success_rate']:.1f}%")"
 
 async def advanced_example():
     """Advanced example with custom tools and complex planning"""
