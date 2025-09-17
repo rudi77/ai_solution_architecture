@@ -124,18 +124,23 @@ class TodoListManager:
         self.base_dir = base_dir
 
 
-    async def create_todolist(self, mission: str, mission_context: Dict[str, Any]) -> TodoList:
+    async def create_todolist(self, mission: str, tools_desc: str) -> TodoList:
         """
-        Creates a new todolist based on the mission and mission context.
+        Creates a new todolist based on the mission and tools_desc.
 
         Args:
             mission: The mission to create the todolist for.
-            mission_context: The context of the mission.
+            tools_desc: The description of the tools available.
 
         Returns:
-            A new todolist based on the mission and mission context.
+            A new todolist based on the mission and tools_desc.
+
+        Raises:
+            ValueError: Invalid JSON from model.
+
         """
-        user_prompt, system_prompt = self.create_todolist_prompts(mission, mission_context)
+        user_prompt, system_prompt = self.create_todolist_prompts(mission, tools_desc)
+
         response = await litellm.acompletion(
             model="gpt-4.1-mini",
             messages=[
@@ -143,11 +148,38 @@ class TodoListManager:
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
+            temperature=0  # deterministischer
         )
 
-        todolist = TodoList.from_json(response.choices[0].message.content)
-        self.__write_todolist(todolist)        
+        # Sicheres Parsing
+        raw = response.choices[0].message.content
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            # Optional: Fallback/Retry oder klare Fehlermeldung
+            raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
+
+        todolist = TodoList.from_json(data)
+        self.__write_todolist(todolist)
         return todolist
+
+    # def __validate_plan_schema(plan: dict, tool_names: set):
+    #     if not isinstance(plan, dict):
+    #         raise ValueError("Plan must be a JSON object.")
+    #     if "items" not in plan or not isinstance(plan["items"], list):
+    #         raise ValueError("Plan.items missing or not a list.")
+
+    #     for step in plan["items"]:
+    #         for key in ["id", "description", "tool", "parameters", "depends_on", "status"]:
+    #             if key not in step:
+    #                 raise ValueError(f"Missing field '{key}' in step.")
+    #         if step["tool"] != "none" and step["tool"] not in tool_names:
+    #             raise ValueError(f"Unknown tool '{step['tool']}'")
+    #         if step["status"] not in {"PENDING", "BLOCKED", "DONE"}:
+    #             raise ValueError(f"Invalid status '{step['status']}'")
+    #         if not isinstance(step["depends_on"], list):
+    #             raise ValueError("depends_on must be a list.")
+
 
 
     async def load_todolist(self, todolist_id: str) -> TodoList:
@@ -223,51 +255,88 @@ class TodoListManager:
         return Path(self.base_dir) / f"todolist_{todolist_id}.json"
 
 
-    def create_todolist_prompts(self, mission: str, mission_context: Dict[str, Any]) -> Tuple[str, str]:
-        user_prompt = mission_context.get("user_request", "") or ""
-        tools_desc = mission_context.get("tools_desc", "") or ""
-        structure_block = """
-        {
-        "items": [
-            {
-            "position": 1,
-            "description": "Kurze, präzise Aufgabenbeschreibung",
-            "tool": "tool_name",
-            "parameters": {
-                "key": "value"
-            },
-            "status": "PENDING"
-            }
-        ],
-        "open_questions": [
-            "Offene Frage 1",
-            "Offene Frage 2"
-        ],
-        "notes": "Optionale ergänzende Notizen"
-        }
+    def create_todolist_prompts(self, mission: str, tools_desc: str) -> Tuple[str, str]:
         """
-        context_str = mission_context.get("context", "")
+        Gibt (user_prompt, system_prompt) zurück, passend für den Planungs-Agenten.
+        """
 
-        system_prompt = (
-            "Create a concise, step-by-step execution plan for this goal:\n"
-            f"{mission}\n"
-            f"{context_str}\n\n"
-            "Available tools:\n"
-            f"{tools_desc}\n\n"
-            "Create a plan with:\n"
-            "1. Clear, actionable steps\n"
-            "2. Minimal per-step fields: id, description, tool, parameters, depends_on\n"
-            "3. Parameters must conform to the selected tool parameters_schema\n\n"
-            "PowerShell notes:\n"
-            "- Use valid PowerShell syntax (not bash). Examples: New-Item -ItemType Directory -Path \"C:\\path\"; Set-Content; Get-ChildItem\n"
-            "- Always include a 'command' string that is executable under PowerShell\n"
-            "- Provide a 'cwd' when file operations depend on a working directory (default repo root if unsure)\n\n"
-            "Return only a JSON object with this structure, no other text or commentary:\n"
-            f"{structure_block}"
-        )
+        # Einheitliches, minimales und konsistentes Schema
+        structure_block = """
+    {
+    "items": [
+        {
+        "id": "t1",
+        "description": "Kurze, präzise Aufgabenbeschreibung (1–2 Sätze)",
+        "tool": "tool_name_or_none",
+        "parameters": {},
+        "depends_on": [],
+        "status": "PENDING"
+        }
+    ],
+    "open_questions": [],
+    "notes": ""
+    }
+        """.strip()
+
+        system_prompt = f"""
+    You are a planning agent. Your sole task is to convert the mission into a
+    structured execution plan (TODO list).
+
+    Context you have:
+
+    - Mission:
+    {mission}
+
+    - Available tools (names, descriptions, parameter schemas):
+    {tools_desc}
+
+    ---
+
+    ## Instructions
+
+    1) OUTPUT FORMAT
+    - Return a valid JSON object ONLY — no extra commentary, no code fences.
+    - Use exactly the structure shown under "Expected JSON structure".
+
+    2) PLAN REQUIREMENTS
+    - Produce a minimal, complete step-by-step plan to fulfill the mission.
+    - Each step MUST be atomic (Single Responsibility).
+    - Prefer fewer, well-scoped steps over many fuzzy steps.
+
+    3) STEP FIELDS (MUST-HAVES)
+    - id: short unique id like "t1", "t2", ...
+    - description: 1–2 sentences, clear and outcome-oriented.
+    - tool: exact tool name from the provided list, or "none" if no tool is needed.
+    - parameters: object with ONLY the required keys for the chosen tool (match the parameters_schema).
+    - depends_on: array of step ids that must be completed first (empty if none).
+    - status: one of "PENDING", "BLOCKED", "DONE" (initially use "PENDING"; use "BLOCKED" only if the step cannot start without user input).
+
+    4) PARAMETERS
+    - If a parameter value is unknown and must be clarified: 
+    - Put the placeholder string "ASK_USER" as the value in parameters,
+    - AND add a corresponding human-readable question to "open_questions".
+
+    5) DEPENDENCIES
+    - Add dependencies to enforce correct execution order.
+    - No circular dependencies. All references must exist.
+
+    6) QUALITY CHECKS BEFORE RETURNING
+    - JSON is syntactically valid.
+    - All tools exist (or "none").
+    - parameters strictly conform to the target tool's parameters_schema (no extra keys).
+    - All depends_on ids exist; no circular graphs.
+    - If any "ASK_USER" appears, ensure "open_questions" contains precise, actionable questions.
+
+    ---
+
+    ## Expected JSON structure
+    {structure_block}
+        """.strip()
+
+        # Der UserPrompt an den Planungs-Agenten ist bewusst generisch
+        user_prompt = "Generate the structured TODO list for the given mission."
 
         return user_prompt, system_prompt
-
 
     def __write_todolist(self, todolist: TodoList) -> None:
         """
