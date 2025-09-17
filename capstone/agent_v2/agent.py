@@ -202,7 +202,17 @@ class Agent:
            await self.state_manager.save_state(session_id, state)
 
 
-    async def _create_or_get_todolist(self, session_id: str, state: Dict[str, Any]) -> Optional[TodoList]:    
+    async def _create_or_get_todolist(self, session_id: str, state: Dict[str, Any]) -> Optional[TodoList]:
+        """
+        Creates a new todolist for the mission if no todolist exists yet or loads the existing todolist
+
+        Args:
+            session_id: The session id for the agent.
+            state: The state of the agent.
+
+        Returns:
+            A todolist for the mission.
+        """
         todolist_id = state.get("todolist_id")
         # check if a plan has already been created for the mission
         if not todolist_id:

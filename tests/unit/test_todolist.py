@@ -130,17 +130,12 @@ def test_get_todolist_path(tmp_path: Path):
 def test_create_todolist_prompts_contains_expected_content():
     m = TodoListManager(base_dir="irrelevant")
     mission = "Build a thing"
-    mission_context = {
-        "user_request": "Please do it",
-        "tools_desc": "- tool_x: does x",
-        "context": "additional context",
-    }
-    user_prompt, system_prompt = m.create_todolist_prompts(mission, mission_context)
+    tools_desc = "- tool_x: does x"
+    user_prompt, system_prompt = m.create_todolist_prompts(mission, tools_desc)
 
     assert isinstance(user_prompt, str) and user_prompt
     assert isinstance(system_prompt, str) and mission in system_prompt
     assert "tool_x" in system_prompt
-    assert "PowerShell notes" in system_prompt
     assert '"items": [' in system_prompt
 
 
@@ -159,7 +154,7 @@ def test_create_todolist_writes_file_and_returns_object(tmp_path: Path, monkeypa
     import capstone.agent_v2.planning.todolist as tlmod
     monkeypatch.setattr(tlmod.litellm, "acompletion", fake_acompletion)
 
-    todolist = asyncio.run(m.create_todolist(mission="x", mission_context={"user_request": "y", "tools_desc": "z"}))
+    todolist = asyncio.run(m.create_todolist(mission="x", tools_desc="z"))
     assert isinstance(todolist, TodoList)
     assert todolist.todolist_id == "create-id-1"
 
