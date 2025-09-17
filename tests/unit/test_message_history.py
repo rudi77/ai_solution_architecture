@@ -82,3 +82,28 @@ def test_get_last_n_messages_ignores_incomplete_trailing_message():
     assert contents_of(out) == ["sys", "u1", "a1"]
 
 
+def test___str___returns_json_and_preserves_unicode_characters():
+    # Include non-ASCII to ensure ensure_ascii=False behavior
+    mh = MessageHistory("sÿs")
+    mh.add_message("héllo", "user")
+    mh.add_message("wørld", "assistant")
+
+    text = str(mh)
+    assert isinstance(text, str)
+    # Raw unicode characters should appear in the JSON string
+    assert "sÿs" in text
+    assert "héllo" in text
+    assert "wørld" in text
+
+    import json
+
+    data = json.loads(text)
+    assert isinstance(data, list)
+    assert data[0]["role"] == "system"
+    assert data[0]["content"] == "sÿs"
+    assert data[1]["role"] == "user"
+    assert data[1]["content"] == "héllo"
+    assert data[2]["role"] == "assistant"
+    assert data[2]["content"] == "wørld"
+
+
