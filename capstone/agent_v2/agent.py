@@ -1,10 +1,18 @@
 # An Agent class
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from attr import dataclass
+import litellm
 
-from capstone.agent_v2.planning.planner import ExecutionPlan, PlanManager
+from capstone.agent_v2.planning.todolist import TodoList, TodoListManager
 from capstone.agent_v2.statemanager import StateManager
 from capstone.agent_v2.tool import Tool
+from capstone.agent_v2.tools.code_tool import PythonTool
+from capstone.agent_v2.tools.file_tool import FileReadTool, FileWriteTool
+from capstone.agent_v2.tools.git_tool import GitHubTool, GitTool
+from capstone.agent_v2.tools.shell_tool import PowerShellTool
+from capstone.agent_v2.tools.web_tool import WebFetchTool, WebSearchTool
 
 GENERIC_SYSTEM_PROMPT = """
 You are a ReAct-style execution agent.
@@ -15,12 +23,60 @@ Operating principles:
 - After each tool call, update state; avoid loops; ask for help on blockers.
 
 Decision policy:
-- Prefer available tools; ask user only for truly blocking info.
+- Prefer available tools; when in doubt, ask the user for clarification rather than making assumptions.
 - Stop when acceptance criteria for the mission are met.
 
 Output style:
 - Short, structured, CLI-friendly status lines.
 """
+
+# Ich brauche noch eine Messsage History Klasse die die Kommunikation zwischen dem Agent und dem User speichert
+# Die sollte ungefähr so aussehen:
+# messages=[
+#  {"role": "system", "content": system_prompt},
+#  {"role": "user", "content": user_prompt}
+#  {"role": "assistant", "content": assistant_prompt}
+#  {"role": "user", "content": user_prompt}
+#  {"role": "assistant", "content": assistant_prompt}
+#  {"role": "user", "content": user_prompt}
+# ],
+# Der System Prompt ist immer der erste Eintrag in der Liste. Ich will aber nicht, dass ich dem LLM den
+# gesamten Chat History sende. Ich will nur den System Prompt und die letzten n messages (User und Assistant) senden.
+# Das n sollte einstellbar sein!
+class MessageHistory:
+    def __init__(self, system_prompt: str):
+        # Store system prompt as the first message entry
+        self.system_prompt = {"role": "system", "content": system_prompt}
+        self.messages = [self.system_prompt]
+
+    def add_message(self, message: str, role: str) -> None:
+        self.messages.append({"role": role, "content": message})
+
+    def get_last_n_messages(self, n: int):
+        """
+        Gets the last n message pairs (user and assistant) in chronological order,
+        always including the system prompt as the first message. If there is an
+        incomplete trailing message (no pair), it is ignored.
+        """
+        if n <= 0:
+            return [self.system_prompt]
+
+        # Exclude the system prompt from pairing logic
+        body = self.messages[1:]
+        num_pairs = len(body) // 2
+
+        if num_pairs == 0:
+            return [self.system_prompt]
+
+        if n >= num_pairs:
+            # Return all complete pairs
+            return [self.system_prompt] + body[: num_pairs * 2]
+
+        # Return only the last n pairs, preserving chronological order
+        start_index = len(body) - (n * 2)
+        return [self.system_prompt] + body[start_index:]
+
+
 
 class Agent:
     def __init__(self, 
@@ -29,8 +85,9 @@ class Agent:
         system_prompt: Optional[str],
         mission: Optional[str],
         tools: List[Tool],
-        planner: PlanManager,
-        state_manager: StateManager):
+        todo_list: TodoListManager,
+        state_manager: StateManager,
+        llm):
         """
         Initializes the Agent with the given name, description, system prompt, mission, tools, and planner.
         Args:
@@ -48,8 +105,9 @@ class Agent:
         self.system_prompt = system_prompt
         self.mission = mission
         self.tools = tools
-        self.planner = planner
+        self.todo_list = todo_list
         self.state_manager = state_manager
+
 
     async def execute(self, user_message: str, session_id: str, message_history: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -71,41 +129,45 @@ class Agent:
 
         # update message history in state
         state["message_history"] = message_history
+        state["last_user_message"] = user_message
+        state["mission"] = self.mission
+
+        # save the state
         await self.state_manager.save_state(session_id, state)
 
-        # get the current plan
-        plan = await self.__get_plan(session_id, state)
-        if not plan:
-            return {
-                "success": False,
-                "error": "No plan found"
-            }
+        # Before a plan is created, we shall check if there are some open questions that need to be answered
+
+        # get the current todolist
+        todolist = await self._create_or_get_todolist(session_id, state)
+
+        # now that we have the todolist, we can execute the todolist in a ReAct loop
+        for next_step in todolist.steps:
+           # 1. generate a thought
+           thought = await self._generate_thought(next_step)
+           # 2. decide the next action
+           action = await self._decide_next_action(thought, next_step)
+           # 3. execute the action
+           observation = await self._execute_action(action)
+
+           await self.state_manager.save_state(session_id, state)
 
 
-        # now that we have the plan, we can execute the plan
-        for next_step in plan.steps:
-           continue
-
-
-
-
-    async def __get_plan(self, session_id: str, state: Dict[str, Any]) -> Optional[ExecutionPlan]:    
-        plan_id = state.get("plan_id")
+    async def _create_or_get_todolist(self, session_id: str, state: Dict[str, Any]) -> Optional[TodoList]:    
+        todolist_id = state.get("todolist_id")
         # check if a plan has already been created for the mission
-        if not plan_id:
+        if not todolist_id:
             # create a new plan for the mission
             message_history = state.get("message_history")
-            plan = await self.planner.create_plan(self.mission, self.__get_planning_context(session_id, message_history))
-            plan_id = plan.id
-            state["plan_id"] = plan_id
+            plan = await self.todo_list.create_todolist(self.mission, self._get_planning_context(session_id, message_history))
+            todolist_id = plan.id
+            state["todolist_id"] = todolist_id
             await self.state_manager.save_state(session_id, state)
             return plan
         else:
-            plan = await self.planner.load_plan(plan_id)
+            plan = await self.todo_list.load_todolist(todolist_id)                
             return plan
 
-
-    def __get_planning_context(self, session_id: str, message_history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _get_planning_context(self, session_id: str, message_history: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Gets the planning context for the agent. Which consists of:
         - The Agent's name
@@ -125,4 +187,77 @@ class Agent:
             "history": message_history,
         }            
 
-        
+    async def _generate_thought(self, next_step: str) -> str:
+        """
+        Generates a thought for the next step.
+        """
+        pass
+
+    async def _decide_next_action(self, thought: str, next_step: str) -> str:
+        """
+        Decides the next action for the next step.
+        """
+        pass
+
+    async def _execute_action(self, action: str) -> str:
+        """
+        Executes the action for the next step.
+        """
+        pass
+
+    # create a static method to create an agent
+    @staticmethod
+    def create_agent(name: str, description: str, system_prompt: str, mission: str, work_dir: str, llm) -> "Agent":
+        """
+        Creates an agent with the given name, description, system prompt, mission, and work directory.
+        The agent will be created with the following tools:
+        - WebSearchTool
+        - WebFetchTool
+        - PythonTool
+        - GitHubTool
+        - GitTool
+        - FileReadTool
+        - FileWriteTool
+        - PowerShellTool
+        The agent will be created with the following planner:
+        - TodoListManager
+        The agent will be created with the following state manager:
+        - StateManager
+
+        Args:
+            name: The name of the agent.
+            description: The description of the agent.
+            system_prompt: The system prompt for the agent.
+            mission: The mission for the agent.
+            work_dir: The work directory for the agent.
+            llm: The llm for the agent.
+
+        Returns:
+            An agent with the given name, description, system prompt, mission, and work directory.
+        """
+        tools = [
+            WebSearchTool(),
+            WebFetchTool(),
+            PythonTool(),
+            GitHubTool(),
+            GitTool(),
+            FileReadTool(),
+            FileWriteTool(),
+            PowerShellTool(),
+        ]
+
+        system_prompt = GENERIC_SYSTEM_PROMPT
+        work_dir = Path(work_dir)
+        work_dir.mkdir(exist_ok=True)
+
+        # todolist directory is work_dir/todolists
+        todolist_dir = work_dir / "todolists"
+        todolist_dir.mkdir(exist_ok=True)
+        planner = TodoListManager(base_dir=todolist_dir)
+
+        # state directory is work_dir/states
+        state_dir = work_dir / "states"
+        state_dir.mkdir(exist_ok=True)
+        state_manager = StateManager(base_dir=state_dir)
+
+        return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm)
