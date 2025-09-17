@@ -1,5 +1,6 @@
 # An Agent class
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from attr import dataclass
@@ -75,6 +76,10 @@ class MessageHistory:
         # Return only the last n pairs, preserving chronological order
         start_index = len(body) - (n * 2)
         return [self.system_prompt] + body[start_index:]
+
+    def __str__(self) -> str:
+        return json.dumps(self.messages, ensure_ascii=False, indent=2)
+
 
 
 
