@@ -305,7 +305,8 @@ def test_todolist_creation():
     todolist = asyncio.run(manager.create_todolist(mission=mission, mission_context=mission_context))
 
     print("Todolist created:")
-    print(todolist)
+    print(todolist.to_json())
+    pass
 
 
 
