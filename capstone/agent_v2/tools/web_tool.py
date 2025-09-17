@@ -38,7 +38,9 @@ class WebSearchTool(Tool):
                     params=params,
                     timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
-                    data = await response.json()
+                    # DuckDuckGo may return a non-standard JSON Content-Type (e.g., application/x-javascript)
+                    # Allow json() to parse regardless of Content-Type to avoid ContentTypeError.
+                    data = await response.json(content_type=None)
                     
                     results = []
                     
