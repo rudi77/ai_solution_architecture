@@ -156,6 +156,12 @@ class TodoListManager:
 
         Args:
             todolist_id: The id of the todolist to load.
+
+        Returns:
+            A todolist from a file.
+
+        Raises:
+            FileNotFoundError: If the todolist file is not found.
         """
 
         todolist_path = self.get_todolist_path(todolist_id)
