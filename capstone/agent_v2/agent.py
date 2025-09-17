@@ -51,13 +51,23 @@ class MessageHistory:
         self.messages = [self.system_prompt]
 
     def add_message(self, message: str, role: str) -> None:
+        """
+        Adds a message to the message history.
+
+        Args:
+            message: The message to add.
+            role: The role of the message.
+        """
         self.messages.append({"role": role, "content": message})
 
-    def get_last_n_messages(self, n: int):
+    def get_last_n_messages(self, n: int) -> List[Dict[str, Any]]:
         """
         Gets the last n message pairs (user and assistant) in chronological order,
         always including the system prompt as the first message. If there is an
         incomplete trailing message (no pair), it is ignored.
+
+        Args:
+            n: The number of message pairs to get.
         """
         if n <= 0:
             return [self.system_prompt]
@@ -77,9 +87,43 @@ class MessageHistory:
         start_index = len(body) - (n * 2)
         return [self.system_prompt] + body[start_index:]
 
+    def replace_system_prompt(self, system_prompt: str) -> None:
+        """
+        Replaces the system prompt with the new system prompt.
+
+        Args:
+            system_prompt: The new system prompt.
+        """
+        self.system_prompt = {"role": "system", "content": system_prompt}
+        self.messages[0] = self.system_prompt
+
     def __str__(self) -> str:
         return json.dumps(self.messages, ensure_ascii=False, indent=2)
 
+def build_system_prompt(base: str, mission: str, todo_list: Optional[str] = "") -> str:
+    """
+    Build the system prompt from base, mission, and todo list sections.
+
+    Args:
+        base (str): The static base instructions (timeless context).
+        mission (str): The agent's mission or current objective.
+        todo_list (str, optional): Current todo list, may be empty. Defaults to "".
+
+    Returns:
+        str: Final system prompt ready for use.
+    """
+    prompt = f"""<Base>
+{base.strip()}
+</Base>
+
+<Mission>
+{mission.strip()}
+</Mission>
+
+<TODOList>
+{todo_list.strip() if todo_list else ""}
+</TODOList>"""
+    return prompt
 
 
 
@@ -112,6 +156,7 @@ class Agent:
         self.tools = tools
         self.todo_list = todo_list
         self.state_manager = state_manager
+        self.message_history = MessageHistory(build_system_prompt(system_prompt, mission))
 
 
     async def execute(self, user_message: str, session_id: str, message_history: List[Dict[str, Any]]) -> Dict[str, Any]:
