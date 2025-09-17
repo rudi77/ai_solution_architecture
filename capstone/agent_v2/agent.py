@@ -124,13 +124,23 @@ class ThoughtAction:
         """
         Creates a ThoughtAction object from a JSON string.
         """
-        data = json.loads(json_str)
+        # Accept both JSON string and already-parsed dict
+        if isinstance(json_str, (str, bytes, bytearray)):
+            data = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            data = json_str
+        else:
+            raise TypeError("ThoughtAction.from_json expects str|bytes|bytearray|dict")
+
+        action_type_value = data.get("type")
+        action_type = action_type_value if isinstance(action_type_value, ActionType) else ActionType(action_type_value)
+
         return ThoughtAction(
-            type=ActionType(data["type"]), 
-            tool=data["tool"], 
-            input=data["input"], 
-            question=data["question"], 
-            message=data["message"])
+            type=action_type,
+            tool=data.get("tool"),
+            input=data.get("input", {}),
+            question=data.get("question"),
+            message=data.get("message"))
 
 @dataclass
 class Thought:
@@ -144,7 +154,13 @@ class Thought:
         """
         Creates a Thought object from a JSON string.
         """
-        data = json.loads(json_str)
+        # Accept both JSON string and already-parsed dict
+        if isinstance(json_str, (str, bytes, bytearray)):
+            data = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            data = json_str
+        else:
+            raise TypeError("Thought.from_json expects str|bytes|bytearray|dict")
         return Thought(
             next_step_ref=data["next_step_ref"],
             rationale=data["rationale"],
