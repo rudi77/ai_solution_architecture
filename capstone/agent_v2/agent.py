@@ -167,6 +167,28 @@ class Thought:
             action=ThoughtAction.from_json(data["action"]),
             expected_outcome=data["expected_outcome"])
 
+# create an Action class which is a dataclass with the following fields:
+# - type: ActionType
+# - tool: Optional[str]
+# - input: Dict[str, Any]
+# - question: Optional[str]
+# - message: Optional[str]
+@dataclass
+class Action:
+    type: ActionType
+    tool: Optional[str]
+    input: Dict[str, Any]
+
+    @staticmethod
+    def from_json(json_str: str) -> "Action":
+        """
+        Creates an Action object from a JSON string.
+        """
+        data = json.loads(json_str)
+        return Action(
+            type=ActionType(data["type"]),
+            tool=data["tool"],
+            input=data["input"])
 
 
 def build_system_prompt(system_prompt: str, mission: str, todo_list: Optional[str] = "") -> str:
@@ -246,7 +268,6 @@ class Agent:
 
         # get the current state of the agent
         state = await self.state_manager.load_state(session_id)
-
 
 
         # update message history in state
@@ -395,17 +416,71 @@ class Agent:
         return Thought.from_json(response.choices[0].message.content)
 
 
-    async def _decide_next_action(self, thought: str, next_step: str) -> str:
+    async def _decide_next_action(self, thought: Thought, next_step: TodoItem) -> Action:
         """
         Decides the next action for the next step based on the thought.
         """
-        pass
+        thought_action = thought.action
+        if thought_action.type == ActionType.TOOL:
+            return Action(
+                type=ActionType.TOOL,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        elif thought_action.type == ActionType.ASK:
+            return Action(
+                type=ActionType.ASK,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        elif thought_action.type == ActionType.DONE:
+            return Action(
+                type=ActionType.DONE,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        elif thought_action.type == ActionType.PLAN:
+            return Action(
+                type=ActionType.PLAN,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        elif thought_action.type == ActionType.ERR:
+            return Action(
+                type=ActionType.ERR,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        else:
+            raise ValueError(f"Invalid action type: {thought_action.type}")
 
-    async def _execute_action(self, action: str) -> str:
+    async def _execute_action(self, action: Action) -> str:
         """
         Executes the action for the next step.
         """
-        pass
+        if action.type == ActionType.TOOL:            
+            tool = self._get_tool(action.tool)
+            if not tool:
+                raise ValueError(f"Tool '{action.tool}' not found")
+
+            return await tool.execute(**action.input)
+            
+        elif action.type == ActionType.ASK:
+            pass
+        elif action.type == ActionType.DONE:
+            pass
+        elif action.type == ActionType.PLAN:
+            pass
+        elif action.type == ActionType.ERR:
+            pass
+        else:
+            raise ValueError(f"Invalid action type: {action.type}")
+
+    def _get_tool(self, tool_name: str) -> Tool:
+        """
+        Gets the tool from the tools list where the name matches the tool_name
+        """
+
+        # check if tool_name starts with functions.
+        if tool_name.startswith("functions."):
+            tool_name = tool_name[len("functions."):]
+
+        return next((tool for tool in self.tools if tool.name == tool_name), None)
 
     # create a static method to create an agent
     @staticmethod
