@@ -53,6 +53,19 @@ class TodoItem:
     parameters: Dict[str, Any]
     status: TaskStatus = TaskStatus.PENDING
 
+    def to_json(self) -> str:
+        """Serialize the TodoItem to a JSON string."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the TodoItem to a serializable dict."""
+        return {
+            "position": self.position,
+            "description": self.description,
+            "tool": self.tool,
+            "parameters": self.parameters,
+            "status": self.status.value if isinstance(self.status, TaskStatus) else str(self.status),
+        }
 
 @dataclass
 class TodoList:
