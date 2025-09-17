@@ -1,12 +1,15 @@
 # An Agent class
 
+from dataclasses import field
+from enum import Enum
 import json
 from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional
 from attr import dataclass
 import litellm
 
-from capstone.agent_v2.planning.todolist import TodoList, TodoListManager
+from capstone.agent_v2.planning.todolist import TodoItem, TodoList, TodoListManager
 from capstone.agent_v2.statemanager import StateManager
 from capstone.agent_v2.tool import Tool
 from capstone.agent_v2.tools.code_tool import PythonTool
@@ -100,12 +103,62 @@ class MessageHistory:
     def __str__(self) -> str:
         return json.dumps(self.messages, ensure_ascii=False, indent=2)
 
-def build_system_prompt(base: str, mission: str, todo_list: Optional[str] = "") -> str:
+
+class ActionType(Enum):
+    TOOL = "tool_call"
+    ASK  = "ask_user"
+    DONE = "complete"
+    PLAN = "update_todolist"
+    ERR  = "error_recovery"
+
+@dataclass
+class ThoughtAction:
+    type: ActionType
+    tool: Optional[str] = None
+    input: Dict[str, Any] = field(default_factory=dict)
+    question: Optional[str] = None   # nur bei ask_user
+    message: Optional[str] = None    # nur bei complete
+
+    @staticmethod
+    def from_json(json_str: str) -> "ThoughtAction":
+        """
+        Creates a ThoughtAction object from a JSON string.
+        """
+        data = json.loads(json_str)
+        return ThoughtAction(
+            type=ActionType(data["type"]), 
+            tool=data["tool"], 
+            input=data["input"], 
+            question=data["question"], 
+            message=data["message"])
+
+@dataclass
+class Thought:
+    next_step_ref: int
+    rationale: str                   # kurz, max. 2 Sätze
+    action: ThoughtAction
+    expected_outcome: str
+
+    @staticmethod
+    def from_json(json_str: str) -> "Thought":
+        """
+        Creates a Thought object from a JSON string.
+        """
+        data = json.loads(json_str)
+        return Thought(
+            next_step_ref=data["next_step_ref"],
+            rationale=data["rationale"],
+            action=ThoughtAction.from_json(data["action"]),
+            expected_outcome=data["expected_outcome"])
+
+
+
+def build_system_prompt(system_prompt: str, mission: str, todo_list: Optional[str] = "") -> str:
     """
     Build the system prompt from base, mission, and todo list sections.
 
     Args:
-        base (str): The static base instructions (timeless context).
+        system_prompt (str): The static base instructions (timeless context).
         mission (str): The agent's mission or current objective.
         todo_list (str, optional): Current todo list, may be empty. Defaults to "".
 
@@ -113,7 +166,7 @@ def build_system_prompt(base: str, mission: str, todo_list: Optional[str] = "") 
         str: Final system prompt ready for use.
     """
     prompt = f"""<Base>
-{base.strip()}
+{system_prompt.strip()}
 </Base>
 
 <Mission>
@@ -134,7 +187,7 @@ class Agent:
         system_prompt: Optional[str],
         mission: Optional[str],
         tools: List[Tool],
-        todo_list: TodoListManager,
+        todo_list_manager: TodoListManager,
         state_manager: StateManager,
         llm):
         """
@@ -154,10 +207,11 @@ class Agent:
         self.system_prompt = system_prompt
         self.mission = mission
         self.tools = tools
-        self.todo_list = todo_list
+        self.tools_description = self._get_tools_description()
+        self.tools_schema = self._get_tools_schema()
+        self.todo_list_manager = todo_list_manager
         self.state_manager = state_manager
-        self.message_history = MessageHistory(build_system_prompt(system_prompt, mission))
-
+        self.message_history = MessageHistory(build_system_prompt(system_prompt, mission, self.tools_description))
 
     async def execute(self, user_message: str, session_id: str, message_history: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -177,6 +231,8 @@ class Agent:
         # get the current state of the agent
         state = await self.state_manager.load_state(session_id)
 
+
+
         # update message history in state
         state["message_history"] = message_history
         state["last_user_message"] = user_message
@@ -191,7 +247,7 @@ class Agent:
         todolist = await self._create_or_get_todolist(session_id, state)
 
         # now that we have the todolist, we can execute the todolist in a ReAct loop
-        for next_step in todolist.steps:
+        for next_step in todolist.items:
            # 1. generate a thought
            thought = await self._generate_thought(next_step)
            # 2. decide the next action
@@ -216,16 +272,22 @@ class Agent:
         todolist_id = state.get("todolist_id")
         # check if a plan has already been created for the mission
         if not todolist_id:
-            # create a new plan for the mission
-            message_history = state.get("message_history")
-            plan = await self.todo_list.create_todolist(self.mission, self._get_planning_context(session_id, message_history))
-            todolist_id = plan.id
-            state["todolist_id"] = todolist_id
+            todolist = await self.todo_list_manager.create_todolist(self.mission, self.tools_description)
+            state["todolist_id"] = todolist.todolist_id
             await self.state_manager.save_state(session_id, state)
-            return plan
+
+            # update the message history with the new todolist
+            system_prompt = build_system_prompt(system_prompt=self.system_prompt, mission=self.mission, todo_list=todolist.to_json())
+            self.message_history.replace_system_prompt(system_prompt)
+
+            # add a new message to the message history
+            self.message_history.add_message(f"New todolist created: {todolist.to_json()}", "assistant")
+
+            return todolist
         else:
-            plan = await self.todo_list.load_todolist(todolist_id)                
-            return plan
+            todolist = await self.todo_list_manager.load_todolist(todolist_id)                
+            return todolist
+
 
     def _get_planning_context(self, session_id: str, message_history: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -247,15 +309,79 @@ class Agent:
             "history": message_history,
         }            
 
-    async def _generate_thought(self, next_step: str) -> str:
+
+    def _get_tools_description(self) -> str:
         """
-        Generates a thought for the next step.
+        Gets the description of the tools available.
         """
-        pass
+        return "\n".join([ f"- {tool.name}: {tool.description}" for tool in self.tools])
+
+
+    def _get_tools_schema(self) -> List[Dict[str, Any]]:
+        """
+        Gets the schema of the tools available which can be used as a function calling schema for the LLM.
+        """
+        return [tool.function_tool_schema for tool in self.tools]
+
+
+    async def _generate_thought(self, next_step: TodoItem) -> Thought:
+        """
+        ReAct Thought Generation:
+        Generates a thought for the next step. A thought is a plan for the next step.
+        Therfore the following context is needed:
+        - The next step
+        - The tools available
+        - The history of the agent
+        - The system prompt of the agent
+        - The mission of the agent
+        - The todo list of the agent
+
+        Args:
+            next_step: The next step to generate a thought for.
+
+        Returns:
+            A thought for the next step. A thought is a plan for the next step which is a JSON object.
+        """
+        schema_hint = {
+            "next_step_ref": "int",
+            "rationale": "string (<= 2 sentences)",
+            "action": {
+                "type": "tool_call|ask_user|complete|update_todolist|error_recovery",
+                "tool": "string|null",
+                "input": "object",
+                "question": "string? (ask_user)",
+                "message": "string? (complete)"
+            },
+            "expected_outcome": "string"
+        }
+
+        # get the last 2 messages from the message history. this shall be sufficient for the LLM to plan the next action.
+        messages = self.message_history.get_last_n_messages(2)
+
+        messages.append({"role": "user", "content": (
+            "You are the Planning & Action Selector.\n"
+            "Pick exactly one next action for the next_step below.\n"
+            f"NEXT_STEP:\n{next_step.to_json()}\n\n"
+            "Prefer tools; ask_user only if info is missing.\n"
+            "Return STRICT JSON only (no extra text) matching this schema:\n"
+            f"{json.dumps(schema_hint, ensure_ascii=False)}\n\n"
+        )})
+
+        response = await litellm.acompletion(
+            model="gpt-4.1-mini",
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+            tools=self.tools_schema,
+            tool_choice="auto",
+        )
+
+        return Thought.from_json(response.choices[0].message.content)
+
 
     async def _decide_next_action(self, thought: str, next_step: str) -> str:
         """
-        Decides the next action for the next step.
+        Decides the next action for the next step based on the thought.
         """
         pass
 
@@ -306,7 +432,7 @@ class Agent:
             PowerShellTool(),
         ]
 
-        system_prompt = GENERIC_SYSTEM_PROMPT
+        system_prompt = GENERIC_SYSTEM_PROMPT if system_prompt is None else system_prompt
         work_dir = Path(work_dir)
         work_dir.mkdir(exist_ok=True)
 
@@ -318,6 +444,61 @@ class Agent:
         # state directory is work_dir/states
         state_dir = work_dir / "states"
         state_dir.mkdir(exist_ok=True)
-        state_manager = StateManager(base_dir=state_dir)
+        state_manager = StateManager(state_dir=state_dir)
 
         return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm)
+
+
+# ============================================
+# MAIN ENTRY POINT FOR QUICK DEBUGGING
+# ============================================
+def main():
+    """Minimal entrypoint to construct the Agent and run until thought generation."""
+    import os
+    import asyncio
+    import uuid
+    from pathlib import Path
+
+    # Ensure API key for LLM is available
+    if not os.getenv("OPENAI_API_KEY"):
+        print("Error: Please set OPENAI_API_KEY environment variable before running.")
+        return
+
+    name = "AgentV2-Debug"
+    description = "Lightweight debug run to reach thought generation."
+    system_prompt = GENERIC_SYSTEM_PROMPT
+
+    # Mission designed to encourage at least two tools (web search + file write)
+    mission = (
+        "Research the latest Python release notes via web search and write a short summary "
+        "to a local file named RELEASE_NOTES_SUMMARY.txt."
+    )
+
+    # Use a local work directory next to this file
+    work_dir = str((Path(__file__).parent / ".debug_work").resolve())
+
+    # Create agent
+    agent = Agent.create_agent(
+        name=name,
+        description=description,
+        system_prompt=system_prompt,
+        mission=mission,
+        work_dir=work_dir,
+        llm=None,
+    )
+
+    # Minimal inputs for execute()
+    session_id = f"debug-{uuid.uuid4()}"
+    user_message = "Bitte starte den Plan und führe den ersten Schritt aus."
+    message_history: list[dict] = []
+
+    print(f"Starting Agent execute() with session_id={session_id}")
+    try:
+        asyncio.run(agent.execute(user_message=user_message, session_id=session_id, message_history=message_history))
+        print("Agent execute() finished (up to current implementation).")
+    except Exception as exc:
+        print(f"Agent execution failed: {exc}")
+
+
+if __name__ == "__main__":
+    main()

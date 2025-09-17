@@ -47,7 +47,7 @@ class StateManager:
             state_file = self.state_dir / f"{session_id}.pkl"
             
             if not state_file.exists():
-                return None
+                return {}
             
             import aiofiles
             async with aiofiles.open(state_file, 'rb') as f:
