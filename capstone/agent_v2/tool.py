@@ -65,6 +65,18 @@ class Tool(ABC):
             "properties": properties,
             "required": required
         }
+
+    @property
+    def function_tool_schema(self) -> Dict[str, Any]:
+        """Return full OpenAI function tool schema for this tool."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters_schema,
+            },
+        }
     
     @abstractmethod
     async def execute(self, **kwargs) -> Dict[str, Any]:
