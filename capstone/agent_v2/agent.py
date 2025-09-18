@@ -21,17 +21,36 @@ from capstone.agent_v2.tools.web_tool import WebFetchTool, WebSearchTool
 GENERIC_SYSTEM_PROMPT = """
 You are a ReAct-style execution agent.
 
-Operating principles:
-- Plan-first: create/update a concise Todo List; clarify blocking questions first.
-- Be deterministic, keep outputs minimal & actionable.
-- After each tool call, update state; avoid loops; ask for help on blockers.
+## Core Principles
+- **Plan First**: Always build or refine a Todo List before executing. Plans must be minimal, deterministic, and single-responsibility (each step has one clear outcome).
+- **Clarify Early**: If any required parameter is unknown, mark it as "ASK_USER" and add a precise clarification question to open_questions. Do not guess.
+- **Determinism & Minimalism**: Prefer fewer, well-scoped steps over many fuzzy ones. Outputs must be concise, structured, and directly actionable. No filler text.
+- **Tool Preference**: Use available tools whenever possible. Only ask the user when essential data is missing. Never hallucinate tools.
+- **State Updates**: After every tool call or user clarification, update state (Todo List, step status, answers). Avoid infinite loops.
+- **Stop Condition**: End execution when the mission’s acceptance criteria are met or all Todo steps are completed.
 
-Decision policy:
-- Prefer available tools; when in doubt, ask the user for clarification rather than making assumptions.
-- Stop when acceptance criteria for the mission are met.
+## Decision Policy
+- Prefer tools > ask_user > stop.
+- Never assume implicit values—ask explicitly if uncertain.
+- Re-plan only if a blocker is discovered (missing parameter, failed tool, new mission context).
 
-Output style:
-- Short, structured, CLI-friendly status lines.
+## Output & Communication Style
+- Responses must be short, structured, and CLI-friendly.
+- For planning: return strict JSON matching the required schema.
+- For execution: emit clear status lines or structured events (thought, action, result, ask_user).
+- For ask_user: provide exactly one direct, actionable question.
+
+## Roles
+- **Planner**: Convert the mission into a Todo List (JSON). Insert "ASK_USER" placeholders where input is required. Ensure dependencies are correct and non-circular.
+- **Executor**: Process each Todo step in order. For each step: generate a thought, decide one next action, execute, record observation.
+- **Clarifier**: When encountering ASK_USER, pause execution and request the answer in a single, well-phrased question. Resume once the answer is given.
+- **Finisher**: Stop once all Todo items are resolved or the mission goal is clearly achieved. Emit a "complete" action with a final status message.
+
+## Constraints
+- Always produce valid JSON when asked.
+- Do not output code fences, extra commentary, or natural-language paragraphs unless explicitly required.
+- Keep rationales ≤2 sentences.
+- Be strict: only valid action types are {tool_call, ask_user, complete, update_todolist, error_recovery}.
 """
 
 # Ich brauche noch eine Messsage History Klasse die die Kommunikation zwischen dem Agent und dem User speichert
@@ -336,7 +355,11 @@ class Agent:
                     "question": unanswered_question
                 }
                 await self.state_manager.save_state(session_id, self.state)
-                yield AgentEvent(type=AgentEventType.STATE_UPDATED, data={"pending_question": self.state["pending_question"]})
+                # Emit an interactive event so callers can prompt the user
+                yield AgentEvent(
+                    type=AgentEventType.ASK_USER,
+                    data={"question": unanswered_question}
+                )
                 return            
 
         # now that we have the todolist, we can execute the todolist in a ReAct loop
@@ -358,14 +381,17 @@ class Agent:
             self.state["last_observation"] = observation
             # 5. update the state of the next step
             if observation.get("success"):
-                next_step.state = TaskStatus.COMPLETED
+                next_step.status = TaskStatus.COMPLETED
             else:
-                next_step.state = TaskStatus.FAILED
+                next_step.status = TaskStatus.FAILED
             # 6. save the state
             await self.state_manager.save_state(session_id, self.state)
+            # 7. update the todolist
+            self.todo_list_manager.update_todolist(todolist)
 
 
-        yield AgentEvent(type=AgentEventType.COMPLETE, data={"todolist": todolist.to_json()})
+        yield AgentEvent(type=AgentEventType.COMPLETE, data={"todolist": todolist.to_markdown()})
+        return
 
 
     async def _create_or_get_todolist(self, session_id: str, state: Dict[str, Any]) -> Optional[TodoList]:
@@ -656,12 +682,36 @@ def main():
 
     # Minimal inputs for execute()
     session_id = f"debug-{uuid.uuid4()}"
-    user_message = "Create a new directory named 'my-test-dir' and add a README.txt file inside it containing a hello_world code example."
+    user_message = "Create a new directory and add a README.txt file inside it containing a hello_world code example."
 
     print(f"Starting Agent execute() with session_id={session_id}")
     try:
-        asyncio.run(agent.execute(user_message=user_message, session_id=session_id))
-        print("Agent execute() finished (up to current implementation).")
+        async def drive():
+            current_input = user_message
+            done = False
+            while True:
+                asked = False
+                async for ev in agent.execute(user_message=current_input, session_id=session_id):
+                    if ev.type.name == AgentEventType.ASK_USER.name:
+                        print("QUESTION:", ev.data.get("question"))
+                        current_input = input("> ").strip()
+                        asked = True
+                        break
+                    elif ev.type.name == AgentEventType.COMPLETE.name:
+                        print("Agent completed.")
+                        print(ev.data.get("todolist"))
+                        done = True
+                        # Do NOT break here; let the async generator finish naturally
+                        # to avoid cancellation at the yield suspension point.
+                if not asked:
+                    # No new question and not complete -> exit
+                    break
+                if done:
+                    # Completed; exit outer loop after the async generator finishes
+                    break
+
+        asyncio.run(drive())
+        print("Agent session finished.")
     except Exception as exc:
         print(f"Agent execution failed: {exc}")
 
