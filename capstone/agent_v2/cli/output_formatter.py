@@ -156,7 +156,7 @@ class OutputFormatter:
             table.add_column("Description", style="white")
 
             for tool in tools:
-                status = "[green]Installed[/green]" if tool.get('installed', False) else "[red]Not Installed[/red]"
+                status = "[green]✅ Installed[/green]" if tool.get('installed', False) else "[red]❌ Not Installed[/red]"
                 description = tool.get('description', '')
                 if len(description) > 50:
                     description = description[:47] + "..."
@@ -183,8 +183,8 @@ class OutputFormatter:
             table.add_column("Default", style="blue")
 
             for provider in providers:
-                status = "[green]Connected[/green]" if provider.get('connected', False) else "[red]Not Connected[/red]"
-                is_default = "[blue]Yes[/blue]" if provider.get('is_default', False) else ""
+                status = "[green]✅ Connected[/green]" if provider.get('connected', False) else "[red]❌ Not Connected[/red]"
+                is_default = "[blue]⭐ Yes[/blue]" if provider.get('is_default', False) else ""
 
                 table.add_row(
                     provider.get('name', ''),
