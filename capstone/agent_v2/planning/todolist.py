@@ -203,6 +203,86 @@ class TodoListManager:
         self.base_dir = base_dir
 
 
+    async def extract_clarification_questions(self, mission: str, tools_desc: str) -> List[str]:
+        """
+        Extracts clarification questions from the mission and tools_desc.
+
+        Args:
+            mission: The mission to create the todolist for.
+            tools_desc: The description of the tools available.
+
+        Returns:
+            A list of clarification questions.
+        """
+        user_prompt, system_prompt = self.create_clarification_questions_prompts(mission, tools_desc)
+        response = await litellm.acompletion(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0  # deterministischer
+        )
+        raw = response.choices[0].message.content
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            # Optional: Fallback/Retry oder klare Fehlermeldung
+            raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
+        return data
+
+
+    def create_clarification_questions_prompts(self, mission: str, tools_desc: str) -> Tuple[str, str]:
+        """
+        Creates a prompt for clarification questions (Pre-Clarification).
+        Returns (user_prompt, system_prompt).
+        """
+        system_prompt = f"""
+    You are a Clarification-Mining Agent.
+
+    ## Task
+    Extract **only** the missing required information needed to create an **executable** plan for the mission using the available tools.
+
+    ## Context
+    - Mission:
+    {mission}
+
+    - Available tools (names, descriptions, parameter schemas):
+    {tools_desc}
+
+    ## Output format
+    - Return **only** a valid JSON array (no code fences, no commentary).
+    - Each element of the array must have exactly these fields:
+    - "key": a stable, machine-readable identifier in **snake_case**. Use the format **"<tool>.<parameter>"** when possible (e.g., "file_writer.filename"). If tool-agnostic, use a clear domain key (e.g., "project_name").
+    - "question": **one** short, closed, unambiguous question (one piece of information per question).
+
+    ## Strict Rules
+    1) **Only required info**: Ask only for parameters that are strictly required by the tools and cannot be defaulted.
+    2) **No Todo steps**: Do not return tasks, steps, or explanations — only questions.
+    3) **Closed & precise**:
+    - Phrase so the answer is concise (e.g., a value, choice, yes/no).
+    - Include necessary **formats/units/constraints** (e.g., "kebab-case", "filename with extension", "ISO-8601 date").
+    - No ambiguity, no multiple sub-questions, no small talk.
+    4) **Minimal & deduplicated**: No duplicates, no optional nice-to-have questions.
+    5) **Nothing missing?**: If no required information is missing, return an empty array [].
+
+    ## Example (illustrative only, do not force):
+    [
+    {{"key":"file_writer.filename","question":"What should the output file be called (include extension, e.g., report.txt)?"}},
+    {{"key":"email_sender.recipient","question":"What is the recipient email address for the message?"}}
+    ]
+    """.strip()
+
+        user_prompt = (
+            'Provide the missing required information as a JSON array in the form '
+            '[{"key":"<tool.parameter|domain_key>", "question":"<closed, precise question>"}]. '
+            'If nothing is missing, return [].'
+        )
+
+        return user_prompt, system_prompt
+
+
     async def create_todolist(self, mission: str, tools_desc: str) -> TodoList:
         """
         Creates a new todolist based on the mission and tools_desc.
