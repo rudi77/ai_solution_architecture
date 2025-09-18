@@ -1,4 +1,585 @@
 
+// Relative Path: planning\todolist.py
+from __future__ import annotations
+
+from enum import Enum
+import os
+from pathlib import Path
+from datetime import datetime
+from typing import Any, Dict, Optional, Iterable, List, Tuple
+import re
+import litellm
+import json
+import uuid
+
+from dataclasses import dataclass, field, asdict
+
+# ===== Structured Plan Models (Single Source of Truth) =====
+class TaskStatus(str, Enum):
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+def parse_task_status(value: Any) -> TaskStatus:
+    """Parse arbitrary status strings to TaskStatus with safe fallbacks.
+
+    Accepts common aliases like "open" -> PENDING, "inprogress" -> IN_PROGRESS, etc.
+    """
+    text = str(value or "").strip().replace("-", "_").replace(" ", "_").upper()
+    if not text:
+        return TaskStatus.PENDING
+
+    alias = {
+        "OPEN": "PENDING",
+        "TODO": "PENDING",
+        "INPROGRESS": "IN_PROGRESS",
+        "DONE": "COMPLETED",
+        "COMPLETE": "COMPLETED",
+        "FAIL": "FAILED",
+    }
+    normalized = alias.get(text, text)
+    try:
+        return TaskStatus[normalized]
+    except KeyError:
+        return TaskStatus.PENDING
+
+
+@dataclass
+class TodoItem:
+    position: int
+    description: str
+    tool: str
+    parameters: Dict[str, Any]
+    status: TaskStatus = TaskStatus.PENDING
+
+    def to_json(self) -> str:
+        """Serialize the TodoItem to a JSON string."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the TodoItem to a serializable dict."""
+        return {
+            "position": self.position,
+            "description": self.description,
+            "tool": self.tool,
+            "parameters": self.parameters,
+            "status": self.status.value if isinstance(self.status, TaskStatus) else str(self.status),
+        }
+
+@dataclass
+class TodoList:
+    items: List[TodoItem]
+    open_questions: List[str]
+    notes: str
+    todolist_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    @staticmethod
+    def from_json(json_text: Any) -> "TodoList":
+        """Create a TodoList from an LLM JSON string/object.
+
+        Accepts either a JSON string or a pre-parsed dict and returns
+        a populated TodoList instance with sane fallbacks.
+        """
+        try:
+            data = json.loads(json_text) if isinstance(json_text, str) else (json_text or {})
+        except Exception:
+            data = {}
+
+        raw_items = data.get("items", []) or []
+        items: List[TodoItem] = []
+        for index, raw in enumerate(raw_items, start=1):
+            try:
+                position = int(raw.get("position", index))
+            except Exception:
+                position = index
+
+            item = TodoItem(
+                position=position,
+                description=str(raw.get("description", "")).strip(),
+                tool=str(raw.get("tool", "")).strip(),
+                parameters=raw.get("parameters") or {},
+                status=parse_task_status(raw.get("status")),
+            )
+            items.append(item)
+
+        open_questions = [str(q) for q in (data.get("open_questions", []) or [])]
+        notes = str(data.get("notes", ""))
+        todolist_id = str(data.get("todolist_id") or str(uuid.uuid4()))
+
+        return TodoList(todolist_id=todolist_id, items=items, open_questions=open_questions, notes=notes)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the TodoList to a serializable dict."""
+        # Convert Enum to value for JSON friendliness
+        def serialize_item(item: TodoItem) -> Dict[str, Any]:
+            return {
+                "position": item.position,
+                "description": item.description,
+                "tool": item.tool,
+                "parameters": item.parameters,
+                "status": item.status.value if isinstance(item.status, TaskStatus) else str(item.status),
+            }
+
+        return {
+            "todolist_id": self.todolist_id,
+            "items": [serialize_item(i) for i in self.items],
+            "open_questions": list(self.open_questions or []),
+            "notes": self.notes or "",
+        }
+
+    def to_json(self) -> str:
+        """Serialize the TodoList to a JSON string."""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+
+    def to_markdown(self) -> str:
+        """
+        Converts a todolist to a markdown string.
+        """
+        def _status_str(s: Any) -> str:
+            # Normalize TaskStatus or string to lowercase text
+            if hasattr(s, "value"):
+                s = s.value  # Enum-like (e.g., TaskStatus)
+            return str(s or "").strip()
+
+        def _is_checked(status_text: str) -> bool:
+            st = status_text.lower()
+            # Treat these as completed
+            return st in {"done", "completed", "success", "succeeded"}
+
+        # Build markdown lines
+        lines: List[str] = []
+        title = f"Todo List — {self.todolist_id}"
+        lines.append(f"# {title}\n")
+
+        if (self.notes or "").strip():
+            lines.append("## Notes")
+            lines.append(self.notes.strip() + "\n")
+
+        # Items
+        lines.append("## Items")
+        if not self.items:
+            lines.append("_No items yet._\n")
+        else:
+            # Ensure stable ordering
+            items_sorted = sorted(self.items, key=lambda i: (i.position, i.description or ""))
+            for item in items_sorted:
+                status_text = _status_str(item.status)
+                checked = "x" if _is_checked(status_text) else " "
+                # Ordered list with GitHub-style checkbox
+                lines.append(f"{item.position}. [{checked}] **{item.description or ''}**")
+                # Tool and status line
+                tool = item.tool or ""
+                lines.append(f"   - **Tool:** `{tool}`")
+                lines.append(f"   - **Status:** `{status_text or 'unknown'}`")
+                # Parameters pretty-printed as JSON
+                try:
+                    params_json = json.dumps(item.parameters or {}, ensure_ascii=False, indent=2, sort_keys=True)
+                except Exception:
+                    # Fallback in case parameters aren't JSON-serializable
+                    params_json = str(item.parameters)
+                lines.append("   - **Parameters:**")
+                lines.append("     ```json")
+                # Indent each line of the JSON block so it nests nicely under the list item
+                for ln in (params_json.splitlines() or ["{}"]):
+                    lines.append(f"     {ln}")
+                lines.append("     ```\n")
+
+        # Open questions
+        lines.append("## Open questions")
+        if not self.open_questions:
+            lines.append("_None._")
+        else:
+            for q in self.open_questions:
+                lines.append(f"- {q}")
+
+        # Final newline
+        lines.append("")
+        return "\n".join(lines)
+
+
+class TodoListManager:
+    def __init__(self, base_dir: str = "./checklists"):
+        self.base_dir = base_dir
+
+
+    async def extract_clarification_questions(self, mission: str, tools_desc: str) -> List[Dict[str, Any]]:
+        """
+        Extracts clarification questions from the mission and tools_desc.
+
+        Args:
+            mission: The mission to create the todolist for.
+            tools_desc: The description of the tools available.
+
+        Returns:
+            A list of clarification questions.
+        """
+        user_prompt, system_prompt = self.create_clarification_questions_prompts(mission, tools_desc)
+        response = await litellm.acompletion(
+            model="gpt-4.1",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0  # deterministischer
+        )
+        raw = response.choices[0].message.content
+        try:
+            data = json.loads(raw)            
+        except json.JSONDecodeError as e:
+            # Optional: Fallback/Retry oder klare Fehlermeldung
+            raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
+        return data
+
+
+
+    def create_clarification_questions_prompts(self, mission: str, tools_desc: str) -> Tuple[str, str]:
+        """
+        Creates a prompt for clarification questions (Pre-Clarification).
+        Returns (user_prompt, system_prompt).
+        """
+        system_prompt = f"""
+    You are a Clarification-Mining Agent.
+
+    ## Objective
+    Find **all** missing required inputs needed to produce an **executable** plan for the mission using the available tools.
+
+    ## Context
+    - Mission (user intent and constraints):
+    {mission}
+
+    - Available tools (names, descriptions, **parameter schemas including required/optional/default/enums/types**):
+    {tools_desc}
+
+    ## Output
+    - Return **only** a valid JSON array (no code fences, no commentary).
+    - Each element must be:
+    - "key": stable, machine-readable snake_case identifier. Prefer **"<tool>.<parameter>"** (e.g., "file_writer.filename"); if tool-agnostic use a clear domain key (e.g., "project_name").
+    - "question": **one** short, closed, unambiguous question (one datum per question).
+
+    ## Algorithm (mandatory)
+    1) **Parse the mission** to understand the intended outcome and likely steps.
+    2) **Enumerate candidate tool invocations** required to achieve the mission (internally; do not output them).
+    3) For **each candidate tool**, inspect its **parameter schema**:
+    - For every **required** parameter (or optional-without-safe-default) check if its value is **explicitly present** in the mission (exact literal or clearly specified constraint).
+    - If not explicitly present, **create a question** for that parameter.
+    4) **Respect schema constraints**:
+    - Types (string/number/boolean/path/url/email), formats (e.g., kebab-case, ISO-8601), units, min/max.
+    - If an enum is specified, ask as a **closed choice** (“Which of: A, B, or C?”).
+    - **Do not infer** values unless a **default** is explicitly provided in the schema.
+    5) **Merge & deduplicate** questions across tools.
+    6) **Confidence gate**:
+    - If you are **not 100% certain** every required value is specified, you **must** ask a question for it.
+    - If truly nothing is missing, return **[]**.
+
+    ## Strict Rules
+    - **Only required info**: Ask only for parameters that are required (or effectively required because no safe default exists).
+    - **No tasks, no explanations**: Output questions only.
+    - **Closed & precise**:
+    - Ask for a single value per question; include necessary format/units/constraints in the question.
+    - Avoid ambiguity, multi-part questions, or small talk.
+    - **Minimal & deduplicated**: No duplicates; no “nice-to-have” questions.
+
+    ## Heuristic coverage (when relevant tools are present)
+    - **File/Path tools**: confirm filename **with extension** and target **directory/path**; avoid ambiguous relative paths.
+    - **Code/Project scaffolding**: project name (kebab-case), language/runtime version, package manager.
+    - **Git/Repo**: repository name, visibility (public/private), remote provider, default branch, and **auth method/token** if required by schema.
+    - **Network/Endpoints**: base URL/host, port, protocol (HTTP/HTTPS).
+    - **Auth/Secrets**: explicit key names or secret identifiers if a tool schema requires them.
+
+    ## Examples (illustrative only; do not force)
+    [
+    {{"key":"file_writer.filename","question":"What should the output file be called (include extension, e.g., report.txt)?"}},
+    {{"key":"file_writer.directory","question":"In which directory should the file be created (absolute or project-relative path)?"}},
+    {{"key":"git.create_repo.visibility","question":"Should the repository be public or private (choose one: public/private)?"}}
+    ]
+    """.strip()
+
+        user_prompt = (
+            'Provide the missing required information as a JSON array in the form '
+            '[{"key":"<tool.parameter|domain_key>", "question":"<closed, precise question>"}]. '
+            'If nothing is missing, return [].'
+        )
+
+        return user_prompt, system_prompt
+
+
+
+    async def create_todolist(self, mission: str, tools_desc: str, answers: Any) -> TodoList:
+        """
+        Creates a new todolist based on the mission and tools_desc.
+
+        Args:
+            mission: The mission to create the todolist for.
+            tools_desc: The description of the tools available.
+
+        Returns:
+            A new todolist based on the mission and tools_desc.
+
+        Raises:
+            ValueError: Invalid JSON from model.
+
+        """
+        user_prompt, system_prompt = self.create_final_todolist_prompts(mission, tools_desc, answers)
+
+        response = await litellm.acompletion(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0  # deterministischer
+        )
+
+        # Sicheres Parsing
+        raw = response.choices[0].message.content
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            # Optional: Fallback/Retry oder klare Fehlermeldung
+            raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
+
+        todolist = TodoList.from_json(data)
+        self.__write_todolist(todolist)
+        return todolist
+
+    # def __validate_plan_schema(plan: dict, tool_names: set):
+    #     if not isinstance(plan, dict):
+    #         raise ValueError("Plan must be a JSON object.")
+    #     if "items" not in plan or not isinstance(plan["items"], list):
+    #         raise ValueError("Plan.items missing or not a list.")
+
+    #     for step in plan["items"]:
+    #         for key in ["id", "description", "tool", "parameters", "depends_on", "status"]:
+    #             if key not in step:
+    #                 raise ValueError(f"Missing field '{key}' in step.")
+    #         if step["tool"] != "none" and step["tool"] not in tool_names:
+    #             raise ValueError(f"Unknown tool '{step['tool']}'")
+    #         if step["status"] not in {"PENDING", "BLOCKED", "DONE"}:
+    #             raise ValueError(f"Invalid status '{step['status']}'")
+    #         if not isinstance(step["depends_on"], list):
+    #             raise ValueError("depends_on must be a list.")
+
+
+
+    async def load_todolist(self, todolist_id: str) -> TodoList:
+        """
+        Loads a todolist from a file.
+
+        Args:
+            todolist_id: The id of the todolist to load.
+
+        Returns:
+            A todolist from a file.
+
+        Raises:
+            FileNotFoundError: If the todolist file is not found.
+        """
+
+        todolist_path = self.get_todolist_path(todolist_id)
+        # check if the file exists
+        if not todolist_path.exists():
+            raise FileNotFoundError(f"Todolist file not found: {todolist_path}")
+
+        # read the file
+        with open(todolist_path, "r") as f:
+            return TodoList.from_json(f.read())
+    
+
+    async def update_todolist(self, todolist: TodoList) -> TodoList:
+        """
+        Updates a todolist.
+
+        Args:
+            todolist: The todolist to update.
+        """
+        self.__write_todolist(todolist)
+        return todolist
+        
+
+    async def get_todolist(self, todolist_id: str) -> TodoList:
+        """
+        Gets a todolist.
+        
+        Args:
+            todolist_id: The id of the todolist to get.
+        """
+        todolist_path = self.get_todolist_path(todolist_id)
+        if not todolist_path.exists():
+            raise FileNotFoundError(f"Todolist file not found: {todolist_path}")
+        with open(todolist_path, "r") as f:
+            return TodoList.from_json(f.read())
+        
+
+    async def delete_todolist(self, todolist_id: str) -> bool:
+        """
+        Deletes a todolist.
+        
+        Args:
+            todolist_id: The id of the todolist to delete.
+        """
+        todolist_path = self.get_todolist_path(todolist_id)
+        if not todolist_path.exists():
+            raise FileNotFoundError(f"Todolist file not found: {todolist_path}")
+        todolist_path.unlink()
+        return True
+
+
+    def get_todolist_path(self, todolist_id: str) -> Path:
+        """
+        Gets the path to the todolist file.
+
+        Args:
+            todolist_id: The id of the todolist to get the path for.
+        """
+        return Path(self.base_dir) / f"todolist_{todolist_id}.json"
+
+
+    def create_final_todolist_prompts(self, mission: str, tools_desc: str, answers: Any) -> Tuple[str, str]:
+        """
+        Creates a strict prompt for the final TodoList (No-ASK mode).
+        Returns (user_prompt, system_prompt).
+        """
+
+        structure_block = """
+    {
+    "items": [
+        {
+        "id": "t1",
+        "description": "Short, precise task description (1–2 sentences)",
+        "tool": "tool_name_or_none",
+        "parameters": {},
+        "depends_on": [],
+        "status": "PENDING"
+        }
+    ],
+    "open_questions": [],
+    "notes": ""
+    }
+        """.strip()
+
+        system_prompt = f"""
+    You are a planning agent. Your sole task is to convert the mission into a
+    strict, executable TODO list. At this point, all required clarifications
+    have already been collected — there must be **no questions left**.
+
+    Context:
+
+    - Mission:
+    {mission}
+
+    - Clarification Answers (already provided, use them directly):
+    {answers}
+
+    - Available tools (names, descriptions, parameter schemas):
+    {tools_desc}
+
+    ---
+
+    ## Instructions
+
+    1) OUTPUT FORMAT
+    - Return a valid JSON object ONLY — no commentary, no code fences.
+    - Match exactly the structure under "Expected JSON structure".
+
+    2) PLAN REQUIREMENTS
+    - Produce a minimal, complete, step-by-step plan to fulfill the mission.
+    - Each step MUST be atomic (Single Responsibility).
+    - Prefer fewer, well-scoped steps over many fuzzy steps.
+
+    3) STEP FIELDS (MUST-HAVES)
+    - id: short unique id like "t1", "t2", ...
+    - description: 1–2 sentences, outcome-oriented.
+    - tool: exact tool name from the provided list, or "none" if no tool is needed.
+    - parameters: object with ONLY the required keys for the chosen tool (match the parameters_schema).
+    - depends_on: array of step ids that must be completed first (empty if none).
+    - status: always "PENDING" initially.
+
+    4) PARAMETERS
+    - Use the given Clarification Answers to fill in all required parameter values.
+    - **Do not use "ASK_USER"**. Every parameter must be concrete.
+    - Do not invent values — use only provided answers or explicit mission context.
+
+    5) DEPENDENCIES
+    - Add dependencies to enforce correct execution order.
+    - No circular dependencies. All references must exist.
+
+    6) QUALITY CHECKS BEFORE RETURNING
+    - JSON is syntactically valid.
+    - All tools exist (or "none").
+    - parameters strictly conform to the tool’s parameters_schema (no extra keys).
+    - All depends_on ids exist; no circular graphs.
+    - **open_questions must always be empty**.
+
+    ---
+
+    ## Expected JSON structure
+    {structure_block}
+        """.strip()
+
+        user_prompt = "Generate the final structured TODO list for the given mission (no questions, no ASK_USER placeholders)."
+
+        return user_prompt, system_prompt
+
+
+    def __write_todolist(self, todolist: TodoList) -> None:
+        """
+        Writes a todolist to a file.
+
+        Args:
+            todolist: The todolist to write to a file.
+        """
+        todolist_path = self.get_todolist_path(todolist.todolist_id)
+        todolist_path.parent.mkdir(parents=True, exist_ok=True)
+        todolist_path.write_text(todolist.to_json(), encoding="utf-8")
+
+# Test function for complex mission requiring at least three tools and three steps
+def test_todolist_creation():
+    # Example tools description (for LLM context)
+    tools_desc = (
+        "- file_writer: Write content to a file. parameters_schema: {\"filename\": \"string\", \"content\": \"string\"}\n"
+        "- web_search: Search the web for information. parameters_schema: {\"query\": \"string\"}\n"
+        "- email_sender: Send an email. parameters_schema: {\"recipient\": \"string\", \"subject\": \"string\", \"body\": \"string\"}"
+    )
+    # Complex mission requiring all three tools
+    mission = (
+        "Research the latest advancements in AI, summarize the findings in a report.txt file, "
+        "and email the report to the project manager at manager@example.com."
+    )
+    mission_context = {
+        "user_request": "Please help me get an overview of the newest AI developments and send a summary to my manager.",
+        "tools_desc": tools_desc,
+        "context": "You have access to file_writer, web_search, and email_sender tools."
+    }
+    manager = TodoListManager()
+    # Assuming create_todolist is async, but for test, we call it synchronously for illustration
+    # In real test, use asyncio.run or pytest-asyncio
+    import asyncio
+    todolist = asyncio.run(manager.create_todolist(mission=mission, mission_context=mission_context))
+
+    print("Todolist created:")
+    print(todolist.to_json())
+    pass
+
+
+
+
+
+if __name__ == "__main__":
+    test_todolist_creation()
+
+
+
+
+
+
+
+
+
+
 // Relative Path: tools\ask_user_tool.py
 # ============================================
 # ASK USER TOOL (first-class)
@@ -174,6 +755,21 @@ class FileReadTool(Tool):
         return "Read file contents safely with size limits and encoding detection"
     
     async def execute(self, path: str, encoding: str = "utf-8", max_size_mb: int = 10, **kwargs) -> Dict[str, Any]:
+        """
+        Read file contents safely with size limits and encoding detection
+
+        Args:
+            path: The path to the file to read
+            encoding: The encoding of the file
+            max_size_mb: The maximum size of the file in MB
+
+        Returns:
+            A dictionary with the following keys:
+            - success: True if the file was read successfully, False otherwise
+            - content: The contents of the file
+            - size: The size of the file in bytes
+            - path: The path to the file
+        """
         try:
             file_path = Path(path)
             
@@ -206,6 +802,22 @@ class FileWriteTool(Tool):
         return "Write content to file with backup and safety checks"
     
     async def execute(self, path: str, content: str, backup: bool = True, **kwargs) -> Dict[str, Any]:
+        """
+        Write content to file with backup and safety checks
+
+        Args:
+            path: The path to the file to write
+            content: The content to write to the file
+            backup: Whether to backup the existing file
+
+        Returns:
+            A dictionary with the following keys:
+            - success: True if the file was written successfully, False otherwise
+            - path: The path to the file
+            - size: The size of the file in bytes
+            - backed_up: Whether the existing file was backed up
+            - error: The error message if the file was not written successfully
+        """
         try:
             file_path = Path(path)
             
@@ -751,7 +1363,9 @@ class WebSearchTool(Tool):
                     params=params,
                     timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
-                    data = await response.json()
+                    # DuckDuckGo may return a non-standard JSON Content-Type (e.g., application/x-javascript)
+                    # Allow json() to parse regardless of Content-Type to avoid ContentTypeError.
+                    data = await response.json(content_type=None)
                     
                     results = []
                     
@@ -832,22 +1446,787 @@ class WebFetchTool(Tool):
 
 
 
+// Relative Path: agent.py
+# An Agent class
+
+from dataclasses import field
+from enum import Enum
+import json
+from pathlib import Path
+import sys
+from typing import Any, AsyncIterator, Dict, List, Optional
+from attr import asdict, dataclass
+import litellm
+
+from capstone.agent_v2.planning.todolist import TaskStatus, TodoItem, TodoList, TodoListManager
+from capstone.agent_v2.statemanager import StateManager
+from capstone.agent_v2.tool import Tool
+from capstone.agent_v2.tools.code_tool import PythonTool
+from capstone.agent_v2.tools.file_tool import FileReadTool, FileWriteTool
+from capstone.agent_v2.tools.git_tool import GitHubTool, GitTool
+from capstone.agent_v2.tools.shell_tool import PowerShellTool
+from capstone.agent_v2.tools.web_tool import WebFetchTool, WebSearchTool
+
+GENERIC_SYSTEM_PROMPT = """
+You are a ReAct-style execution agent.
+
+## Core Principles
+- **Plan First**: Always build or refine a Todo List before executing. Plans must be minimal, deterministic, and single-responsibility (each step has one clear outcome).
+- **Clarify Early**: If any required parameter is unknown, mark it as "ASK_USER" and add a precise clarification question to open_questions. Do not guess.
+- **Determinism & Minimalism**: Prefer fewer, well-scoped steps over many fuzzy ones. Outputs must be concise, structured, and directly actionable. No filler text.
+- **Tool Preference**: Use available tools whenever possible. Only ask the user when essential data is missing. Never hallucinate tools.
+- **State Updates**: After every tool call or user clarification, update state (Todo List, step status, answers). Avoid infinite loops.
+- **Stop Condition**: End execution when the mission’s acceptance criteria are met or all Todo steps are completed.
+
+## Decision Policy
+- Prefer tools > ask_user > stop.
+- Never assume implicit values—ask explicitly if uncertain.
+- Re-plan only if a blocker is discovered (missing parameter, failed tool, new mission context).
+
+## Output & Communication Style
+- Responses must be short, structured, and CLI-friendly.
+- For planning: return strict JSON matching the required schema.
+- For execution: emit clear status lines or structured events (thought, action, result, ask_user).
+- For ask_user: provide exactly one direct, actionable question.
+
+## Roles
+- **Planner**: Convert the mission into a Todo List (JSON). Insert "ASK_USER" placeholders where input is required. Ensure dependencies are correct and non-circular.
+- **Executor**: Process each Todo step in order. For each step: generate a thought, decide one next action, execute, record observation.
+- **Clarifier**: When encountering ASK_USER, pause execution and request the answer in a single, well-phrased question. Resume once the answer is given.
+- **Finisher**: Stop once all Todo items are resolved or the mission goal is clearly achieved. Emit a "complete" action with a final status message.
+
+## Constraints
+- Always produce valid JSON when asked.
+- Do not output code fences, extra commentary, or natural-language paragraphs unless explicitly required.
+- Keep rationales ≤2 sentences.
+- Be strict: only valid action types are {tool_call, ask_user, complete, update_todolist, error_recovery}.
+"""
+
+# Ich brauche noch eine Messsage History Klasse die die Kommunikation zwischen dem Agent und dem User speichert
+# Die sollte ungefähr so aussehen:
+# messages=[
+#  {"role": "system", "content": system_prompt},
+#  {"role": "user", "content": user_prompt}
+#  {"role": "assistant", "content": assistant_prompt}
+#  {"role": "user", "content": user_prompt}
+#  {"role": "assistant", "content": assistant_prompt}
+#  {"role": "user", "content": user_prompt}
+# ],
+# Der System Prompt ist immer der erste Eintrag in der Liste. Ich will aber nicht, dass ich dem LLM den
+# gesamten Chat History sende. Ich will nur den System Prompt und die letzten n messages (User und Assistant) senden.
+# Das n sollte einstellbar sein!
+class MessageHistory:
+    def __init__(self, system_prompt: str):
+        # Store system prompt as the first message entry
+        self.system_prompt = {"role": "system", "content": system_prompt}
+        self.messages = [self.system_prompt]
+
+    def add_message(self, message: str, role: str) -> None:
+        """
+        Adds a message to the message history.
+
+        Args:
+            message: The message to add.
+            role: The role of the message.
+        """
+        self.messages.append({"role": role, "content": message})
+
+    def get_last_n_messages(self, n: int) -> List[Dict[str, Any]]:
+        """
+        Gets the last n message pairs (user and assistant) in chronological order,
+        always including the system prompt as the first message. If there is an
+        incomplete trailing message (no pair), it is ignored.
+
+        Args:
+            n: The number of message pairs to get.
+        """
+        if n <= 0:
+            return [self.system_prompt]
+
+        # Exclude the system prompt from pairing logic
+        body = self.messages[1:]
+        num_pairs = len(body) // 2
+
+        if num_pairs == 0:
+            return [self.system_prompt]
+
+        if n >= num_pairs:
+            # Return all complete pairs
+            return [self.system_prompt] + body[: num_pairs * 2]
+
+        # Return only the last n pairs, preserving chronological order
+        start_index = len(body) - (n * 2)
+        return [self.system_prompt] + body[start_index:]
+
+    def replace_system_prompt(self, system_prompt: str) -> None:
+        """
+        Replaces the system prompt with the new system prompt.
+
+        Args:
+            system_prompt: The new system prompt.
+        """
+        self.system_prompt = {"role": "system", "content": system_prompt}
+        self.messages[0] = self.system_prompt
+
+    def __str__(self) -> str:
+        return json.dumps(self.messages, ensure_ascii=False, indent=2)
+
+
+class ActionType(Enum):
+    TOOL = "tool_call"
+    ASK  = "ask_user"
+    DONE = "complete"
+    PLAN = "update_todolist"
+    ERR  = "error_recovery"
+
+@dataclass
+class ThoughtAction:
+    type: ActionType
+    tool: Optional[str] = None
+    input: Dict[str, Any] = field(default_factory=dict)
+    question: Optional[str] = None   # nur bei ask_user
+    message: Optional[str] = None    # nur bei complete
+
+    @staticmethod
+    def from_json(json_str: str) -> "ThoughtAction":
+        """
+        Creates a ThoughtAction object from a JSON string.
+        """
+        # Accept both JSON string and already-parsed dict
+        if isinstance(json_str, (str, bytes, bytearray)):
+            data = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            data = json_str
+        else:
+            raise TypeError("ThoughtAction.from_json expects str|bytes|bytearray|dict")
+
+        action_type_value = data.get("type")
+        action_type = action_type_value if isinstance(action_type_value, ActionType) else ActionType(action_type_value)
+
+        return ThoughtAction(
+            type=action_type,
+            tool=data.get("tool"),
+            input=data.get("input", {}),
+            question=data.get("question"),
+            message=data.get("message"))
+
+@dataclass
+class Thought:
+    next_step_ref: int
+    rationale: str                   # kurz, max. 2 Sätze
+    action: ThoughtAction
+    expected_outcome: str
+
+    @staticmethod
+    def from_json(json_str: str) -> "Thought":
+        """
+        Creates a Thought object from a JSON string.
+        """
+        # Accept both JSON string and already-parsed dict
+        if isinstance(json_str, (str, bytes, bytearray)):
+            data = json.loads(json_str)
+        elif isinstance(json_str, dict):
+            data = json_str
+        else:
+            raise TypeError("Thought.from_json expects str|bytes|bytearray|dict")
+        return Thought(
+            next_step_ref=data["next_step_ref"],
+            rationale=data["rationale"],
+            action=ThoughtAction.from_json(data["action"]),
+            expected_outcome=data["expected_outcome"])
+
+# create an Action class which is a dataclass with the following fields:
+# - type: ActionType
+# - tool: Optional[str]
+# - input: Dict[str, Any]
+# - question: Optional[str]
+# - message: Optional[str]
+@dataclass
+class Action:
+    type: ActionType
+    tool: Optional[str]
+    input: Dict[str, Any]
+
+    @staticmethod
+    def from_json(json_str: str) -> "Action":
+        """
+        Creates an Action object from a JSON string.
+        """
+        data = json.loads(json_str)
+        return Action(
+            type=ActionType(data["type"]),
+            tool=data["tool"],
+            input=data["input"])
+
+
+@dataclass
+class AgentEventType(Enum):
+    THOUGHT = "thought"
+    ACTION = "action"
+    TOOL_STARTED = "tool_started"
+    TOOL_RESULT = "tool_result"
+    ASK_USER = "ask_user"
+    STATE_UPDATED = "state_updated"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
+@dataclass
+class AgentEvent:
+    type: AgentEventType
+    data: Dict[str, Any]
+
+
+@dataclass
+class Observation:
+    success: bool
+    error: Optional[str] = None
+    data: Dict[str, Any] = None
+    requires_user: bool = False
+
+
+def build_system_prompt(system_prompt: str, mission: str, todo_list: Optional[str] = "") -> str:
+    """
+    Build the system prompt from base, mission, and todo list sections.
+
+    Args:
+        system_prompt (str): The static base instructions (timeless context).
+        mission (str): The agent's mission or current objective.
+        todo_list (str, optional): Current todo list, may be empty. Defaults to "".
+
+    Returns:
+        str: Final system prompt ready for use.
+    """
+    prompt = f"""<Base>
+{system_prompt.strip()}
+</Base>
+
+<Mission>
+{mission.strip() if mission else ""}
+</Mission>
+
+<TODOList>
+{todo_list.strip() if todo_list else ""}
+</TODOList>"""
+    return prompt
+
+
+
+class Agent:
+    def __init__(self, 
+        name: str, 
+        description: str, 
+        system_prompt: Optional[str],
+        mission: Optional[str],
+        tools: List[Tool],
+        todo_list_manager: TodoListManager,
+        state_manager: StateManager,
+        llm):
+        """
+        Initializes the Agent with the given name, description, system prompt, mission, tools, and planner.
+        Args:
+            name: The name of the agent.
+            description: The description of the agent.
+            system_prompt: The system prompt for the agent. This the generic part of the agent's system prompt.
+            mission: The mission for the agent. This is a collection of tasks that the agent needs to complete.
+            tools: The tools for the agent. This is a collection of tools that the agent can use to complete the tasks.
+            planner: The planner for the agent. This is the planner that the agent uses to plan the tasks.
+            state_manager: The state manager for the agent. This is the state manager that the agent uses to save the state of the agent.
+        """
+
+        self.name = name
+        self.description = description
+        self.system_prompt = system_prompt
+        self.mission = mission
+        self.tools = tools
+        self.tools_description = self._get_tools_description()
+        self.tools_schema = self._get_tools_schema()
+        self.todo_list_manager = todo_list_manager
+        self.state_manager = state_manager
+        self.state = None
+        self.message_history = MessageHistory(build_system_prompt(system_prompt, mission, self.tools_description))
+
+
+    async def execute(self, user_message: str, session_id: str) -> AsyncIterator[AgentEvent]:
+        """
+        Executes the agent with the given user message using a Pre-Clarification pass:
+        1) Collect & resolve all missing required info (closed-form questions).
+        2) Create a final TodoList (no ASK_USER, no open_questions).
+        3) Run the ReAct loop to complete the tasks.
+
+        Args:
+            user_message: The user message to execute the agent.
+            session_id: The session id to execute the agent.
+
+        Returns:
+            An async iterator of AgentEvent.
+        """
+        # --- 0) Load state -------------------------------------------------------
+        self.state = await self.state_manager.load_state(session_id)
+
+        if self.mission is None:
+            self.mission = user_message
+
+        # If we were awaiting an answer, consume it immediately
+        if self.state.get("pending_question"):
+            answer = user_message.strip()
+            pending_question = self.state.pop("pending_question")
+            # store the answer by stable key
+            answers = self.state.setdefault("answers", {})
+            answers[pending_question["answer_key"]] = answer
+            await self.state_manager.save_state(session_id, self.state)
+            yield AgentEvent(type=AgentEventType.STATE_UPDATED, data={"answers": answers})
+
+            # Nach einer beantworteten Frage: user_message nicht als neues inhaltliches Prompt verwenden
+            # (wir bleiben im Clarification-Flow). Kein return hier: wir laufen weiter und prüfen,
+            # ob noch weitere Fragen offen sind / ob wir planen können.
+
+        # --- 1) Update message history & mission --------------------------------
+        self.message_history.add_message(user_message, "user")
+        self.state["message_history"] = self.message_history.messages
+        self.state["last_user_message"] = user_message
+        self.state["mission"] = self.mission
+        answers = self.state.setdefault("answers", {})
+        await self.state_manager.save_state(session_id, self.state)
+
+        # --- 2) Pre-Clarification Gate (nur wenn noch kein finaler Plan existiert) ---
+        todolist = None
+        if not self.state.get("todolist_id"):
+            # 2.a) Fragen extrahieren, falls noch nicht geschehen
+            if "clar_questions" not in self.state:
+                clar_qs = await self.todo_list_manager.extract_clarification_questions(
+                    mission=self.mission,
+                    tools_desc=self.tools_description
+                )
+                self.state["clar_questions"] = clar_qs or []
+                await self.state_manager.save_state(session_id, self.state)
+
+            # 2.b) Unbeantwortete Frage suchen (per stable key)
+            unanswered = next(
+                (q for q in self.state["clar_questions"] if q.get("key") not in answers),
+                None
+            )
+            if unanswered:
+                # ask user now; pause execution until answered
+                self.state["pending_question"] = {
+                    "answer_key": unanswered["key"],
+                    "question": unanswered["question"]
+                }
+                await self.state_manager.save_state(session_id, self.state)
+                yield AgentEvent(type=AgentEventType.ASK_USER, data={"question": unanswered["question"]})
+                return
+
+            # 2.c) Alle Fragen beantwortet -> finalen Plan erstellen (No-ASK mode)
+            todolist = await self.todo_list_manager.create_todolist(
+                mission=self.mission,
+                tools_desc=self.tools_description,
+                answers=answers
+            )
+
+            # 2.d) Harte Guards: keine open_questions, keine ASK_USER-Platzhalter
+            if getattr(todolist, "open_questions", None):
+                raise ValueError("Final plan contains open_questions, expected none in No-ASK mode.")
+
+            for item in todolist.items:
+                if getattr(item, "parameters", None):
+                    for v in item.parameters.values():
+                        if isinstance(v, str) and v.strip().upper() == "ASK_USER":
+                            raise ValueError("Final plan contains ASK_USER placeholder, expected none.")
+
+            # 2.e) Plan persistieren
+            self.state["todolist_id"] = todolist.todolist_id
+            await self.state_manager.save_state(session_id, self.state)
+            self.todo_list_manager.update_todolist(todolist)  # persist current version if needed
+
+        else:
+            # Es existiert bereits ein Plan (Resume-Fall)
+            # Lade ihn (oder nutze deinen bisherigen Helper)
+            if hasattr(self.todo_list_manager, "load_todolist_by_id"):
+                todolist = await self.todo_list_manager.load_todolist_by_id(self.state["todolist_id"])
+            else:
+                todolist = await self._create_or_get_todolist(session_id, self.state)
+
+        # --- 3) ReAct Loop über die finale TodoList ------------------------------
+        for next_step in todolist.items:
+            # Hydratation: Parameter ggf. aus answers einsetzen
+            self._hydrate_parameters_from_answers(next_step)
+
+            # 1) Thought
+            thought = await self._generate_thought(next_step)
+            yield AgentEvent(type=AgentEventType.THOUGHT, data={"for_step": next_step.position, "thought": asdict(thought)})
+
+            # 2) Action
+            action = await self._decide_next_action(thought, next_step)
+            yield AgentEvent(type=AgentEventType.ACTION, data={"for_step": next_step.position, "action": action.type.value})
+
+            # 3) Execute
+            observation = await self._execute_action(action)
+
+            # 4) State aktualisieren
+            self.state["last_observation"] = observation
+            next_step.status = TaskStatus.COMPLETED if observation.get("success") else TaskStatus.FAILED
+
+            # 5) Persist
+            await self.state_manager.save_state(session_id, self.state)
+            self.todo_list_manager.update_todolist(todolist)
+
+            # Optional: Early stop bei Fehler + Re-Plan-Hook
+            # if not observation.get("success") and self.allow_replan_on_failure:
+            #     break / trigger replan...
+
+        # --- 4) Abschluss ---------------------------------------------------------
+        yield AgentEvent(type=AgentEventType.COMPLETE, data={"todolist": todolist.to_markdown()})
+        return
+
+
+
+    async def _create_or_get_todolist(self, session_id: str, state: Dict[str, Any]) -> Optional[TodoList]:
+        """
+        Creates a new todolist for the mission if no todolist exists yet or loads the existing todolist
+
+        Args:
+            session_id: The session id for the agent.
+            state: The state of the agent.
+
+        Returns:
+            A todolist for the mission.
+        """
+        todolist_id = state.get("todolist_id")
+        # check if a plan has already been created for the mission
+        if self.mission is None:
+            mission = state.get("last_user_message")
+
+        # check if the todolist is already created
+        if not todolist_id:
+            todolist = await self.todo_list_manager.create_todolist(mission, self.tools_description)
+            state["todolist_id"] = todolist.todolist_id
+            await self.state_manager.save_state(session_id, state)
+
+            # update the message history with the new todolist
+            system_prompt = build_system_prompt(system_prompt=self.system_prompt, mission=self.mission, todo_list=todolist.to_json())
+            self.message_history.replace_system_prompt(system_prompt)
+
+            # add a new message to the message history
+            self.message_history.add_message(f"New todolist created: {todolist.to_json()}", "assistant")
+
+            print(f"New todolist created:\n\n{todolist.to_markdown()}")
+
+            return todolist
+        else:
+            todolist = await self.todo_list_manager.load_todolist(todolist_id)                
+            return todolist
+
+
+    def _get_tools_description(self) -> str:
+        """
+        Gets the description of the tools available.
+        """
+        return "\n".join([ f"- {tool.name}: {tool.description}" for tool in self.tools])
+
+
+    def _get_tools_schema(self) -> List[Dict[str, Any]]:
+        """
+        Gets the schema of the tools available which can be used as a function calling schema for the LLM.
+        """
+        return [tool.function_tool_schema for tool in self.tools]
+
+
+    def _hydrate_parameters_from_answers(self, step: TodoItem) -> None:
+        """
+        Hydrates the parameters of the step from the answers in the state.
+
+        Args:
+            step: The step to hydrate the parameters from the answers.
+        """
+        answers = self.state.get("answers", {})
+        for k, v in list(step.parameters.items()):
+            if isinstance(v, str) and v == "ASK_USER":
+                if k in answers:
+                    step.parameters[k] = answers[k]
+
+
+    async def _generate_thought(self, next_step: TodoItem) -> Thought:
+        """
+        ReAct Thought Generation:
+        Generates a thought for the next step. A thought is a plan for the next step.
+        Therfore the following context is needed:
+        - The next step
+        - The tools available
+        - The history of the agent
+        - The system prompt of the agent
+        - The mission of the agent
+        - The todo list of the agent
+
+        Args:
+            next_step: The next step to generate a thought for.
+
+        Returns:
+            A thought for the next step. A thought is a plan for the next step which is a JSON object.
+        """
+        schema_hint = {
+            "next_step_ref": "int",
+            "rationale": "string (<= 2 sentences)",
+            "action": {
+                "type": "tool_call|ask_user|complete|update_todolist|error_recovery",
+                "tool": "string|null",
+                "input": "object",
+                "question": "string? (ask_user)",
+                "message": "string? (complete)"
+            },
+            "expected_outcome": "string"
+        }
+
+        # get the last 2 messages from the message history. this shall be sufficient for the LLM to plan the next action.
+        messages = self.message_history.get_last_n_messages(2)
+
+        messages.append({"role": "user", "content": (
+            "You are the Planning & Action Selector.\n"
+            "Pick exactly one next action for the next_step below.\n"
+            f"NEXT_STEP:\n{next_step.to_json()}\n\n"
+            "Prefer tools; ask_user only if info is missing.\n"
+            "Return STRICT JSON only (no extra text) matching this schema:\n"
+            f"{json.dumps(schema_hint, ensure_ascii=False)}\n\n"
+        )})
+
+        response = await litellm.acompletion(
+            model="gpt-4.1-mini",
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+            tools=self.tools_schema,
+            tool_choice="auto",
+        )
+
+        self.message_history.add_message(response.choices[0].message.content, "assistant")
+
+        return Thought.from_json(response.choices[0].message.content)
+
+
+    async def _decide_next_action(self, thought: Thought, next_step: TodoItem) -> Action:
+        """
+        Decides the next action for the next step based on the thought.
+        """
+        thought_action = thought.action
+        if thought_action.type == ActionType.TOOL:
+            return Action(
+                type=ActionType.TOOL,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        elif thought_action.type == ActionType.ASK:
+            return Action(
+                type=ActionType.ASK,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        elif thought_action.type == ActionType.DONE:
+            return Action(
+                type=ActionType.DONE,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        elif thought_action.type == ActionType.PLAN:
+            return Action(
+                type=ActionType.PLAN,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        elif thought_action.type == ActionType.ERR:
+            return Action(
+                type=ActionType.ERR,
+                tool=thought_action.tool,
+                input=thought_action.input)
+        else:
+            raise ValueError(f"Invalid action type: {thought_action.type}")
+
+
+    async def _execute_action(self, action: Action) -> str:
+        """
+        Executes the action for the next step.
+        """
+        if action.type == ActionType.TOOL:            
+            tool = self._get_tool(action.tool)
+            if not tool:
+                raise ValueError(f"Tool '{action.tool}' not found")
+
+            return await tool.execute(**action.input)
+            
+        elif action.type == ActionType.ASK:
+            pass
+        elif action.type == ActionType.DONE:
+            pass
+        elif action.type == ActionType.PLAN:
+            pass
+        elif action.type == ActionType.ERR:
+            pass
+        else:
+            raise ValueError(f"Invalid action type: {action.type}")
+
+
+    def _get_tool(self, tool_name: str) -> Tool:
+        """
+        Gets the tool from the tools list where the name matches the tool_name
+        """
+
+        # check if tool_name starts with functions.
+        if tool_name.startswith("functions."):
+            tool_name = tool_name[len("functions."):]
+
+        return next((tool for tool in self.tools if tool.name == tool_name), None)
+
+
+    # create a static method to create an agent
+    @staticmethod
+    def create_agent(name: str, description: str, system_prompt: str, mission: str, work_dir: str, llm) -> "Agent":
+        """
+        Creates an agent with the given name, description, system prompt, mission, and work directory.
+        The agent will be created with the following tools:
+        - WebSearchTool
+        - WebFetchTool
+        - PythonTool
+        - GitHubTool
+        - GitTool
+        - FileReadTool
+        - FileWriteTool
+        - PowerShellTool
+        The agent will be created with the following planner:
+        - TodoListManager
+        The agent will be created with the following state manager:
+        - StateManager
+
+        Args:
+            name: The name of the agent.
+            description: The description of the agent.
+            system_prompt: The system prompt for the agent.
+            mission: The mission for the agent.
+            work_dir: The work directory for the agent.
+            llm: The llm for the agent.
+
+        Returns:
+            An agent with the given name, description, system prompt, mission, and work directory.
+        """
+        tools = [
+            WebSearchTool(),
+            WebFetchTool(),
+            PythonTool(),
+            GitHubTool(),
+            GitTool(),
+            FileReadTool(),
+            FileWriteTool(),
+            PowerShellTool(),
+        ]
+
+        system_prompt = GENERIC_SYSTEM_PROMPT if system_prompt is None else system_prompt
+        work_dir = Path(work_dir)
+        work_dir.mkdir(exist_ok=True)
+
+        # todolist directory is work_dir/todolists
+        todolist_dir = work_dir / "todolists"
+        todolist_dir.mkdir(exist_ok=True)
+        planner = TodoListManager(base_dir=todolist_dir)
+
+        # state directory is work_dir/states
+        state_dir = work_dir / "states"
+        state_dir.mkdir(exist_ok=True)
+        state_manager = StateManager(state_dir=state_dir)
+
+        return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm)
+
+
+# ============================================
+# MAIN ENTRY POINT FOR QUICK DEBUGGING
+# ============================================
+def main():
+    """Minimal entrypoint to construct the Agent and run until thought generation."""
+    import os
+    import asyncio
+    import uuid
+    from pathlib import Path
+
+    # Ensure API key for LLM is available
+    if not os.getenv("OPENAI_API_KEY"):
+        print("Error: Please set OPENAI_API_KEY environment variable before running.")
+        return
+
+    name = "AgentV2-Debug"
+    description = "Lightweight debug run to reach thought generation."
+    system_prompt = GENERIC_SYSTEM_PROMPT
+
+    # Mission: Ask the user for the directory name and the content of the README.txt file, then create the directory and add the README.txt file with the provided content.
+    # mission = (        
+    #     "Create the directory with the specified name and add a README.txt file inside it containing the provided content."
+    #     "Ask the user for the name of the directory to create and the content to put inside a README.txt file. "
+    # )
+    mission = None
+
+    # Use a local work directory next to this file
+    work_dir = str((Path(__file__).parent / ".debug_work").resolve())
+
+    # Create agent
+    agent = Agent.create_agent(
+        name=name,
+        description=description,
+        system_prompt=system_prompt,
+        mission=mission,
+        work_dir=work_dir,
+        llm=None,
+    )
+
+    # Minimal inputs for execute()
+    session_id = f"debug-{uuid.uuid4()}"
+    #user_message = "Create a new directory and add a README.txt file inside it containing a hello_world code example."
+    user_message = "Create a file"
+
+    print(f"Starting Agent execute() with session_id={session_id}")
+    try:
+        async def drive():
+            current_input = user_message
+            done = False
+            while True:
+                async for ev in agent.execute(user_message=current_input, session_id=session_id):
+                    if ev.type.name == AgentEventType.ASK_USER.name:
+                        print("QUESTION:", ev.data.get("question"))
+                        current_input = input("> ").strip()
+                    elif ev.type.name == AgentEventType.STATE_UPDATED.name:
+                        print("STATE UPDATED:", ev.data)
+                    elif ev.type.name == AgentEventType.COMPLETE.name:
+                        print("COMPLETED:")
+                        print(ev.data.get("todolist"))
+                        done = True
+                        # Do NOT break here; let the async generator finish naturally
+                        # to avoid cancellation at the yield suspension point.
+                if done:
+                    # Completed; exit outer loop after the async generator finishes
+                    break
+
+        asyncio.run(drive())
+        print("Agent session finished.")
+    except Exception as exc:
+        print(f"Agent execution failed: {exc}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
 // Relative Path: conversation_manager.py
 # conversation_manager.py
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 
+from capstone.agent_v2.hybrid_agent import HybridAgent
+
 
 @dataclass
 class ConversationManager:
     session_id: str
-    agent: Any
+    agent: HybridAgent
     plan_id: Optional[str] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
 
     async def start(self, mission: str) -> Dict[str, Any]:
         out = await self.agent.execute(mission, session_id=self.session_id, plan_id=self.plan_id)
         self.plan_id = out.get("plan_id", self.plan_id)
+        msgs = out.get("messages")
+        if isinstance(msgs, list):
+            self.history = msgs
         return out
 
     async def user_says(self, text: str) -> Dict[str, Any]:
@@ -857,1762 +2236,86 @@ class ConversationManager:
             user_message=text,
         )
         self.plan_id = out.get("plan_id", self.plan_id)
+        msgs = out.get("messages")
+        if isinstance(msgs, list):
+            self.history = msgs
         return out
 
 
 
 
-// Relative Path: hybrid_agent.py
-"""
-HybridAgent - Production-Ready AI Agent with Clean Architecture
-Refactored with proper separation between Agent (execution) and PlanManager (planning)
-"""
+// Relative Path: statemanager.py
 
-import os
-import json
-import asyncio
-import subprocess
-import inspect
-from typing import Dict, List, Any, Optional, Tuple
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
-from abc import ABC, abstractmethod
+# ==================== STATE MANAGEMENT ====================
+
 from datetime import datetime
-import logging
-import re
-from collections import defaultdict
-import urllib.request
-import urllib.error
-from enum import Enum
-import uuid
-import shutil
+from pathlib import Path
+import pickle
+import time
+from typing import Dict, Optional
 
-#from capstone.agent_v2.tool import Tool
-from capstone.agent_v2.tool import Tool
-from capstone.agent_v2.tools.code_tool import PythonTool
-from capstone.agent_v2.tools.file_tool import FileReadTool, FileWriteTool
-from capstone.agent_v2.tools.git_tool import GitHubTool, GitTool
-from capstone.agent_v2.tools.shell_tool import PowerShellTool
-from capstone.agent_v2.tools.web_tool import WebFetchTool, WebSearchTool
-
-# Optional imports
-try:
-    import aiohttp
-except ImportError:
-    aiohttp = None
-    print("Warning: aiohttp not installed. Web tools will be limited.")
-
-try:
-    import openai
-except ImportError:
-    raise ImportError("openai package required. Install with: pip install openai")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# ============================================
-# CONFIG & PROMPTS (policy)
-# ============================================
-
-@dataclass
-class AgentConfig:
-    """Lightweight agent configuration (policy, not transport)."""
-    model: str = "gpt-4.1-mini"
-    temperature: float = 0.7
-    tool_profile: Optional[str] = None
+import structlog
 
 
-class PromptLibrary:
-    """Reusable system prompt builder."""
-
-    @staticmethod
-    def build_system_prompt(memory_ctx: str, config: 'AgentConfig') -> str:
-        base = (
-            "You are TaskForce Agent — a pragmatic, tool-using assistant for software and DevOps tasks.\n\n"
-            "## Mission & Goals\n"
-            "- Break goals into minimal, verifiable steps.\n"
-            "- Prefer simple, deterministic actions that leave useful artifacts.\n\n"
-            "## Tool Use Policy\n"
-            "- Only call tools when necessary and with precise parameters.\n"
-            "- Validate preconditions.\n"
-            "- After each tool call: summarize briefly and plan the next step.\n\n"
-            "## Output\n"
-            "- Keep responses short and factual.\n\n"
-            "## Safety\n"
-            "- Never run destructive commands. Prefer idempotent operations.\n"
-        )
-        if memory_ctx:
-            base += f"\nPrevious execution context:\n{memory_ctx}\n"
-        return base
-
-# ============================================
-# PLANNING COMPONENTS
-# ============================================
-
-class StepState(Enum):
-    """States for plan steps"""
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-    BLOCKED = "blocked"
-    RETRY = "retry"
-
-@dataclass
-class PlanStep:
-    """Single step in an execution plan"""
-    id: str
-    description: str
-    tool: str
-    parameters: Dict[str, Any]
-    state: StepState = StepState.PENDING
-    depends_on: List[str] = field(default_factory=list)
-    required: bool = True
-    max_retries: int = 3
-    retry_count: int = 0
+class StateManager:
+    """Manages agent state persistence and recovery"""
     
-    # Execution details
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    def __init__(self, state_dir: str = "./agent_states"):
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(exist_ok=True)
+        self.logger = structlog.get_logger()
     
-    # Planning metadata
-    estimated_duration: Optional[int] = None  # seconds
-    priority: int = 0  # Higher = more important
-    can_parallel: bool = False
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization"""
-        data = asdict(self)
-        data['state'] = self.state.value
-        if self.started_at:
-            data['started_at'] = self.started_at.isoformat()
-        if self.completed_at:
-            data['completed_at'] = self.completed_at.isoformat()
-        return data
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'PlanStep':
-        """Create from dictionary"""
-        data = data.copy()
-        if 'state' in data:
-            data['state'] = StepState(data['state'])
-        if 'started_at' in data and data['started_at']:
-            data['started_at'] = datetime.fromisoformat(data['started_at'])
-        if 'completed_at' in data and data['completed_at']:
-            data['completed_at'] = datetime.fromisoformat(data['completed_at'])
-        return cls(**data)
-
-@dataclass
-class ExecutionPlan:
-    """Complete execution plan with multiple steps"""
-    id: str
-    goal: str
-    steps: List[PlanStep]
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
-    
-    # Plan metadata
-    version: int = 1
-    status: str = "active"  # active, completed, failed, replanning
-    total_steps: int = 0
-    completed_steps: int = 0
-    failed_steps: int = 0
-    
-    # Context and memory
-    context: Dict[str, Any] = field(default_factory=dict)
-    notes: List[str] = field(default_factory=list)
-    
-    def __post_init__(self):
-        self.total_steps = len(self.steps)
-        self.update_stats()
-    
-    def update_stats(self):
-        """Update plan statistics"""
-        self.completed_steps = sum(1 for s in self.steps if s.state == StepState.COMPLETED)
-        self.failed_steps = sum(1 for s in self.steps if s.state == StepState.FAILED)
-        self.updated_at = datetime.now()
-    
-    def get_step_by_id(self, step_id: str) -> Optional[PlanStep]:
-        """Get a specific step by ID"""
-        for step in self.steps:
-            if step.id == step_id:
-                return step
-        return None
-    
-    def to_markdown(self) -> str:
-        """Convert plan to markdown format"""
-        md = f"# Execution Plan: {self.goal}\n\n"
-        md += f"**ID:** {self.id}\n"
-        md += f"**Created:** {self.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        md += f"**Updated:** {self.updated_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        md += f"**Version:** {self.version}\n"
-        md += f"**Status:** {self.status}\n\n"
-        
-        # Progress
-        md += "## Progress\n\n"
-        progress_pct = (self.completed_steps / self.total_steps * 100) if self.total_steps > 0 else 0
-        md += f"- Total Steps: {self.total_steps}\n"
-        md += f"- Completed: {self.completed_steps} ({progress_pct:.1f}%)\n"
-        md += f"- Failed: {self.failed_steps}\n\n"
-        
-        # Steps
-        md += "## Steps\n\n"
-        for i, step in enumerate(self.steps, 1):
-            # Status emoji
-            status_icon = {
-                StepState.PENDING: "⏳",
-                StepState.IN_PROGRESS: "🔄",
-                StepState.COMPLETED: "✅",
-                StepState.FAILED: "❌",
-                StepState.SKIPPED: "⏭️",
-                StepState.BLOCKED: "🚫",
-                StepState.RETRY: "🔁"
-            }.get(step.state, "❓")
-            
-            md += f"### {i}. {status_icon} {step.description}\n\n"
-            md += f"- **ID:** `{step.id}`\n"
-            md += f"- **Tool:** `{step.tool}`\n"
-            md += f"- **State:** {step.state.value}\n"
-            md += f"- **Required:** {step.required}\n"
-            
-            if step.depends_on:
-                md += f"- **Dependencies:** {', '.join(f'`{d}`' for d in step.depends_on)}\n"
-            
-            if step.parameters:
-                md += f"- **Parameters:**\n```json\n{json.dumps(step.parameters, indent=2)}\n```\n"
-            
-            if step.error:
-                md += f"- **Error:** {step.error}\n"
-            
-            if step.result and step.state == StepState.COMPLETED:
-                result_str = json.dumps(step.result, indent=2)
-                if len(result_str) > 500:
-                    result_str = result_str[:500] + "\n... (truncated)"
-                md += f"- **Result:**\n```json\n{result_str}\n```\n"
-            
-            if step.started_at and step.completed_at:
-                duration = (step.completed_at - step.started_at).total_seconds()
-                md += f"- **Duration:** {duration:.2f} seconds\n"
-            
-            md += "\n"
-        
-        # Notes
-        if self.notes:
-            md += "## Notes\n\n"
-            for note in self.notes:
-                md += f"- {note}\n"
-            md += "\n"
-        
-        return md
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization"""
-        return {
-            "id": self.id,
-            "goal": self.goal,
-            "steps": [s.to_dict() for s in self.steps],
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "version": self.version,
-            "status": self.status,
-            "total_steps": self.total_steps,
-            "completed_steps": self.completed_steps,
-            "failed_steps": self.failed_steps,
-            "context": self.context,
-            "notes": self.notes
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'ExecutionPlan':
-        """Create from dictionary"""
-        data = data.copy()
-        data['steps'] = [PlanStep.from_dict(s) for s in data['steps']]
-        data['created_at'] = datetime.fromisoformat(data['created_at'])
-        data['updated_at'] = datetime.fromisoformat(data['updated_at'])
-        return cls(**data)
-
-@dataclass
-class ExecutionState:
-    """State information for replanning"""
-    completed_steps: List[Dict[str, Any]]
-    failed_steps: List[Dict[str, Any]]
-    current_context: Dict[str, Any]
-    original_goal: str
-    previous_plan_id: str
-    version: int
-
-class PlanManager:
-    """
-    Manages plan lifecycle: create, update, save, load, replan
-    No execution logic - purely planning and state management
-    """
-    
-    def __init__(self, model_client, model: str, available_tools: Dict[str, Any], save_dir: str = "./plans"):
-        self.client = model_client  # For LLM calls
-        self.model = model
-        self.available_tools = available_tools  # Tool registry for planning
-        self.save_dir = Path(save_dir)
-        self.save_dir.mkdir(exist_ok=True)
-    
-    async def create_plan(self, goal: str, context: Dict[str, Any] = None) -> ExecutionPlan:
-        """Create a new execution plan"""
-        
-        tools_desc = "\n".join([
-            f"- {name}: {tool.description}\n  parameters_schema: {json.dumps(tool.parameters_schema)}"
-            for name, tool in self.available_tools.items()
-        ])
-        
-        context_str = ""
-        if context:
-            context_str = f"\nContext available:\n{json.dumps(context, indent=2)}"
-        
-        prompt = f"""Create a detailed, step-by-step execution plan for this goal:
-{goal}
-{context_str}
-
-Available tools:
-{tools_desc}
-
-Create a comprehensive plan with:
-1. Clear, actionable steps
-2. Proper dependencies between steps
-3. Realistic parameter values
-4. Error handling considerations
-
-IMPORTANT:
-- For each step, the 'parameters' MUST strictly follow the tool's parameters_schema above, including all 'required' fields.
-- For the 'powershell' tool specifically:
-  - Use valid PowerShell syntax (not bash). Examples: New-Item -ItemType Directory -Path "C:\\path"; Set-Content; Get-ChildItem
-  - Always include a 'command' string that is executable under PowerShell
-  - Provide a 'cwd' when file operations depend on a working directory (default repo root if unsure)
-
-Return a JSON object with this structure:
-{{
-  "steps": [
-    {{
-      "id": "unique_step_id",
-      "description": "Clear description of what this step does",
-      "tool": "tool_name",
-      "parameters": {{}},
-      "depends_on": ["previous_step_id"],
-      "required": true/false,
-      "estimated_duration": seconds,
-      "priority": 0-10,
-      "can_parallel": false
-    }}
-  ],
-  "notes": ["Any important considerations"]
-}}
-"""
-        
+    async def save_state(self, session_id: str, state_data: Dict) -> bool:
+        """Save agent state asynchronously"""
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert execution planner. Create detailed, practical plans."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.5
-            )
+            state_file = self.state_dir / f"{session_id}.pkl"
             
-            plan_data = json.loads(response.choices[0].message.content)
-            
-            # Create plan steps
-            steps = []
-            for step_data in plan_data.get("steps", []):
-                step = PlanStep(
-                    id=step_data.get("id", str(uuid.uuid4())[:8]),
-                    description=step_data.get("description", ""),
-                    tool=step_data.get("tool", ""),
-                    parameters=step_data.get("parameters", {}),
-                    depends_on=step_data.get("depends_on", []),
-                    required=step_data.get("required", True),
-                    estimated_duration=step_data.get("estimated_duration"),
-                    priority=step_data.get("priority", 0),
-                    can_parallel=step_data.get("can_parallel", False)
-                )
-                steps.append(step)
-            
-            # Create execution plan
-            plan = ExecutionPlan(
-                id=str(uuid.uuid4())[:8],
-                goal=goal,
-                steps=steps,
-                context=context or {},
-                notes=plan_data.get("notes", [])
-            )
-            
-            await self.save_plan(plan)
-            
-            logger.info(f"Created plan {plan.id} with {len(steps)} steps")
-            return plan
-            
-        except Exception as e:
-            logger.error(f"Failed to create plan: {e}")
-            raise
-    
-    async def replan(self, plan: ExecutionPlan, execution_state: ExecutionState) -> ExecutionPlan:
-        """Create a new plan based on execution state"""
-        
-        logger.info(f"Replanning from plan {plan.id} v{plan.version}")
-        
-        prompt = f"""The current plan has encountered failures and needs adjustment.
-
-Original goal: {execution_state.original_goal}
-
-Completed steps:
-{json.dumps(execution_state.completed_steps, indent=2)}
-
-Failed steps with errors:
-{json.dumps(execution_state.failed_steps, indent=2)}
-
-Current context:
-{json.dumps(execution_state.current_context, indent=2)}
-
-Create a new plan that:
-1. Works around the failures
-2. Uses alternative approaches if needed
-3. Leverages what has already been completed
-4. Achieves the original goal
-
-Return the same JSON structure as before."""
-        
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an expert at adaptive planning and problem-solving."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.7
-            )
-            
-            plan_data = json.loads(response.choices[0].message.content)
-            
-            # Create new plan steps
-            new_steps = []
-            
-            # Keep completed steps
-            for step in plan.steps:
-                if step.state == StepState.COMPLETED:
-                    new_steps.append(step)
-            
-            # Add new steps from replan
-            for step_data in plan_data.get("steps", []):
-                # Skip if this step was already completed
-                if any(s.id == step_data.get("id") for s in new_steps):
-                    continue
-                
-                step = PlanStep(
-                    id=step_data.get("id", str(uuid.uuid4())[:8]),
-                    description=step_data.get("description", ""),
-                    tool=step_data.get("tool", ""),
-                    parameters=step_data.get("parameters", {}),
-                    depends_on=step_data.get("depends_on", []),
-                    required=step_data.get("required", True),
-                    estimated_duration=step_data.get("estimated_duration"),
-                    priority=step_data.get("priority", 0),
-                    can_parallel=step_data.get("can_parallel", False)
-                )
-                new_steps.append(step)
-            
-            # Create new plan version
-            new_plan = ExecutionPlan(
-                id=plan.id,  # Keep same ID
-                goal=plan.goal,
-                steps=new_steps,
-                created_at=plan.created_at,
-                version=plan.version + 1,
-                context=execution_state.current_context,
-                notes=plan.notes + [f"Replanned at v{plan.version + 1} due to failures"]
-            )
-            
-            await self.save_plan(new_plan)
-            
-            logger.info(f"Created new plan version {new_plan.version} with {len(new_steps)} steps")
-            return new_plan
-            
-        except Exception as e:
-            logger.error(f"Failed to replan: {e}")
-            return plan
-    
-    def get_next_steps(self, plan: ExecutionPlan) -> List[PlanStep]:
-        """Get next executable steps considering dependencies"""
-        executable = []
-        completed_ids = {s.id for s in plan.steps if s.state == StepState.COMPLETED}
-        
-        for step in plan.steps:
-            if step.state != StepState.PENDING:
-                continue
-            
-            # Check if all dependencies are completed
-            deps_satisfied = all(dep in completed_ids for dep in step.depends_on)
-            if deps_satisfied:
-                executable.append(step)
-        
-        return executable
-    
-    def get_blocked_steps(self, plan: ExecutionPlan) -> List[PlanStep]:
-        """Get steps blocked by failed dependencies"""
-        failed_ids = {s.id for s in plan.steps if s.state == StepState.FAILED and s.required}
-        blocked = []
-        
-        for step in plan.steps:
-            if step.state == StepState.PENDING:
-                if any(dep in failed_ids for dep in step.depends_on):
-                    blocked.append(step)
-        
-        return blocked
-    
-    def update_step_state(self, plan: ExecutionPlan, step_id: str, 
-                         state: StepState, result: Dict[str, Any] = None, 
-                         error: str = None, started_at: datetime = None, 
-                         completed_at: datetime = None):
-        """Update a step's state after execution"""
-        step = plan.get_step_by_id(step_id)
-        if step:
-            step.state = state
-            if result is not None:
-                step.result = result
-            if error is not None:
-                step.error = error
-            if started_at is not None:
-                step.started_at = started_at
-            if completed_at is not None:
-                step.completed_at = completed_at
-            
-            # Update plan statistics
-            plan.update_stats()
-    
-    async def save_plan(self, plan: ExecutionPlan):
-        """Save plan to file"""
-        
-        # Save as JSON
-        json_path = self.save_dir / f"plan_{plan.id}_v{plan.version}.json"
-        with open(json_path, 'w') as f:
-            json.dump(plan.to_dict(), f, indent=2)
-        
-        # Save as Markdown
-        md_path = self.save_dir / f"plan_{plan.id}_v{plan.version}.md"
-        with open(md_path, 'w', encoding='utf-8') as f:
-            f.write(plan.to_markdown())
-        
-        logger.debug(f"Saved plan to {json_path} and {md_path}")
-    
-    async def load_plan(self, plan_id: str, version: Optional[int] = None) -> Optional[ExecutionPlan]:
-        """Load a plan from file"""
-        
-        if version:
-            json_path = self.save_dir / f"plan_{plan_id}_v{version}.json"
-        else:
-            # Find latest version
-            pattern = f"plan_{plan_id}_v*.json"
-            files = list(self.save_dir.glob(pattern))
-            if not files:
-                return None
-            json_path = max(files, key=lambda p: int(p.stem.split('_v')[-1]))
-        
-        if not json_path.exists():
-            return None
-        
-        with open(json_path, 'r') as f:
-            data = json.load(f)
-        
-        return ExecutionPlan.from_dict(data)
-
-
-# ============================================
-# ORCHESTRATION COMPONENTS
-# ============================================
-
-@dataclass
-class TaskResult:
-    """Result of a task execution"""
-    task_id: str
-    tool: str
-    success: bool
-    result: Dict[str, Any]
-    error: Optional[str] = None
-    timestamp: datetime = field(default_factory=datetime.now)
-    retries: int = 0
-
-@dataclass
-class ExecutionMemory:
-    """Stores execution history for context"""
-    goal: str
-    summary: str
-    results: List[TaskResult]
-    timestamp: datetime = field(default_factory=datetime.now)
-
-# ============================================
-# MAIN HYBRID AGENT
-# ============================================
-
-class HybridAgent:
-    """
-    Production-ready agent that executes plans and manages tools.
-    Clean separation: Agent handles execution, PlanManager handles planning.
-    """
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str = "gpt-4.1-mini",
-        max_retries: int = 3,
-        enable_memory: bool = True,
-        enable_planning: bool = True,
-        plan_save_dir: str = "./plans",
-        *,
-        temperature: float = 0.7,
-        tool_profile: Optional[str] = None,
-    ):
-        self.client = openai.AsyncOpenAI(api_key=api_key)
-        self.model = model
-        self.max_retries = max_retries
-        self.enable_memory = enable_memory
-        self.enable_planning = enable_planning
-        self.temperature = float(temperature)
-        self.config = AgentConfig(model=self.model, temperature=self.temperature, tool_profile=tool_profile)
-
-        # Tool registry
-        self.tools: Dict[str, Tool] = {}
-        self._register_default_tools()
-
-        # Planning component (no circular reference)
-        self.plan_manager = None
-        if enable_planning:
-            self.plan_manager = PlanManager(
-                model_client=self.client,
-                model=self.model,
-                available_tools=self.tools,
-                save_dir=plan_save_dir
-            )
-
-        # Current execution state
-        self.current_plan: Optional[ExecutionPlan] = None
-
-        # Execution context and memory
-        self.context: Dict[str, Any] = {}
-        self.memory: List[ExecutionMemory] = []
-        self.max_memory_size = 10
-
-        # Statistics
-        self.stats = defaultdict(int)
-
-    def bootstrap_turn(self, mission: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Return initial system message and optional mission/user message."""
-        system_prompt = PromptLibrary.build_system_prompt(self._get_memory_context(), self.config)
-        msgs: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-        if mission:
-            msgs.append({"role": "user", "content": mission})
-        return msgs
-
-    def _register_default_tools(self):
-        """Register the default tool set"""
-        default_tools = [
-            # File operations
-            FileReadTool(),
-            FileWriteTool(),
-
-            # Git operations
-            GitTool(),
-
-            # System operations
-            #ShellTool(),
-            PowerShellTool(),
-
-            # Code execution
-            PythonTool(),
-
-            # Web operations
-            WebSearchTool(),
-            WebFetchTool(),
-
-            # GitHub operations
-            GitHubTool(),
-        ]
-
-        for tool in default_tools:
-            self.register_tool(tool)
-
-
-    def register_tool(self, tool: Tool):
-        """Register a new tool"""
-        self.tools[tool.name] = tool
-        logger.info(f"Registered tool: {tool.name}")
-
-    def get_tools_schema(self) -> List[Dict]:
-        """Generate OpenAI function calling schema for all tools"""
-        schemas = []
-        for name, tool in self.tools.items():
-            schema = {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": tool.description,
-                    "parameters": tool.parameters_schema
-                }
+            state_to_save = {
+                'session_id': session_id,
+                'timestamp': datetime.now().isoformat(),
+                'state_data': state_data
             }
-            schemas.append(schema)
-        return schemas
-
-    def _get_memory_context(self, limit: int = 3) -> str:
-        """Get relevant memory context"""
-        if not self.enable_memory or not self.memory:
-            return ""
-
-        recent_memory = self.memory[-limit:]
-        context_parts = []
-
-        for mem in recent_memory:
-            success_rate = sum(1 for r in mem.results if r.success) / len(mem.results) * 100
-            context_parts.append(
-                f"Previous task: {mem.goal[:100]}\n"
-                f"Summary: {mem.summary}\n"
-                f"Success rate: {success_rate:.0f}%"
-            )
-
-        return "\n\n".join(context_parts)
-
-    def get_memory_context(self, limit: int = 3) -> str:
-        """Public accessor for external conversation orchestrators."""
-        return self._get_memory_context(limit=limit)
-
-    # -------- Minimal next-action decision helper --------
-    async def _decide_next_action(
-        self,
-        step: 'PlanStep',
-        plan: 'ExecutionPlan',
-        mission: Optional[str],
-        messages: List[Dict[str, str]],
-    ) -> Dict[str, Any]:
-        """Ask the model for the next action in strict JSON."""
-        tool_catalog = [
-            {
-                "name": name,
-                "description": tool.description,
-                "parameters_schema": tool.parameters_schema,
-            }
-            for name, tool in self.tools.items()
-        ]
-
-        system = (
-            "You are a pragmatic task executor. Prefer the simplest valid action.\n"
-            "Decide ONE action per turn, output STRICT JSON only."
-        )
-
-        user_payload = {
-            "mission": mission,
-            "plan": {
-                "id": plan.id,
-                "goal": plan.goal,
-                "status": plan.status,
-                "context": plan.context,
-            },
-            "current_step": {
-                "id": step.id,
-                "description": step.description,
-                "tool": step.tool,
-                "parameters": step.parameters,
-                "required": step.required,
-                "depends_on": step.depends_on,
-            },
-            "messages": messages[-5:] if messages else [],
-            "tools": tool_catalog,
-            "response_schema": {
-                "needs_user_input": {"question": "string"},
-                "use_tool": {"name": "string", "args": {}},
-                "mark_complete": {"result": {}, "notes": "string"},
-                "fail": {"error": "string"},
-            },
-            "rules": [
-                "If you need info from user, ONLY set needs_user_input.question",
-                "If a tool is required, set use_tool with correct args",
-                "If no tool needed, set mark_complete",
-                "Return VALID JSON only, no markdown",
-            ],
-        }
-
-        try:
-            resp = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": json.dumps(user_payload)},
-                ],
-                response_format={"type": "json_object"},
-                temperature=self.temperature,
-            )
-            content = resp.choices[0].message.content
-            return json.loads(content)
-        except Exception as e:
-            logger.error(f"Decision failed: {e}")
-            return {"fail": {"error": str(e)}}
-
-    # ------------- Planning path stays unchanged -------------
-    async def execute(
-        self,
-        mission: Optional[str] = None,
-        *,
-        session_id: str,
-        plan_id: Optional[str] = None,
-        user_message: Optional[str] = None,
-        max_iterations: int = 20
-    ) -> Dict[str, Any]:
-        """Execute next steps of a persistent plan or create it once."""
-
-        # Ensure plan manager exists
-        if not self.plan_manager:
-            self.plan_manager = PlanManager(
-                model_client=self.client,
-                model=self.model,
-                available_tools=self.tools,
-                save_dir="./plans",
-            )
-
-        # Load or create plan
-        plan = await self._get_or_create_plan(
-            session_id=session_id,
-            plan_id=plan_id,
-            mission=mission,
-            user_message=user_message,
-        )
-        self.current_plan = plan
-
-        # Bootstrap minimal messages context
-        messages: List[Dict[str, str]] = []
-        if mission:
-            messages.append({"role": "user", "content": mission})
-        if user_message:
-            messages.append({"role": "user", "content": user_message})
-
-        iterations = 0
-        needs_user_input = False
-        pending_question: Optional[str] = None
-
-        while plan.status == "active" and iterations < max_iterations:
-            iterations += 1
-
-            # Determine next step
-            next_steps = self.plan_manager.get_next_steps(plan)
-            step = next_steps[0] if next_steps else None
-            if not step:
-                plan.status = "completed" if self._all_steps_complete(plan) else "failed"
-                break
-
-            # Ask model for next action
-            action = await self._decide_next_action(step, plan, mission, messages)
-
-            if action.get("needs_user_input"):
-                q = (action["needs_user_input"].get("question") or "").strip()
-                await self.plan_manager.save_plan(plan)
-                needs_user_input = True
-                pending_question = q
-                break
-
-            if action.get("use_tool"):
-                tool_name = action["use_tool"].get("name")
-                args = action["use_tool"].get("args", {})
-                await self._run_tool_into_step(step, tool_name, args, plan)
-                await self.plan_manager.save_plan(plan)
-                continue
-
-            if action.get("mark_complete"):
-                self.plan_manager.update_step_state(
-                    plan,
-                    step.id,
-                    StepState.COMPLETED,
-                    result=action["mark_complete"].get("result"),
-                    completed_at=datetime.now(),
-                )
-                await self.plan_manager.save_plan(plan)
-                continue
-
-            if action.get("fail"):
-                self.plan_manager.update_step_state(
-                    plan,
-                    step.id,
-                    StepState.FAILED,
-                    error=action["fail"].get("error", "Unknown failure"),
-                    completed_at=datetime.now(),
-                )
-                await self.plan_manager.save_plan(plan)
-                continue
-
-            # Fallback: if action empty, mark failed to avoid loop
-            self.plan_manager.update_step_state(
-                plan,
-                step.id,
-                StepState.FAILED,
-                error="No valid action returned",
-                completed_at=datetime.now(),
-            )
-            await self.plan_manager.save_plan(plan)
-
-        # Memory summary (optional)
-        if self.enable_memory and self.current_plan:
-            self._store_memory(self.current_plan.goal, [
-                TaskResult(
-                    task_id=s.id,
-                    tool=s.tool,
-                    success=s.state == StepState.COMPLETED,
-                    result=s.result or {},
-                    error=s.error,
-                ) for s in self.current_plan.steps
-            ])
-
-        return {
-            "success": plan.status == "completed",
-            "plan_id": plan.id,
-            "status": plan.status,
-            "needs_user_input": needs_user_input,
-            "question": pending_question,
-            "completed_steps": plan.completed_steps,
-            "failed_steps": plan.failed_steps,
-            "total_steps": plan.total_steps,
-            "messages": messages,
-        }
-
-    async def _get_or_create_plan(
-        self,
-        *,
-        session_id: str,
-        plan_id: Optional[str],
-        mission: Optional[str],
-        user_message: Optional[str],
-    ) -> 'ExecutionPlan':
-        """Load an existing plan or create a new one once per session."""
-        if plan_id:
-            loaded = await self.plan_manager.load_plan(plan_id)
-            if loaded:
-                return loaded
-        # Create new plan
-        context = {
-            "session_id": session_id,
-            "last_user_message": user_message,
-        }
-        plan = await self.plan_manager.create_plan(mission or "Untitled Mission", context=context)
-        return plan
-
-    async def _execute_step(self, step: PlanStep) -> bool:
-        """Execute a single plan step - Agent's responsibility"""
-
-        logger.info(f"Executing step {step.id}: {step.description}")
-
-        # Update state
-        started_at = datetime.now()
-        self.plan_manager.update_step_state(
-            self.current_plan,
-            step.id,
-            StepState.IN_PROGRESS,
-            started_at=started_at
-        )
-
-        # Execute with retry
-        result = await self._execute_tool_with_retry(
-            step.tool,
-            step.parameters,
-            task_id=step.id
-        )
-
-        completed_at = datetime.now()
-
-        if result.success:
-            # Update plan through manager
-            self.plan_manager.update_step_state(
-                self.current_plan,
-                step.id,
-                StepState.COMPLETED,
-                result=result.result,
-                completed_at=completed_at
-            )
-
-            # Store result in plan context
-            self.current_plan.context[step.id] = result.result
-
-            logger.info(f"Step {step.id} completed successfully")
+            
+            # Async file write
+            import aiofiles
+            async with aiofiles.open(state_file, 'wb') as f:
+                await f.write(pickle.dumps(state_to_save))
+            
+            self.logger.info("state_saved", session_id=session_id)
             return True
-        else:
-            step.retry_count += 1
-
-            if step.retry_count < step.max_retries:
-                self.plan_manager.update_step_state(
-                    self.current_plan,
-                    step.id,
-                    StepState.RETRY,
-                    error=result.error,
-                    completed_at=completed_at
-                )
-                logger.warning(f"Step {step.id} failed, will retry ({step.retry_count}/{step.max_retries})")
-            else:
-                self.plan_manager.update_step_state(
-                    self.current_plan,
-                    step.id,
-                    StepState.FAILED,
-                    error=result.error,
-                    completed_at=completed_at
-                )
-                logger.error(f"Step {step.id} failed: {result.error}")
-
-            return False
-
-    def _all_steps_complete(self, plan: ExecutionPlan) -> bool:
-        """Check if all steps are complete"""
-        return all(
-            step.state in [StepState.COMPLETED, StepState.SKIPPED]
-            or (step.state == StepState.FAILED and not step.required)
-            for step in plan.steps
-        )
-
-    def _should_replan(self, plan: ExecutionPlan) -> bool:
-        """Determine if replanning is needed"""
-        # Don't replan if we've already tried multiple times
-        if plan.version > 3:
-            return False
-
-        # Replan if critical steps failed
-        failed_required = sum(1 for s in plan.steps
-                              if s.state == StepState.FAILED and s.required)
-
-        return failed_required > 0
-
-    def _get_execution_state(self, plan: ExecutionPlan) -> ExecutionState:
-        """Get current execution state for replanning"""
-
-        completed_steps = [
-            {"id": s.id, "description": s.description, "result": s.result}
-            for s in plan.steps if s.state == StepState.COMPLETED
-        ]
-
-        failed_steps = [
-            {"id": s.id, "description": s.description, "error": s.error}
-            for s in plan.steps if s.state == StepState.FAILED
-        ]
-
-        return ExecutionState(
-            completed_steps=completed_steps,
-            failed_steps=failed_steps,
-            current_context=plan.context,
-            original_goal=plan.goal,
-            previous_plan_id=plan.id,
-            version=plan.version
-        )
-
-    async def _run_tool_into_step(
-        self,
-        step: 'PlanStep',
-        tool_name: str,
-        args: Dict[str, Any],
-        plan: 'ExecutionPlan',
-    ) -> bool:
-        """Execute a tool and write state/contexts into the step/plan."""
-        logger.info(f"Executing tool {tool_name} for step {step.id}")
-        started_at = datetime.now()
-        self.plan_manager.update_step_state(plan, step.id, StepState.IN_PROGRESS, started_at=started_at)
-        result = await self._execute_tool_with_retry(tool_name, args, task_id=step.id)
-        completed_at = datetime.now()
-        if result.success:
-            self.plan_manager.update_step_state(
-                plan, step.id, StepState.COMPLETED, result=result.result, completed_at=completed_at
-            )
-            plan.context[step.id] = result.result
-            return True
-        else:
-            self.plan_manager.update_step_state(
-                plan, step.id, StepState.FAILED, error=result.error, completed_at=completed_at
-            )
-            return False
-
-    async def _execute_tool_with_retry(
-        self,
-        tool_name: str,
-        parameters: Dict[str, Any],
-        task_id: str = None
-    ) -> TaskResult:
-        """Execute a tool with retry logic"""
-        tool = self.tools.get(tool_name)
-        if not tool:
-            return TaskResult(
-                task_id=task_id or f"task_{datetime.now().timestamp()}",
-                tool=tool_name,
-                success=False,
-                result={},
-                error=f"Tool '{tool_name}' not found"
-            )
-
-        # Validate parameters
-        valid, error = tool.validate_params(**parameters)
-        if not valid:
-            return TaskResult(
-                task_id=task_id or f"task_{datetime.now().timestamp()}",
-                tool=tool_name,
-                success=False,
-                result={},
-                error=error
-            )
-
-        # Try execution with retries
-        last_error = None
-        for attempt in range(self.max_retries):
-            try:
-                # Add context for Python tool
-                if tool_name == "python":
-                    parameters["context"] = self.context
-
-                # Execute tool
-                result = await tool.execute(**parameters)
-
-                # Update statistics
-                self.stats[f"{tool_name}_calls"] += 1
-
-                if result.get("success"):
-                    self.stats[f"{tool_name}_success"] += 1
-                    return TaskResult(
-                        task_id=task_id or f"task_{datetime.now().timestamp()}",
-                        tool=tool_name,
-                        success=True,
-                        result=result,
-                        retries=attempt
-                    )
-
-                # Derive a clearer error message when available
-                last_error = result.get("error") or result.get("stderr") or (
-                    f"Return code {result.get('returncode')}" if result.get("returncode") not in (None, 0) else "Unknown error"
-                )
-
-                # Try to fix parameters if we have more attempts
-                if attempt < self.max_retries - 1:
-                    fixed_params = await self._fix_parameters(
-                        tool_name, parameters, last_error
-                    )
-                    if fixed_params:
-                        parameters.update(fixed_params)
-                        logger.info(f"Retrying {tool_name} with fixed parameters")
-
-            except Exception as e:
-                last_error = str(e)
-                logger.error(f"Tool execution failed: {e}")
-
-        self.stats[f"{tool_name}_failures"] += 1
-        return TaskResult(
-            task_id=task_id or f"task_{datetime.now().timestamp()}",
-            tool=tool_name,
-            success=False,
-            result={},
-            error=last_error,
-            retries=self.max_retries
-        )
-
-    async def _fix_parameters(
-        self,
-        tool_name: str,
-        parameters: Dict[str, Any],
-        error: str
-    ) -> Optional[Dict[str, Any]]:
-        """Use LLM to fix parameters based on error. Include tool schema for guidance."""
-        tool = self.tools.get(tool_name)
-        schema = tool.parameters_schema if tool else {}
-        prompt = f"""
-        You are fixing parameters for the tool '{tool_name}'.
-        The tool's expected parameters_schema is:
-        {json.dumps(schema, indent=2)}
-
-        The last execution failed with this error message:
-        {error}
-
-        Original parameters were:
-        {json.dumps(parameters, indent=2)}
-
-        Provide corrected parameters that strictly conform to the parameters_schema.
-        Do not include any fields that are not in the schema. Return ONLY a valid JSON object.
-        """
-
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a debugging assistant. Return only valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.3
-            )
-
-            return json.loads(response.choices[0].message.content)
-
+            
         except Exception as e:
-            logger.error(f"Failed to fix parameters: {e}")
+            self.logger.error("state_save_failed", session_id=session_id, error=str(e))
+            return False
+    
+    async def load_state(self, session_id: str) -> Optional[Dict]:
+        """Load agent state asynchronously"""
+        try:
+            state_file = self.state_dir / f"{session_id}.pkl"
+            
+            if not state_file.exists():
+                return {}
+            
+            import aiofiles
+            async with aiofiles.open(state_file, 'rb') as f:
+                content = await f.read()
+                state = pickle.loads(content)
+            
+            self.logger.info("state_loaded", session_id=session_id)
+            return state['state_data']
+            
+        except Exception as e:
+            self.logger.error("state_load_failed", session_id=session_id, error=str(e))
             return None
-
-    # -------- Back-compat path (builds messages then delegates) --------
-    async def execute_with_function_calling(
-        self,
-        goal: str,
-        max_iterations: int = 10
-    ) -> Dict[str, Any]:
-        """Execute goal using OpenAI function calling for tool selection (compat wrapper)."""
-
-        # Initialize conversation with memory context
-        memory_context = self._get_memory_context()
-
-        system_prompt = """You are an AI assistant that uses tools to complete tasks.
-Be efficient and combine operations when possible using the python tool.
-Previous context may be available to help guide your decisions."""
-
-        if memory_context:
-            system_prompt += f"\n\nPrevious execution context:\n{memory_context}"
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": goal}
-        ]
-
-        result = await self.run_messages(messages, max_iterations=max_iterations)
-
-        # For BC: shape the classic return payload
-        results = result.get("results", [])
-        success_count = sum(1 for r in results if r.get("success"))
-        return {
-            "success": result.get("success", False),
-            "goal": goal,
-            "results": [
-                {
-                    "task_id": r["task_id"],
-                    "tool": r["tool"],
-                    "success": r["success"],
-                    "error": r["error"],
-                    "retries": r["retries"]
-                }
-                for r in results
-            ],
-            "summary": f"Executed {len(results)} tasks, {success_count} successful",
-            "context": self.context,
-            "iterations": result.get("iterations", 0),
-            "stats": dict(self.stats),
-            "needs_user_input": result.get("needs_user_input", False),
-            "question": result.get("question"),
-            "messages": result.get("messages"),
-        }
-
-    async def resume_plan(self, plan_id: str, version: Optional[int] = None, messages: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """Resume execution of an existing plan"""
-
-        if not self.plan_manager:
-            return {"success": False, "error": "Planning not enabled"}
-
-        # Load plan
-        plan = await self.plan_manager.load_plan(plan_id, version)
-        if not plan:
-            return {"success": False, "error": f"Plan {plan_id} not found"}
-
-        logger.info(f"Resuming plan {plan_id} v{plan.version}")
-        self.current_plan = plan
-
-        # Determine session and optional last user message
-        session_id = str(plan.context.get("session_id", plan.id))
-        last_user_message: Optional[str] = None
-        if messages:
-            for m in reversed(messages):
-                if isinstance(m, dict) and m.get("role") == "user":
-                    last_user_message = m.get("content")
-                    break
-
-        # Continue execution from current state using new signature
-        return await self.execute(
-            plan.goal,
-            session_id=session_id,
-            plan_id=plan.id,
-            user_message=last_user_message,
-        )
-
-    def _store_memory(self, goal: str, results: List[TaskResult]):
-        """Store execution in memory"""
-        summary = f"Completed {len(results)} tasks, " \
-                  f"{sum(1 for r in results if r.success)} successful"
-
-        memory_entry = ExecutionMemory(
-            goal=goal[:200],  # Truncate long goals
-            summary=summary,
-            results=results
-        )
-
-        self.memory.append(memory_entry)
-
-        # Limit memory size
-        if len(self.memory) > self.max_memory_size:
-            self.memory.pop(0)
-
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get execution statistics"""
-        total_calls = sum(v for k, v in self.stats.items() if k.endswith("_calls"))
-        total_success = sum(v for k, v in self.stats.items() if k.endswith("_success"))
-
-        tool_stats = {}
-        for tool_name in self.tools.keys():
-            calls = self.stats.get(f"{tool_name}_calls", 0)
-            success = self.stats.get(f"{tool_name}_success", 0)
-            failures = self.stats.get(f"{tool_name}_failures", 0)
-
-            if calls > 0:
-                tool_stats[tool_name] = {
-                    "calls": calls,
-                    "success": success,
-                    "failures": failures,
-                    "success_rate": (success / calls) * 100
-                }
-
-        return {
-            "total_calls": total_calls,
-            "total_success": total_success,
-            "overall_success_rate": (total_success / total_calls * 100) if total_calls > 0 else 0,
-            "tools": tool_stats,
-            "memory_entries": len(self.memory),
-            "current_plan": self.current_plan.id if self.current_plan else None
-        }
-
-    def clear_context(self):
-        """Clear execution context"""
-        self.context.clear()
-        logger.info("Context cleared")
-
-    def clear_memory(self):
-        """Clear execution memory"""
-        self.memory.clear()
-        logger.info("Memory cleared")
-
-
-# ============================================
-# CUSTOM TOOL EXAMPLE
-# ============================================
-
-class DatabaseTool(Tool):
-    """Custom tool for database operations"""
     
-    @property
-    def name(self) -> str:
-        return "database"
-    
-    @property
-    def description(self) -> str:
-        return "Execute database operations (SQLite)"
-    
-    @property
-    def parameters_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["create_table", "insert", "select", "update", "delete"],
-                    "description": "Database operation to perform"
-                },
-                "query": {
-                    "type": "string",
-                    "description": "SQL query to execute"
-                },
-                "db_path": {
-                    "type": "string",
-                    "description": "Path to database file"
-                },
-                "values": {
-                    "type": "array",
-                    "description": "Values for parameterized queries"
-                }
-            },
-            "required": ["operation"]
-        }
-    
-    async def execute(self, operation: str, query: str = None, db_path: str = "data.db", **kwargs) -> Dict[str, Any]:
-        import sqlite3
+    def cleanup_old_states(self, days: int = 7):
+        """Remove states older than specified days"""
+        cutoff_time = time.time() - (days * 24 * 60 * 60)
         
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            if operation == "create_table":
-                cursor.execute(query)
-                conn.commit()
-                return {"success": True, "message": "Table created"}
-            
-            elif operation == "insert":
-                cursor.execute(query, kwargs.get("values", ()))
-                conn.commit()
-                return {"success": True, "rows_affected": cursor.rowcount}
-            
-            elif operation == "select":
-                cursor.execute(query)
-                rows = cursor.fetchall()
-                columns = [desc[0] for desc in cursor.description] if cursor.description else []
-                return {
-                    "success": True,
-                    "columns": columns,
-                    "rows": rows,
-                    "count": len(rows)
-                }
-            
-            elif operation == "update":
-                cursor.execute(query, kwargs.get("values", ()))
-                conn.commit()
-                return {"success": True, "rows_affected": cursor.rowcount}
-            
-            elif operation == "delete":
-                cursor.execute(query, kwargs.get("values", ()))
-                conn.commit()
-                return {"success": True, "rows_affected": cursor.rowcount}
-            
-            else:
-                return {"success": False, "error": f"Unknown operation: {operation}"}
-                
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-        finally:
-            conn.close()
-
-# ============================================
-# USAGE EXAMPLES
-# ============================================
-
-async def main():
-    """Example usage of the refactored HybridAgent"""
-    api_key = os.getenv("OPENAI_API_KEY")
-    # Initialize agent with planning enabled
-    agent = HybridAgent(
-        api_key=api_key,
-        model="gpt-4.1",
-        enable_planning=True,
-        plan_save_dir="./execution_plans"
-    )
-    
-    # Example 1: Create and deploy a web application
-    goal1 = """
-    Create a simple Flask web application with:
-    1. A homepage with a contact form
-    2. Store submissions in a SQLite database
-    3. Initialize Git repository
-    4. Create GitHub repository and push code
-    """
-    
-    print("=" * 60)
-    print("Example 1: Web Application Development")
-    print("=" * 60)
-    
-    result = await agent.execute(goal1, session_id="example1")
-    
-    print(f"Success: {result['success']}")
-    print(f"Plan ID: {result.get('plan_id')}")
-    print(f"Completed: {result.get('completed_steps')}/{result.get('total_steps')} steps")
-    print(f"Plan saved to: {result.get('plan_file')}")
-    
-    # Example 2: Data analysis with dynamic replanning
-    goal2 = """
-    Analyze CSV files in the 'data' directory:
-    1. Read all CSV files
-    2. Generate summary statistics
-    3. Create visualizations
-    4. Write a comprehensive report
-    """
-    
-    print("\n" + "=" * 60)
-    print("Example 2: Data Analysis Pipeline")
-    print("=" * 60)
-    
-    result = await agent.execute(goal2, session_id="example2")
-    
-    print(f"Success: {result['success']}")
-    print(f"Status: {result.get('status')}")
-    
-    # Example 3: Resume a previous plan
-    if result.get('plan_id'):
-        print("\n" + "=" * 60)
-        print("Example 3: Resuming Previous Plan")
-        print("=" * 60)
-        
-        resume_result = await agent.resume_plan(result['plan_id'])
-        print(f"Resume Success: {resume_result['success']}")
-    
-    # Example 4: Direct execution without planning
-    print("\n" + "=" * 60)
-    print("Example 4: Direct Execution with Function Calling")
-    print("=" * 60)
-    
-    result = await agent.execute(
-        "Create a Python script that generates random passwords",
-        session_id="example4"
-    )
-    
-    print(f"Success: {result['success']}")
-    print(f"Tasks executed: {len(result['results'])}")
-    print(f"Summary: {result['summary']}")
-    
-    # Get execution statistics
-    print("\n" + "=" * 60)
-    print("Execution Statistics")
-    print("=" * 60)
-    
-    stats = agent.get_statistics()
-    print(f"Total tool calls: {stats['total_calls']}")
-    print(f"Success rate: {stats['overall_success_rate']:.1f}%")
-    print(f"Memory entries: {stats['memory_entries']}")
-    
-    if stats['tools']:
-        print("\nTool usage:")
-        for tool, tool_stats in stats['tools'].items():
-            print(f"  {tool}:")
-            print(f"    Calls: {tool_stats['calls']}")
-            print(f"    Success rate: {tool_stats['success_rate']:.1f}%")
-
-async def advanced_example():
-    """Advanced example with custom tools and complex planning"""
-    
-    # Initialize agent
-    agent = HybridAgent(
-        api_key="your-openai-api-key",
-        model="gpt-4",
-        enable_planning=True
-    )
-    
-    # Register custom database tool
-    agent.register_tool(DatabaseTool())
-    
-    # Complex goal requiring multiple tools and replanning
-    goal = """
-    Build a complete data pipeline:
-    1. Create SQLite database with tables for users and transactions
-    2. Generate synthetic test data (1000 users, 5000 transactions)
-    3. Analyze the data and create summary statistics
-    4. Generate visualizations and save as images
-    5. Create a markdown report with all findings
-    6. Initialize Git repo and commit everything
-    7. Create GitHub repository and push
-    """
-    
-    print("Executing complex data pipeline...")
-    result = await agent.execute_with_planning(goal)
-    
-    if result['success']:
-        print("Pipeline completed successfully!")
-        print(f"View the plan at: {result['plan_file']}")
-        
-        # Access the plan directly
-        plan = agent.current_plan
-        if plan:
-            # Print execution timeline
-            print("\nExecution Timeline:")
-            for step in plan.steps:
-                if step.started_at and step.completed_at:
-                    duration = (step.completed_at - step.started_at).total_seconds()
-                    print(f"  {step.description}: {duration:.2f}s")
-    else:
-        print(f"Pipeline failed: {result.get('status')}")
-        print(f"Failed steps: {result.get('failed_steps')}")
-
-async def test_replanning():
-    """Test the replanning capability"""
-    
-    agent = HybridAgent(
-        api_key="your-openai-api-key",
-        model="gpt-4",
-        enable_planning=True
-    )
-    
-    # Goal that might require replanning
-    goal = """
-    Deploy a web service:
-    1. Create a FastAPI application
-    2. Write unit tests
-    3. Run tests (this might fail initially)
-    4. Fix any issues and rerun tests
-    5. Create Docker container
-    6. Push to Docker Hub
-    """
-    
-    print("Testing replanning capability...")
-    result = await agent.execute_with_planning(goal)
-    
-    print(f"Final status: {result['status']}")
-    print(f"Plan version: {agent.current_plan.version if agent.current_plan else 'N/A'}")
-    
-    if agent.current_plan and agent.current_plan.version > 1:
-        print(f"Plan was replanned {agent.current_plan.version - 1} times")
-
-# ============================================
-# MAIN ENTRY POINT
-# ============================================
-
-if __name__ == "__main__":
-    import sys
-    
-    # Check for API key
-    if len(sys.argv) > 1:
-        api_key = sys.argv[1]
-    else:
-        api_key = os.getenv("OPENAI_API_KEY")
-    
-    if not api_key:
-        print("Please provide OpenAI API key as argument or set OPENAI_API_KEY environment variable")
-        sys.exit(1)
-    
-    # Run examples
-    print("Running HybridAgent Examples...")
-    print("=" * 60)
-    
-    # Basic example
-    asyncio.run(main())
-    
-    # Advanced example with custom tools
-    # asyncio.run(advanced_example())
-    
-    # Test replanning
-    # asyncio.run(test_replanning())
-
-
-
-// Relative Path: main.py
-# ============================================
-# EXAMPLE USAGE
-# ============================================
-
-import asyncio
-import os
-from capstone.agent_v2.hybrid_agent import HybridAgent
-
-
-async def example_fastapi_project():
-    """Example: Create a FastAPI project with full setup"""
-    
-    # Get API key from environment
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("Please set OPENAI_API_KEY environment variable")
-    
-    # Create agent
-    agent = HybridAgent(api_key=api_key, model="gpt-4.1-mini")
-    
-    # Define goal
-    goal = """
-    Create a production-ready FastAPI project called 'payment-api':
-    1. Create the project directory structure
-    2. Set up a FastAPI application with proper structure (routers, models, services)
-    3. Add health check and basic CRUD endpoints
-    4. Create requirements.txt with necessary dependencies
-    5. Add a comprehensive README.md
-    6. Initialize git repository
-    7. Create GitHub repository (if gh CLI is available)
-    8. Create initial commit
-    9. Push the code to the GitHub repository
-    """
-    
-    # Execute with planning (autonomous mode)
-    print("Starting FastAPI project creation...")
-    result = await agent.execute_with_planning(goal)
-    
-    # Print results
-    print(f"\nExecution {'succeeded' if result['success'] else 'failed'}")
-    print(f"Status: {result.get('status')}")
-    print(f"Plan ID: {result.get('plan_id')}")
-    print(f"Completed steps: {result.get('completed_steps')}/{result.get('total_steps')}")
-    if result.get('plan_file'):
-        print(f"Plan saved to: {result['plan_file']}")
-    
-    # Print statistics
-    stats = agent.get_statistics()
-    print(f"\nStatistics:")
-    print(f"  Total tool calls: {stats['total_calls']}")
-    print(f"  Success rate: {stats['overall_success_rate']:.1f}%")
-    
-    return result
-
-async def example_web_research():
-    """Example: Research a topic using web tools"""
-    
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("Please set OPENAI_API_KEY environment variable")
-    
-    agent = HybridAgent(api_key=api_key)
-    
-    goal = """
-    Research the latest developments in quantum computing:
-    1. Search for recent news about quantum computing breakthroughs
-    2. Find information about major companies working on quantum computers
-    3. Create a summary report with the findings
-    """
-    
-    result = await agent.execute_with_function_calling(goal)
-    
-    print(f"Research {'completed' if result['success'] else 'failed'}")
-    return result
-
-async def example_data_processing():
-    """Example: Complex data processing with Python tool"""
-    
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("Please set OPENAI_API_KEY environment variable")
-    
-    agent = HybridAgent(api_key=api_key)
-    
-    goal = """
-    Create a data analysis script:
-    1. Generate sample sales data (100 records) with date, product, quantity, price
-    2. Calculate total revenue by product
-    3. Find the best-selling product
-    4. Create a summary report
-    5. Save the results to a JSON file
-    """
-    
-    result = await agent.execute_with_function_calling(goal)
-    
-    print(f"Data processing {'completed' if result['success'] else 'failed'}")
-    return result
-
-# ============================================
-# MAIN ENTRY POINT
-# ============================================
-
-def main():
-    """Main entry point for testing"""
-    import sys
-    
-    print("HybridAgent - Production Ready")
-    print("=" * 50)
-    
-    # Check for API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("Error: Please set OPENAI_API_KEY environment variable")
-        print("export OPENAI_API_KEY='your-key-here'")
-        sys.exit(1)
-    
-    # Run example based on command line argument
-    if len(sys.argv) > 1:
-        example = sys.argv[1]
-        
-        if example == "fastapi":
-            asyncio.run(example_fastapi_project())
-        elif example == "research":
-            asyncio.run(example_web_research())
-        elif example == "data":
-            asyncio.run(example_data_processing())
-        else:
-            print(f"Unknown example: {example}")
-            print("Available examples: fastapi, research, data")
-    else:
-        # Run default example
-        print("Running FastAPI project example...")
-        print("(Use 'python hybrid_agent.py [fastapi|research|data]' for other examples)")
-        asyncio.run(example_fastapi_project())
-
-if __name__ == "__main__":
-    main()
+        for state_file in self.state_dir.glob("*.pkl"):
+            if state_file.stat().st_mtime < cutoff_time:
+                state_file.unlink()
+                self.logger.info("old_state_removed", file=state_file.name)
 
 
 
@@ -2621,8 +2324,8 @@ if __name__ == "__main__":
 import asyncio
 import os
 import argparse
-from conversation_manager import ConversationManager
-from hybrid_agent import HybridAgent
+from capstone.agent_v2.conversation_manager import ConversationManager
+from capstone.agent_v2.hybrid_agent import HybridAgent
 
 async def main():
     parser = argparse.ArgumentParser(description="TaskForce CLI")
@@ -2641,7 +2344,7 @@ async def main():
     )
 
     cm = ConversationManager(session_id="local-cli", agent=agent)
-    cm.start(args.mission)
+    await cm.start(args.mission)
 
     print("TaskForce-CLI. Type 'exit' to quit.")
     while True:
@@ -2663,7 +2366,7 @@ async def main():
                 print(f"[{ok}] {r['tool']} -> {str(r['result'])[:140]}")
 
         # Also print the last assistant message (if any)
-        for m in reversed(cm.history()):
+        for m in reversed(cm.history):
             if m["role"] == "assistant":
                 print(f"Agent: {m['content'][:800]}")
                 break
@@ -2741,6 +2444,18 @@ class Tool(ABC):
             "type": "object",
             "properties": properties,
             "required": required
+        }
+
+    @property
+    def function_tool_schema(self) -> Dict[str, Any]:
+        """Return full OpenAI function tool schema for this tool."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters_schema,
+            },
         }
     
     @abstractmethod
