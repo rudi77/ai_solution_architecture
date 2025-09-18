@@ -38,6 +38,10 @@ class GitTool(Tool):
                     "type": "string",
                     "description": "Repository path (default: current directory)"
                 },
+                "remote": {
+                    "type": "string",
+                    "description": "Remote name (for push), defaults to 'origin'"
+                },
                 "message": {
                     "type": "string",
                     "description": "Commit message (for commit operation)"
@@ -54,6 +58,15 @@ class GitTool(Tool):
                 "branch": {
                     "type": "string",
                     "description": "Branch name"
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "list", "set_url"],
+                    "description": "Remote sub-action when operation=remote"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Remote name for operation=remote (default: origin)"
                 }
             },
             "required": ["operation"]
@@ -102,10 +115,19 @@ class GitTool(Tool):
                 cmd = ["git", "clone", url, str(repo_path)]
             elif operation == "remote":
                 action = kwargs.get("action", "add")
+                remote_name = kwargs.get("name", "origin")
                 if action == "add":
-                    cmd = ["git", "remote", "add", kwargs.get("name", "origin"), kwargs["url"]]
-                else:
+                    if not kwargs.get("url"):
+                        return {"success": False, "error": "url is required for remote add"}
+                    cmd = ["git", "remote", "add", remote_name, kwargs["url"]]
+                elif action == "set_url":
+                    if not kwargs.get("url"):
+                        return {"success": False, "error": "url is required for remote set_url"}
+                    cmd = ["git", "remote", "set-url", remote_name, kwargs["url"]]
+                elif action == "list":
                     cmd = ["git", "remote", "-v"]
+                else:
+                    return {"success": False, "error": f"Unknown remote action: {action}"}
             else:
                 return {"success": False, "error": f"Unknown operation: {operation}"}
             
