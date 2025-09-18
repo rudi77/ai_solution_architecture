@@ -203,7 +203,7 @@ class TodoListManager:
         self.base_dir = base_dir
 
 
-    async def extract_clarification_questions(self, mission: str, tools_desc: str) -> List[str]:
+    async def extract_clarification_questions(self, mission: str, tools_desc: str) -> List[Dict[str, Any]]:
         """
         Extracts clarification questions from the mission and tools_desc.
 
@@ -216,21 +216,21 @@ class TodoListManager:
         """
         user_prompt, system_prompt = self.create_clarification_questions_prompts(mission, tools_desc)
         response = await litellm.acompletion(
-            model="gpt-4.1-mini",
+            model="gpt-4.1",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            response_format={"type": "json_object"},
             temperature=0  # deterministischer
         )
         raw = response.choices[0].message.content
         try:
-            data = json.loads(raw)
+            data = json.loads(raw)            
         except json.JSONDecodeError as e:
             # Optional: Fallback/Retry oder klare Fehlermeldung
             raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
         return data
+
 
 
     def create_clarification_questions_prompts(self, mission: str, tools_desc: str) -> Tuple[str, str]:
@@ -241,36 +241,57 @@ class TodoListManager:
         system_prompt = f"""
     You are a Clarification-Mining Agent.
 
-    ## Task
-    Extract **only** the missing required information needed to create an **executable** plan for the mission using the available tools.
+    ## Objective
+    Find **all** missing required inputs needed to produce an **executable** plan for the mission using the available tools.
 
     ## Context
-    - Mission:
+    - Mission (user intent and constraints):
     {mission}
 
-    - Available tools (names, descriptions, parameter schemas):
+    - Available tools (names, descriptions, **parameter schemas including required/optional/default/enums/types**):
     {tools_desc}
 
-    ## Output format
+    ## Output
     - Return **only** a valid JSON array (no code fences, no commentary).
-    - Each element of the array must have exactly these fields:
-    - "key": a stable, machine-readable identifier in **snake_case**. Use the format **"<tool>.<parameter>"** when possible (e.g., "file_writer.filename"). If tool-agnostic, use a clear domain key (e.g., "project_name").
-    - "question": **one** short, closed, unambiguous question (one piece of information per question).
+    - Each element must be:
+    - "key": stable, machine-readable snake_case identifier. Prefer **"<tool>.<parameter>"** (e.g., "file_writer.filename"); if tool-agnostic use a clear domain key (e.g., "project_name").
+    - "question": **one** short, closed, unambiguous question (one datum per question).
+
+    ## Algorithm (mandatory)
+    1) **Parse the mission** to understand the intended outcome and likely steps.
+    2) **Enumerate candidate tool invocations** required to achieve the mission (internally; do not output them).
+    3) For **each candidate tool**, inspect its **parameter schema**:
+    - For every **required** parameter (or optional-without-safe-default) check if its value is **explicitly present** in the mission (exact literal or clearly specified constraint).
+    - If not explicitly present, **create a question** for that parameter.
+    4) **Respect schema constraints**:
+    - Types (string/number/boolean/path/url/email), formats (e.g., kebab-case, ISO-8601), units, min/max.
+    - If an enum is specified, ask as a **closed choice** (“Which of: A, B, or C?”).
+    - **Do not infer** values unless a **default** is explicitly provided in the schema.
+    5) **Merge & deduplicate** questions across tools.
+    6) **Confidence gate**:
+    - If you are **not 100% certain** every required value is specified, you **must** ask a question for it.
+    - If truly nothing is missing, return **[]**.
 
     ## Strict Rules
-    1) **Only required info**: Ask only for parameters that are strictly required by the tools and cannot be defaulted.
-    2) **No Todo steps**: Do not return tasks, steps, or explanations — only questions.
-    3) **Closed & precise**:
-    - Phrase so the answer is concise (e.g., a value, choice, yes/no).
-    - Include necessary **formats/units/constraints** (e.g., "kebab-case", "filename with extension", "ISO-8601 date").
-    - No ambiguity, no multiple sub-questions, no small talk.
-    4) **Minimal & deduplicated**: No duplicates, no optional nice-to-have questions.
-    5) **Nothing missing?**: If no required information is missing, return an empty array [].
+    - **Only required info**: Ask only for parameters that are required (or effectively required because no safe default exists).
+    - **No tasks, no explanations**: Output questions only.
+    - **Closed & precise**:
+    - Ask for a single value per question; include necessary format/units/constraints in the question.
+    - Avoid ambiguity, multi-part questions, or small talk.
+    - **Minimal & deduplicated**: No duplicates; no “nice-to-have” questions.
 
-    ## Example (illustrative only, do not force):
+    ## Heuristic coverage (when relevant tools are present)
+    - **File/Path tools**: confirm filename **with extension** and target **directory/path**; avoid ambiguous relative paths.
+    - **Code/Project scaffolding**: project name (kebab-case), language/runtime version, package manager.
+    - **Git/Repo**: repository name, visibility (public/private), remote provider, default branch, and **auth method/token** if required by schema.
+    - **Network/Endpoints**: base URL/host, port, protocol (HTTP/HTTPS).
+    - **Auth/Secrets**: explicit key names or secret identifiers if a tool schema requires them.
+
+    ## Examples (illustrative only; do not force)
     [
     {{"key":"file_writer.filename","question":"What should the output file be called (include extension, e.g., report.txt)?"}},
-    {{"key":"email_sender.recipient","question":"What is the recipient email address for the message?"}}
+    {{"key":"file_writer.directory","question":"In which directory should the file be created (absolute or project-relative path)?"}},
+    {{"key":"git.create_repo.visibility","question":"Should the repository be public or private (choose one: public/private)?"}}
     ]
     """.strip()
 
@@ -283,7 +304,8 @@ class TodoListManager:
         return user_prompt, system_prompt
 
 
-    async def create_todolist(self, mission: str, tools_desc: str) -> TodoList:
+
+    async def create_todolist(self, mission: str, tools_desc: str, answers: Any) -> TodoList:
         """
         Creates a new todolist based on the mission and tools_desc.
 
@@ -298,7 +320,7 @@ class TodoListManager:
             ValueError: Invalid JSON from model.
 
         """
-        user_prompt, system_prompt = self.create_todolist_prompts(mission, tools_desc)
+        user_prompt, system_prompt = self.create_final_todolist_prompts(mission, tools_desc, answers)
 
         response = await litellm.acompletion(
             model="gpt-4.1-mini",
@@ -414,18 +436,18 @@ class TodoListManager:
         return Path(self.base_dir) / f"todolist_{todolist_id}.json"
 
 
-    def create_todolist_prompts(self, mission: str, tools_desc: str) -> Tuple[str, str]:
+    def create_final_todolist_prompts(self, mission: str, tools_desc: str, answers: Any) -> Tuple[str, str]:
         """
-        Gibt (user_prompt, system_prompt) zurück, passend für den Planungs-Agenten.
+        Creates a strict prompt for the final TodoList (No-ASK mode).
+        Returns (user_prompt, system_prompt).
         """
 
-        # Einheitliches, minimales und konsistentes Schema
         structure_block = """
     {
     "items": [
         {
         "id": "t1",
-        "description": "Kurze, präzise Aufgabenbeschreibung (1–2 Sätze)",
+        "description": "Short, precise task description (1–2 sentences)",
         "tool": "tool_name_or_none",
         "parameters": {},
         "depends_on": [],
@@ -439,12 +461,16 @@ class TodoListManager:
 
         system_prompt = f"""
     You are a planning agent. Your sole task is to convert the mission into a
-    structured execution plan (TODO list).
+    strict, executable TODO list. At this point, all required clarifications
+    have already been collected — there must be **no questions left**.
 
-    Context you have:
+    Context:
 
     - Mission:
     {mission}
+
+    - Clarification Answers (already provided, use them directly):
+    {answers}
 
     - Available tools (names, descriptions, parameter schemas):
     {tools_desc}
@@ -454,26 +480,26 @@ class TodoListManager:
     ## Instructions
 
     1) OUTPUT FORMAT
-    - Return a valid JSON object ONLY — no extra commentary, no code fences.
-    - Use exactly the structure shown under "Expected JSON structure".
+    - Return a valid JSON object ONLY — no commentary, no code fences.
+    - Match exactly the structure under "Expected JSON structure".
 
     2) PLAN REQUIREMENTS
-    - Produce a minimal, complete step-by-step plan to fulfill the mission.
+    - Produce a minimal, complete, step-by-step plan to fulfill the mission.
     - Each step MUST be atomic (Single Responsibility).
     - Prefer fewer, well-scoped steps over many fuzzy steps.
 
     3) STEP FIELDS (MUST-HAVES)
     - id: short unique id like "t1", "t2", ...
-    - description: 1–2 sentences, clear and outcome-oriented.
+    - description: 1–2 sentences, outcome-oriented.
     - tool: exact tool name from the provided list, or "none" if no tool is needed.
     - parameters: object with ONLY the required keys for the chosen tool (match the parameters_schema).
     - depends_on: array of step ids that must be completed first (empty if none).
-    - status: one of "PENDING", "BLOCKED", "DONE" (initially use "PENDING"; use "BLOCKED" only if the step cannot start without user input).
+    - status: always "PENDING" initially.
 
     4) PARAMETERS
-    - If a parameter value is unknown and must be clarified: 
-    - Put the placeholder string "ASK_USER" as the value in parameters,
-    - AND add a corresponding human-readable question to "open_questions".
+    - Use the given Clarification Answers to fill in all required parameter values.
+    - **Do not use "ASK_USER"**. Every parameter must be concrete.
+    - Do not invent values — use only provided answers or explicit mission context.
 
     5) DEPENDENCIES
     - Add dependencies to enforce correct execution order.
@@ -482,9 +508,9 @@ class TodoListManager:
     6) QUALITY CHECKS BEFORE RETURNING
     - JSON is syntactically valid.
     - All tools exist (or "none").
-    - parameters strictly conform to the target tool's parameters_schema (no extra keys).
+    - parameters strictly conform to the tool’s parameters_schema (no extra keys).
     - All depends_on ids exist; no circular graphs.
-    - If any "ASK_USER" appears, ensure "open_questions" contains precise, actionable questions.
+    - **open_questions must always be empty**.
 
     ---
 
@@ -492,10 +518,10 @@ class TodoListManager:
     {structure_block}
         """.strip()
 
-        # Der UserPrompt an den Planungs-Agenten ist bewusst generisch
-        user_prompt = "Generate the structured TODO list for the given mission."
+        user_prompt = "Generate the final structured TODO list for the given mission (no questions, no ASK_USER placeholders)."
 
         return user_prompt, system_prompt
+
 
     def __write_todolist(self, todolist: TodoList) -> None:
         """
