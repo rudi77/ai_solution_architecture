@@ -61,7 +61,7 @@ dev_cli = typer.Typer(
 
 def setup_logging(debug: bool = False) -> None:
     """Configure structlog for console or JSON output."""
-    level = logging.DEBUG if debug or os.getenv("AGENT_DEBUG") else logging.INFO
+    level = logging.DEBUG if debug or os.getenv("AGENT_DEBUG") else logging.WARN
     logging.basicConfig(level=level, format="%(message)s")
 
     structlog.configure(

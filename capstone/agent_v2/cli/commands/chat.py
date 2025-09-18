@@ -28,6 +28,16 @@ def start(
         "--mission", "-m",
         help="Initial mission for the agent"
     ),
+    mission_file: Optional[Path] = typer.Option(
+        None,
+        "--mission-file", "-mf",
+        help="Path to a file containing the initial mission",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
     work_dir: Optional[Path] = typer.Option(
         None,
         "--work-dir", "-w",
@@ -50,10 +60,23 @@ def start(
     Examples:
         agent chat start
         agent chat start --mission "Help me organize my files"
+        agent chat start --mission-file ./path/to/mission.md
         agent chat start --work-dir ./workspace --provider anthropic
     """
     settings = CLISettings()
     selected_provider = provider or settings.default_provider
+
+    # Resolve mission from file if provided (file overrides --mission)
+    resolved_mission = mission
+    if mission_file is not None:
+        try:
+            resolved_mission = mission_file.read_text(encoding="utf-8")
+            # Inform if both were provided
+            if mission is not None:
+                console.print("[dim]Note: --mission-file provided; overriding --mission text.[/dim]")
+        except Exception as e:
+            console.print(f"[red]❌ Failed to read mission file: {e}[/red]")
+            raise typer.Exit(code=1)
 
     # Generate session info
     session_id = session_name or f"chat-{uuid.uuid4()}"
@@ -66,13 +89,13 @@ def start(
         f"[dim]Session ID:[/dim] {session_id[:16]}...\n"
         f"[dim]Provider:[/dim] {selected_provider}\n"
         f"[dim]Work Directory:[/dim] {work_dir}\n"
-        f"[dim]Mission:[/dim] {mission or 'None - free chat'}\n\n"
+        f"[dim]Mission:[/dim] {('from file: ' + str(mission_file)) if (mission_file is not None) else (resolved_mission or 'None - free chat')}\n\n"
         f"[yellow]Type 'exit' to end the session[/yellow]",
         title="🤖 Agent V2 Chat"
     ))
 
     # Start the chat loop
-    asyncio.run(_demo_chat_loop(mission, work_dir, selected_provider, session_id))
+    asyncio.run(_demo_chat_loop(resolved_mission, work_dir, selected_provider, session_id))
 
 
 @app.command()
@@ -118,6 +141,12 @@ async def _demo_chat_loop(mission: Optional[str], work_dir: Path, provider: str,
 
         console.print("[green]🤖 Initializing real Agent...[/green]")
 
+        # # Initial user message
+        # # mission can be an empty string, so we need to check for None
+        # if mission is not None and mission != "":
+        #     current_input = f"My mission is: {mission}. How can you help me with this?"
+        #     console.print(f"[bold green]You[/bold green]: {current_input}")
+
         # Create the real agent like in your debug script
         agent = Agent.create_agent(
             name="AgentV2-Chat",
@@ -131,13 +160,8 @@ async def _demo_chat_loop(mission: Optional[str], work_dir: Path, provider: str,
         console.print("[green]✅ Agent initialized successfully![/green]")
         console.print("[dim]You're now chatting with the real Agent V2...[/dim]\n")
 
-        # Initial user message
-        # mission can be an empty string, so we need to check for None
-        if mission is not None and mission != "":
-            current_input = f"My mission is: {mission}. How can you help me with this?"
-            console.print(f"[bold green]You[/bold green]: {current_input}")
-        else:
-            current_input = Prompt.ask("[bold green]You[/bold green]")
+
+        current_input = Prompt.ask("[bold green]You[/bold green]")
 
         done = False
         while not done:

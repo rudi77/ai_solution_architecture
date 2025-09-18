@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 from typing import Any, AsyncIterator, Dict, List, Optional
+import uuid
 from attr import asdict, dataclass
 import litellm
 import structlog
@@ -94,6 +95,9 @@ class MessageHistory:
         """
         if n <= 0:
             return [self.system_prompt]
+
+        if n == -1:
+            return self.messages
 
         # Exclude the system prompt from pairing logic
         body = self.messages[1:]
@@ -198,6 +202,8 @@ class Action:
     type: ActionType
     tool: Optional[str]
     input: Dict[str, Any]
+    question: Optional[str] = None
+    message: Optional[str] = None
 
     @staticmethod
     def from_json(json_str: str) -> "Action":
@@ -208,7 +214,9 @@ class Action:
         return Action(
             type=ActionType(data["type"]),
             tool=data["tool"],
-            input=data["input"])
+            input=data["input"],
+            question=data.get("question"),
+            message=data.get("message"))
 
 
 @dataclass
@@ -396,7 +404,7 @@ class Agent:
             # 2.e) Plan persistieren
             self.state["todolist_id"] = todolist.todolist_id
             await self.state_manager.save_state(session_id, self.state)
-            self.todo_list_manager.update_todolist(todolist)  # persist current version if needed
+            await self.todo_list_manager.update_todolist(todolist)  # persist current version if needed
             self.logger.info("todolist_persisted", session_id=session_id, todolist_id=todolist.todolist_id)
 
         else:
@@ -426,6 +434,19 @@ class Agent:
             # 3) Execute
             observation = await self._execute_action(action)
             self.logger.info("action_executed", session_id=session_id, position=next_step.position, success=bool(observation.get("success")))
+
+            # 3a) If the action requires user input, pause and ask
+            if observation.get("requires_user"):
+                question_text = observation.get("question") or "I need additional information to proceed."
+                # Store a pending question with a stable key tied to this step
+                self.state["pending_question"] = {
+                    "answer_key": f"step_{next_step.position}_answer",
+                    "question": question_text,
+                }
+                await self.state_manager.save_state(session_id, self.state)
+                yield AgentEvent(type=AgentEventType.ASK_USER, data={"question": question_text})
+                self.logger.info("ask_user", session_id=session_id, question_key=f"step_{next_step.position}_answer")
+                return
 
             # 4) State aktualisieren
             self.state["last_observation"] = observation
@@ -554,7 +575,7 @@ class Agent:
         }
 
         # get the last 2 messages from the message history. this shall be sufficient for the LLM to plan the next action.
-        messages = self.message_history.get_last_n_messages(2)
+        messages = self.message_history.get_last_n_messages(-1)
 
         # Provide recent state/observation context to enable correct parameterization (e.g., GitHub repo URL)
         state_context = {
@@ -673,12 +694,14 @@ class Agent:
             return Action(
                 type=ActionType.ASK,
                 tool=thought_action.tool,
-                input=thought_action.input)
+                input=thought_action.input,
+                question=thought_action.question)
         elif thought_action.type == ActionType.DONE:
             return Action(
                 type=ActionType.DONE,
                 tool=thought_action.tool,
-                input=thought_action.input)
+                input=thought_action.input,
+                message=thought_action.message)
         elif thought_action.type == ActionType.PLAN:
             return Action(
                 type=ActionType.PLAN,
@@ -693,7 +716,7 @@ class Agent:
             raise ValueError(f"Invalid action type: {thought_action.type}")
 
 
-    async def _execute_action(self, action: Action) -> str:
+    async def _execute_action(self, action: Action) -> Dict[str, Any]:
         """
         Executes the action for the next step.
         """
@@ -705,7 +728,8 @@ class Agent:
             return await tool.execute(**action.input)
             
         elif action.type == ActionType.ASK:
-            pass
+            question_text = action.question or action.input.get("question") or "I need additional information to proceed."
+            return {"success": False, "requires_user": True, "question": question_text}
         elif action.type == ActionType.DONE:
             pass
         elif action.type == ActionType.PLAN:
