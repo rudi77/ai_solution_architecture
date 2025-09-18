@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from attr import dataclass
 import litellm
 
-from capstone.agent_v2.planning.todolist import TodoItem, TodoList, TodoListManager
+from capstone.agent_v2.planning.todolist import TaskStatus, TodoItem, TodoList, TodoListManager
 from capstone.agent_v2.statemanager import StateManager
 from capstone.agent_v2.tool import Tool
 from capstone.agent_v2.tools.code_tool import PythonTool
@@ -191,6 +191,32 @@ class Action:
             input=data["input"])
 
 
+@dataclass
+class AgentEventType(Enum):
+    THOUGHT = "thought"
+    ACTION = "action"
+    TOOL_STARTED = "tool_started"
+    TOOL_RESULT = "tool_result"
+    ASK_USER = "ask_user"
+    STATE_UPDATED = "state_updated"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
+@dataclass
+class AgentEvent:
+    type: AgentEventType
+    data: Dict[str, Any]
+
+
+@dataclass
+class Observation:
+    success: bool
+    error: Optional[str] = None
+    data: Dict[str, Any] = None
+    requires_user: bool = False
+
+
 def build_system_prompt(system_prompt: str, mission: str, todo_list: Optional[str] = "") -> str:
     """
     Build the system prompt from base, mission, and todo list sections.
@@ -208,7 +234,7 @@ def build_system_prompt(system_prompt: str, mission: str, todo_list: Optional[st
 </Base>
 
 <Mission>
-{mission.strip()}
+{mission.strip() if mission else ""}
 </Mission>
 
 <TODOList>
@@ -249,9 +275,10 @@ class Agent:
         self.tools_schema = self._get_tools_schema()
         self.todo_list_manager = todo_list_manager
         self.state_manager = state_manager
+        self.state = None
         self.message_history = MessageHistory(build_system_prompt(system_prompt, mission, self.tools_description))
 
-    async def execute(self, user_message: str, session_id: str, message_history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def execute(self, user_message: str, session_id: str) -> Dict[str, Any]:
         """
         Executes the agent with the given user message.
         Before executing the agent, the agent will plan the tasks to complete the mission.
@@ -267,32 +294,41 @@ class Agent:
         """
 
         # get the current state of the agent
-        state = await self.state_manager.load_state(session_id)
+        self.state = await self.state_manager.load_state(session_id)
 
+        # add the user message to the message history
+        self.message_history.add_message(user_message, "user")
 
         # update message history in state
-        state["message_history"] = message_history
-        state["last_user_message"] = user_message
-        state["mission"] = self.mission
+        self.state["message_history"] = self.message_history.messages
+        self.state["last_user_message"] = user_message
+        self.state["mission"] = self.mission
 
         # save the state
-        await self.state_manager.save_state(session_id, state)
+        await self.state_manager.save_state(session_id, self.state)
 
         # Before a plan is created, we shall check if there are some open questions that need to be answered
 
         # get the current todolist
-        todolist = await self._create_or_get_todolist(session_id, state)
+        todolist = await self._create_or_get_todolist(session_id, self.state)
 
         # now that we have the todolist, we can execute the todolist in a ReAct loop
         for next_step in todolist.items:
-           # 1. generate a thought
-           thought = await self._generate_thought(next_step)
-           # 2. decide the next action
-           action = await self._decide_next_action(thought, next_step)
-           # 3. execute the action
-           observation = await self._execute_action(action)
-
-           await self.state_manager.save_state(session_id, state)
+            # 1. generate a thought
+            thought = await self._generate_thought(next_step)
+            # 2. decide the next action
+            action = await self._decide_next_action(thought, next_step)
+            # 3. execute the action
+            observation = await self._execute_action(action)
+            # 4. update the state with the observation
+            self.state["last_observation"] = observation
+            # 5. update the state of the next step
+            if observation.get("success"):
+                next_step.state = TaskStatus.COMPLETED
+            else:
+                next_step.state = TaskStatus.FAILED
+            # 6. save the state
+            await self.state_manager.save_state(session_id, self.state)
 
 
     async def _create_or_get_todolist(self, session_id: str, state: Dict[str, Any]) -> Optional[TodoList]:
@@ -308,8 +344,12 @@ class Agent:
         """
         todolist_id = state.get("todolist_id")
         # check if a plan has already been created for the mission
+        if self.mission is None:
+            mission = state.get("last_user_message")
+
+        # check if the todolist is already created
         if not todolist_id:
-            todolist = await self.todo_list_manager.create_todolist(self.mission, self.tools_description)
+            todolist = await self.todo_list_manager.create_todolist(mission, self.tools_description)
             state["todolist_id"] = todolist.todolist_id
             await self.state_manager.save_state(session_id, state)
 
@@ -324,27 +364,6 @@ class Agent:
         else:
             todolist = await self.todo_list_manager.load_todolist(todolist_id)                
             return todolist
-
-
-    def _get_planning_context(self, session_id: str, message_history: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Gets the planning context for the agent. Which consists of:
-        - The Agent's name
-        - The Agent's description
-        - The Agent's system prompt
-        - The Agent's history
-
-        Args:
-            session_id: The session id for the agent.
-            message_history: The message history for the agent.
-        """
-
-        return {
-            "name": self.name,
-            "description": self.description,
-            "system_prompt": self.system_prompt,
-            "history": message_history,
-        }            
 
 
     def _get_tools_description(self) -> str:
@@ -413,6 +432,8 @@ class Agent:
             tool_choice="auto",
         )
 
+        self.message_history.add_message(response.choices[0].message.content, "assistant")
+
         return Thought.from_json(response.choices[0].message.content)
 
 
@@ -449,6 +470,7 @@ class Agent:
         else:
             raise ValueError(f"Invalid action type: {thought_action.type}")
 
+
     async def _execute_action(self, action: Action) -> str:
         """
         Executes the action for the next step.
@@ -471,6 +493,7 @@ class Agent:
         else:
             raise ValueError(f"Invalid action type: {action.type}")
 
+
     def _get_tool(self, tool_name: str) -> Tool:
         """
         Gets the tool from the tools list where the name matches the tool_name
@@ -481,6 +504,7 @@ class Agent:
             tool_name = tool_name[len("functions."):]
 
         return next((tool for tool in self.tools if tool.name == tool_name), None)
+
 
     # create a static method to create an agent
     @staticmethod
@@ -559,11 +583,12 @@ def main():
     description = "Lightweight debug run to reach thought generation."
     system_prompt = GENERIC_SYSTEM_PROMPT
 
-    # Mission designed to encourage at least two tools (web search + file write)
-    mission = (
-        "Research the latest Python release notes via web search and write a short summary "
-        "to a local file named RELEASE_NOTES_SUMMARY.txt."
-    )
+    # Mission: Ask the user for the directory name and the content of the README.txt file, then create the directory and add the README.txt file with the provided content.
+    # mission = (        
+    #     "Create the directory with the specified name and add a README.txt file inside it containing the provided content."
+    #     "Ask the user for the name of the directory to create and the content to put inside a README.txt file. "
+    # )
+    mission = None
 
     # Use a local work directory next to this file
     work_dir = str((Path(__file__).parent / ".debug_work").resolve())
@@ -580,12 +605,11 @@ def main():
 
     # Minimal inputs for execute()
     session_id = f"debug-{uuid.uuid4()}"
-    user_message = "Bitte starte den Plan und führe den ersten Schritt aus."
-    message_history: list[dict] = []
+    user_message = "Create a new directory named 'my-test-dir' and add a README.txt file inside it containing a hello_world code example."
 
     print(f"Starting Agent execute() with session_id={session_id}")
     try:
-        asyncio.run(agent.execute(user_message=user_message, session_id=session_id, message_history=message_history))
+        asyncio.run(agent.execute(user_message=user_message, session_id=session_id))
         print("Agent execute() finished (up to current implementation).")
     except Exception as exc:
         print(f"Agent execution failed: {exc}")
