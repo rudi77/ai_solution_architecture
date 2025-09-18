@@ -1,0 +1,42 @@
+# MISSION — Einfache CSV-Analyse (ohne zusätzliche Abhängigkeiten)
+
+## ZIEL
+- Analysiere die CSV-Datei unter `assignments/assignment3/data/heart.csv` und erstelle einen kompakten Bericht.
+- Verwende ausschließlich vorhandene Tools: `python`, `file_read`, `file_write`.
+- Keine externen Bibliotheken (kein pandas); nutze das Python-Standardmodul `csv` und Grundfunktionen.
+
+## AUFGABEN
+1. Lade die Datei und erkenne Robustheit:
+   - Erkenne Trennzeichen (`,`, `;`, `\t`) heuristisch aus den ersten Zeilen.
+   - Lies Header; wenn keiner vorhanden, generiere `col_1..N`.
+   - Behandle fehlende Werte (leere Strings, `NA`, `N/A`, `null`).
+2. Erstelle Spalten-Profiling:
+   - Datentyp-Heuristik pro Spalte: `numeric` (float/int), `date` (ISO/ggf. `YYYY-MM-DD`), sonst `categorical/text`.
+   - Zähle: `rows_total`, `non_null`, `nulls`, `unique`.
+   - Für numerische Spalten: `min`, `max`, `mean`, `median`, `std`, `p25`, `p75`.
+   - Für kategorische Spalten: Top-10 Häufigkeiten (Wert, Anzahl, Anteil).
+3. Beispiele:
+   - Zeige 5 Beispielzeilen (als Markdown-Tabelle, gekürzt auf 120 Zeichen pro Zelle).
+4. Schreibe Ergebnisse:
+   - Erzeuge einen Markdown-Bericht unter `${WORK_DIR}/analysis/heart_report.md`.
+   - Lege zusätzlich eine kompakte JSON-Zusammenfassung unter `${WORK_DIR}/analysis/heart_summary.json` ab.
+
+## AUSGABEFORMAT (Markdown-Bericht)
+- Titel, Dateipfad, erkannter Delimiter, Anzahl Zeilen/Spalten
+- Tabelle „Spaltenprofil“ mit: `name`, `inferred_type`, `non_null`, `nulls`, `unique`, `min`, `p25`, `median`, `p75`, `max`, `example_values`
+- Für kategorische Spalten eine Sektion mit Top-10 Häufigkeiten
+- Eine kleine Stichprobe (5 Zeilen)
+
+## REGELN
+- Nutze ausschließlich die vorhandenen Tools:
+  - `python` für die Berechnung (mit `csv`/Standardlib, keine externen Pakete)
+  - `file_read` optional für Preview, `file_write` für die Ergebnisse
+- Pfade relativ zur aktuellen Repository-Root behandeln; `${WORK_DIR}` ist das vom CLI übergebene Arbeitsverzeichnis.
+- Antworte kurz und strukturiert; keine langen Erklärungen, nur Ergebnisdateien erzeugen.
+
+## ERFOLGSKRITERIEN
+- `${WORK_DIR}/analysis/heart_report.md` existiert und enthält die geforderten Sektionen.
+- `${WORK_DIR}/analysis/heart_summary.json` enthält Kennzahlen je Spalte.
+- Keine externen Abhängigkeiten wurden genutzt.
+
+

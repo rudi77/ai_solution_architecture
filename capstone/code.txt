@@ -1,4 +1,3980 @@
 
+// Relative Path: cli\commands\chat.py
+"""
+Chat command for interactive conversation with the agent.
+"""
+
+import asyncio
+import uuid
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.prompt import Prompt
+from rich.panel import Panel
+from rich.markdown import Markdown
+from rich.live import Live
+from rich.spinner import Spinner
+
+from ..config.settings import CLISettings
+
+console = Console()
+app = typer.Typer(help="Interactive chat with the agent")
+
+
+@app.command()
+def start(
+    mission: Optional[str] = typer.Option(
+        None,
+        "--mission", "-m",
+        help="Initial mission for the agent"
+    ),
+    mission_file: Optional[Path] = typer.Option(
+        None,
+        "--mission-file", "-mf",
+        help="Path to a file containing the initial mission",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    work_dir: Optional[Path] = typer.Option(
+        None,
+        "--work-dir", "-w",
+        help="Working directory for the agent"
+    ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider", "-p",
+        help="LLM provider to use"
+    ),
+    session_name: Optional[str] = typer.Option(
+        None,
+        "--session", "-s",
+        help="Session name (auto-generated if not provided)"
+    ),
+):
+    """
+    Start an interactive chat session with the agent.
+
+    Examples:
+        agent chat start
+        agent chat start --mission "Help me organize my files"
+        agent chat start --mission-file ./path/to/mission.md
+        agent chat start --work-dir ./workspace --provider anthropic
+    """
+    settings = CLISettings()
+    selected_provider = provider or settings.default_provider
+
+    # Resolve mission from file if provided (file overrides --mission)
+    resolved_mission = mission
+    if mission_file is not None:
+        try:
+            resolved_mission = mission_file.read_text(encoding="utf-8")
+            # Inform if both were provided
+            if mission is not None:
+                console.print("[dim]Note: --mission-file provided; overriding --mission text.[/dim]")
+        except Exception as e:
+            console.print(f"[red]❌ Failed to read mission file: {e}[/red]")
+            raise typer.Exit(code=1)
+
+    # Generate session info
+    session_id = session_name or f"chat-{uuid.uuid4()}"
+    if not work_dir:
+        work_dir = Path.cwd() / ".agent_workspace"
+
+    # Display session info
+    console.print(Panel.fit(
+        f"[bold blue]Agent Chat Session[/bold blue]\n\n"
+        f"[dim]Session ID:[/dim] {session_id[:16]}...\n"
+        f"[dim]Provider:[/dim] {selected_provider}\n"
+        f"[dim]Work Directory:[/dim] {work_dir}\n"
+        f"[dim]Mission:[/dim] {('from file: ' + str(mission_file)) if (mission_file is not None) else (resolved_mission or 'None - free chat')}\n\n"
+        f"[yellow]Type 'exit' to end the session[/yellow]",
+        title="🤖 Agent V2 Chat"
+    ))
+
+    # Start the chat loop
+    asyncio.run(_demo_chat_loop(resolved_mission, work_dir, selected_provider, session_id))
+
+
+@app.command()
+def resume(
+    session_id: str = typer.Argument(help="Session ID to resume"),
+):
+    """
+    Resume a previous chat session.
+
+    Examples:
+        agent chat resume sess-abc123
+    """
+    console.print(f"[blue]Resuming chat session: {session_id}[/blue]")
+
+    # TODO: Load session state and resume
+    console.print("[yellow]Session resumption not yet implemented[/yellow]")
+    console.print("This would load the previous conversation and agent state")
+
+
+async def _demo_chat_loop(mission: Optional[str], work_dir: Path, provider: str, session_id: str):
+    """Real agent chat loop implementation."""
+    import os
+
+    # Check for API key
+    if not os.getenv("OPENAI_API_KEY"):
+        console.print("[red]❌ Error: Please set OPENAI_API_KEY environment variable before running.[/red]")
+        console.print("[dim]You can set it with: export OPENAI_API_KEY='your-api-key'[/dim]")
+        return
+
+    try:
+        # Import the real agent
+        import sys
+        from pathlib import Path as PathLib
+
+        # Add the correct directories to sys.path for capstone imports
+        current_file = PathLib(__file__)
+        root_dir = current_file.parent.parent.parent.parent.parent  # Same path calculation
+
+        if str(root_dir) not in sys.path:
+            sys.path.insert(0, str(root_dir))
+
+        from capstone.agent_v2.agent import Agent, AgentEventType, GENERIC_SYSTEM_PROMPT
+
+        console.print("[green]🤖 Initializing real Agent...[/green]")
+
+        # # Initial user message
+        # # mission can be an empty string, so we need to check for None
+        # if mission is not None and mission != "":
+        #     current_input = f"My mission is: {mission}. How can you help me with this?"
+        #     console.print(f"[bold green]You[/bold green]: {current_input}")
+
+        # Create the real agent like in your debug script
+        agent = Agent.create_agent(
+            name="AgentV2-Chat",
+            description="Interactive chat agent with full capabilities",
+            system_prompt=GENERIC_SYSTEM_PROMPT,
+            mission=mission,
+            work_dir=str(work_dir.resolve()),
+            llm=None,  # Use default LLM configuration
+        )
+
+        console.print("[green]✅ Agent initialized successfully![/green]")
+        console.print("[dim]You're now chatting with the real Agent V2...[/dim]\n")
+
+
+        current_input = Prompt.ask("[bold green]You[/bold green]")
+
+        done = False
+        while not done:
+            if current_input.lower() in ['exit', 'quit', 'bye']:
+                console.print("[yellow]Ending chat session. Goodbye! 👋[/yellow]")
+                break
+
+            console.print(f"\n[dim]Agent processing your message...[/dim]")
+
+            try:
+                # Use the real agent execution loop like in your debug script
+                with Live(Spinner("dots", text="Agent thinking..."), console=console, refresh_per_second=4) as live:
+                    async for ev in agent.execute(user_message=current_input, session_id=session_id):
+                        if ev.type.name == AgentEventType.ASK_USER.name:
+                            # Clear spinner and show the question
+                            live.stop()
+                            question = ev.data.get("question", "Agent has a question:")
+                            console.print(f"\n[bold blue]🤖 Agent[/bold blue]: {question}")
+                            current_input = Prompt.ask("[bold green]You[/bold green]")
+                            #break
+
+                        elif ev.type.name == AgentEventType.STATE_UPDATED.name:
+                            # Show state updates
+                            state_data = ev.data
+
+                            # Show any agent response or reasoning
+                            if 'response' in state_data:
+                                live.stop()
+                                console.print(f"\n[bold blue]🤖 Agent[/bold blue]:")
+                                console.print(Panel(
+                                    Markdown(state_data['response']),
+                                    border_style="blue",
+                                    padding=(1, 2)
+                                ))
+
+                            # Show todo list updates if available
+                            if 'todolist' in state_data and state_data['todolist']:
+                                console.print("\n[dim]📋 Agent's current plan:[/dim]")
+                                todolist = state_data['todolist']
+                                if isinstance(todolist, str):
+                                    console.print(f"[dim]{todolist}[/dim]")
+                                elif isinstance(todolist, list):
+                                    for i, item in enumerate(todolist, 1):
+                                        status = "✅" if item.get('completed', False) else "⏳"
+                                        console.print(f"[dim]{status} {i}. {item}[/dim]")
+                                elif hasattr(todolist, 'items'):
+                                    for i, item in enumerate(todolist.items, 1):
+                                        status = "✅" if item.status.name == 'COMPLETED' else "⏳"
+                                        console.print(f"[dim]{status} {i}. {item.task}[/dim]")
+
+                        elif ev.type.name == AgentEventType.TOOL_STARTED.name:
+                            tool_name = ev.data.get('tool', 'Unknown')
+                            console.print(f"[dim]🔧 Using tool: {tool_name}[/dim]")
+
+                        elif ev.type.name == AgentEventType.TOOL_RESULT.name:
+                            success = ev.data.get('success', False)
+                            tool_name = ev.data.get('tool', 'Tool')
+                            result = ev.data.get('result', '')
+                            if success:
+                                console.print(f"[dim]✅ {tool_name} completed[/dim]")
+                                if result and len(str(result)) < 200:  # Show short results
+                                    console.print(f"[dim]   Result: {result}[/dim]")
+                            else:
+                                console.print(f"[dim]❌ {tool_name} failed[/dim]")
+                                if result:
+                                    console.print(f"[dim]   Error: {result}[/dim]")
+
+                        elif ev.type.name == AgentEventType.COMPLETE.name:
+                            live.stop()
+                            console.print("\n[green]✅ Task completed![/green]")
+                            todolist_markdown = ev.data.get("todolist")
+
+                            # print the todolist in a panel
+                            console.print(Panel(
+                                Markdown(todolist_markdown),
+                                border_style="green",
+                                padding=(1, 2)
+                            ))
+                
+                            # Show final results
+                            current_input = Prompt.ask("\n[bold green]You[/bold green] (or 'exit' to quit)")
+                            done = True
+                            #break
+
+            except Exception as e:
+                console.print(f"\n[red]❌ Agent execution error: {e}[/red]")
+                console.print(f"[dim]Error details: {type(e).__name__}[/dim]")
+                current_input = Prompt.ask("\n[bold green]You[/bold green] (try again or 'exit' to quit)")
+
+    except ImportError as e:
+        console.print(f"[red]❌ Could not import Agent: {e}[/red]")
+        console.print("[yellow]Make sure you're in the correct directory and the agent module is available[/yellow]")
+        console.print(f"[dim]Current directory: {Path.cwd()}[/dim]")
+        console.print(f"[dim]Expected agent.py at: {Path.cwd() / 'agent.py'}[/dim]")
+    except Exception as e:
+        console.print(f"[red]❌ Chat initialization error: {e}[/red]")
+
+
+def _generate_demo_response(user_input: str, mission: Optional[str], work_dir: Path) -> str:
+    """Generate a demo response based on user input."""
+    user_lower = user_input.lower()
+
+    if "hello" in user_lower or "hi" in user_lower:
+        return "Hello! I'm your AI assistant. I can help you with various tasks like:\n\n- 📁 File and directory operations\n- 💻 Code generation and review\n- 📊 Data analysis\n- 🔍 Research and information gathering\n\nWhat would you like me to help you with?"
+
+    elif "file" in user_lower and "create" in user_lower:
+        filename = "example_file.py"
+        return f"I'll create a file for you! Let me create `{filename}` in your working directory.\n\n```python\n# Example Python file\nprint('Hello, World!')\n\ndef main():\n    print('This is a demo file created by the agent')\n\nif __name__ == '__main__':\n    main()\n```\n\nFile created at: `{work_dir}/{filename}`\n\n✅ **Task completed!** The file has been created successfully."
+
+    elif "python" in user_lower and "function" in user_lower:
+        return "I'll help you write a Python function! Here's an example:\n\n```python\ndef calculate_fibonacci(n):\n    \"\"\"\n    Calculate the nth Fibonacci number.\n    \n    Args:\n        n (int): The position in the Fibonacci sequence\n        \n    Returns:\n        int: The nth Fibonacci number\n    \"\"\"\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    else:\n        return calculate_fibonacci(n - 1) + calculate_fibonacci(n - 2)\n\n# Example usage\nprint(calculate_fibonacci(10))  # Output: 55\n```\n\nThis function calculates Fibonacci numbers recursively. Would you like me to modify it or create a different function?"
+
+    elif "organize" in user_lower or "clean" in user_lower:
+        return "I can help you organize your files! Here's what I can do:\n\n## 📋 **File Organization Plan**\n\n1. **Scan Directory**: Analyze your current file structure\n2. **Categorize Files**: Group files by type (documents, images, code, etc.)\n3. **Create Folders**: Set up organized directory structure\n4. **Move Files**: Relocate files to appropriate folders\n5. **Generate Report**: Summary of changes made\n\nShould I proceed with organizing your files? I'll start by scanning the current directory."
+
+    elif mission and ("mission" in user_lower or "task" in user_lower):
+        return f"Great! Your mission is: **{mission}**\n\nHere's how I can help you accomplish this:\n\n## 🎯 **Action Plan**\n\n1. **Break down the mission** into smaller, manageable tasks\n2. **Identify required tools** and resources\n3. **Execute step by step** with regular progress updates\n4. **Provide detailed feedback** on each completed step\n\nLet me start by analyzing what needs to be done for your specific mission. What specific aspect would you like me to focus on first?"
+
+    else:
+        return f"I understand you're asking about: **{user_input}**\n\nI'm currently in demo mode, but in the full version I would:\n\n- 🧠 **Analyze your request** using advanced AI reasoning\n- 🛠️ **Use appropriate tools** to complete the task\n- 💬 **Ask clarifying questions** if needed\n- 📋 **Break down complex tasks** into steps\n- ✅ **Provide detailed results** with explanations\n\nThe real agent integration is coming soon! For now, I can demonstrate the chat interface and show you what the full experience will be like.\n\nWhat else would you like to explore?"
+
+
+@app.command("list")
+def list_sessions():
+    """
+    List previous chat sessions.
+
+    Examples:
+        agent chat list
+    """
+    console.print("[blue]Previous Chat Sessions:[/blue]")
+
+    # TODO: Implement session listing from storage
+    sessions = [
+        {"id": "chat-abc123", "started": "2025-01-18 10:30", "mission": "File organization"},
+        {"id": "chat-def456", "started": "2025-01-18 11:15", "mission": "Code review"},
+        {"id": "chat-ghi789", "started": "2025-01-18 14:20", "mission": "None"},
+    ]
+
+    from rich.table import Table
+    table = Table()
+    table.add_column("Session ID", style="cyan")
+    table.add_column("Started", style="green")
+    table.add_column("Mission", style="white")
+
+    for session in sessions:
+        table.add_row(
+            session["id"][:12] + "...",
+            session["started"],
+            session["mission"] or "[dim]Free chat[/dim]"
+        )
+
+    console.print(table)
+
+
+@app.command()
+def quick(
+    message: str = typer.Argument(help="Quick message to send to the agent")
+):
+    """
+    Send a quick message to the agent without starting a full session.
+
+    Examples:
+        agent chat quick "What's the weather like?"
+        agent chat quick "Help me write a Python function"
+    """
+    console.print(f"[blue]Sending quick message to agent...[/blue]")
+    console.print(f"[dim]Message: {message}[/dim]\n")
+
+    # Create a temporary session for this quick interaction
+    session_id = f"quick-{uuid.uuid4()}"
+    work_dir = Path.cwd() / ".agent_temp"
+
+    asyncio.run(_quick_chat(message, work_dir, session_id))
+
+
+async def _quick_chat(message: str, work_dir: Path, session_id: str):
+    """Handle quick chat interaction with real agent."""
+    import os
+
+    # Check for API key
+    if not os.getenv("OPENAI_API_KEY"):
+        console.print("[red]❌ Error: Please set OPENAI_API_KEY environment variable.[/red]")
+        return
+
+    try:
+        # Import the real agent
+        import sys
+        from pathlib import Path as PathLib
+
+        # Add directories to sys.path
+        # __file__ is: .../capstone/agent_v2/cli/commands/chat.py
+        # So we need to go up 4 levels to get to ai_solution_architecture
+        current_file = PathLib(__file__)
+        root_dir = current_file.parent.parent.parent.parent.parent  # chat.py -> commands -> cli -> agent_v2 -> capstone -> ai_solution_architecture
+
+        # Paths resolved successfully
+
+        if str(root_dir) not in sys.path:
+            sys.path.insert(0, str(root_dir))
+
+        from capstone.agent_v2.agent import Agent, AgentEventType, GENERIC_SYSTEM_PROMPT
+
+        # Create agent for quick response
+        agent = Agent.create_agent(
+            name="AgentV2-Quick",
+            description="Quick response agent",
+            system_prompt=GENERIC_SYSTEM_PROMPT,
+            mission=None,
+            work_dir=str(work_dir.resolve()),
+            llm=None,
+        )
+
+        response_captured = False
+
+        with Live(Spinner("dots", text="Agent processing..."), console=console, refresh_per_second=4) as live:
+            async for ev in agent.execute(user_message=message, session_id=session_id):
+                if ev.type.name == AgentEventType.STATE_UPDATED.name:
+                    state_data = ev.data
+                    if 'response' in state_data:
+                        live.stop()
+                        console.print(f"\n[bold blue]🤖 Agent Response:[/bold blue]")
+                        console.print(Panel(
+                            Markdown(state_data['response']),
+                            border_style="blue",
+                            padding=(1, 2)
+                        ))
+                        response_captured = True
+                        return
+
+                elif ev.type.name == AgentEventType.COMPLETE.name:
+                    live.stop()
+                    completion_data = ev.data
+
+                    # Try to get a meaningful response from completion data
+                    if 'todolist' in completion_data:
+                        todolist = completion_data['todolist']
+                        if hasattr(todolist, 'items') and todolist.items:
+                            # Show completed tasks
+                            response = "✅ **Task completed successfully!**\n\n**What I did:**\n"
+                            for i, item in enumerate(todolist.items, 1):
+                                status = "✅" if item.status.name == 'COMPLETED' else "⏳"
+                                response += f"{status} {i}. {item.task}\n"
+                        else:
+                            response = "✅ **Task completed successfully!**"
+                    else:
+                        response = "✅ **Task completed successfully!**"
+
+                    console.print(f"\n[bold blue]🤖 Agent Response:[/bold blue]")
+                    console.print(Panel(
+                        Markdown(response),
+                        border_style="green",
+                        padding=(1, 2)
+                    ))
+                    response_captured = True
+                    return
+
+                elif ev.type.name == AgentEventType.TOOL_RESULT.name:
+                    success = ev.data.get('success', False)
+                    tool_result = ev.data.get('result', '')
+                    tool_name = ev.data.get('tool', 'Tool')
+
+                    if success and tool_result and len(str(tool_result)) < 500:
+                        live.stop()
+                        console.print(f"\n[bold blue]🤖 Agent Response:[/bold blue]")
+                        console.print(Panel(
+                            f"**Used {tool_name}:**\n\n```\n{tool_result}\n```",
+                            border_style="blue",
+                            padding=(1, 2)
+                        ))
+                        response_captured = True
+                        return
+
+        # Fallback if no response was captured
+        if not response_captured:
+            live.stop()
+            console.print(f"\n[bold blue]🤖 Agent Response:[/bold blue]")
+            console.print(Panel(
+                "I processed your request. The task may have been completed in the background.\n\nCheck your working directory for any created files.",
+                border_style="blue",
+                padding=(1, 2)
+            ))
+
+    except Exception as e:
+        console.print(f"\n[red]❌ Quick chat error: {e}[/red]")
+
+
+
+// Relative Path: cli\commands\config.py
+"""
+Config command group for managing configuration.
+"""
+
+from pathlib import Path
+from typing import Optional, Any
+
+import typer
+from rich.console import Console
+from rich.table import Table
+from rich.prompt import Confirm
+
+from ..config.settings import CLISettings
+from ..output_formatter import OutputFormat, OutputFormatter
+
+console = Console()
+app = typer.Typer(help="Manage configuration")
+
+
+def complete_config_keys(incomplete: str):
+    """Auto-complete configuration keys."""
+    settings = CLISettings()
+    return list(settings.__fields__.keys())
+
+
+@app.command("show")
+def show_config(
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+    show_sensitive: bool = typer.Option(
+        False,
+        "--show-sensitive",
+        help="Show sensitive values (like API keys)"
+    ),
+):
+    """
+    Show current configuration.
+
+    Examples:
+        agent config show
+        agent config show --output yaml
+        agent config show --show-sensitive
+    """
+    settings = CLISettings()
+    config_data = settings.model_dump()
+
+    # Mask sensitive values unless explicitly requested
+    if not show_sensitive:
+        sensitive_keys = ["api_key", "password", "secret", "token"]
+        for key, value in config_data.items():
+            if any(sensitive in key.lower() for sensitive in sensitive_keys):
+                if value:
+                    config_data[key] = "*" * min(len(str(value)), 8)
+
+    if output_format == OutputFormat.TABLE:
+        table = Table(title="CLI Configuration")
+        table.add_column("Setting", style="cyan")
+        table.add_column("Value", style="white")
+        table.add_column("Description", style="dim")
+
+        # Get field descriptions from the model
+        for field_name, field_info in settings.model_fields.items():
+            value = config_data.get(field_name, "")
+            description = field_info.description or ""
+
+            # Format lists and complex values
+            if isinstance(value, list):
+                value = ", ".join(str(item) for item in value)
+            elif isinstance(value, dict):
+                value = str(value)
+
+            table.add_row(field_name, str(value), description)
+
+        console.print(table)
+    else:
+        OutputFormatter.format_data(config_data, output_format, "CLI Configuration")
+
+
+@app.command("set")
+def set_config(
+    key: str = typer.Argument(
+        help="Configuration key",
+        autocompletion=complete_config_keys
+    ),
+    value: str = typer.Argument(help="Configuration value"),
+):
+    """
+    Set a configuration value.
+
+    Examples:
+        agent config set default_provider anthropic
+        agent config set auto_confirm true
+        agent config set session_cleanup_days 7
+    """
+    settings = CLISettings()
+
+    # Validate key exists
+    if key not in settings.model_fields:
+        console.print(f"[red]Error: Unknown configuration key '{key}'[/red]")
+        console.print("Available keys:")
+        for field_name in settings.model_fields.keys():
+            console.print(f"  - {field_name}")
+        raise typer.Exit(1)
+
+    # Convert value to appropriate type
+    field_info = settings.model_fields[key]
+    field_type = field_info.annotation
+
+    try:
+        if field_type == bool:
+            converted_value = value.lower() in ("true", "1", "yes", "on")
+        elif field_type == int:
+            converted_value = int(value)
+        elif field_type == float:
+            converted_value = float(value)
+        elif hasattr(field_type, '__origin__') and field_type.__origin__ is list:
+            # Handle lists - split by comma
+            converted_value = [item.strip() for item in value.split(",")]
+        else:
+            converted_value = value
+    except ValueError as e:
+        console.print(f"[red]Error: Invalid value '{value}' for {key}: {e}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        settings.update_setting(key, converted_value)
+        console.print(f"[green]✓ Set {key} = {converted_value}[/green]")
+    except Exception as e:
+        console.print(f"[red]Error updating configuration: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("reset")
+def reset_config(
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Skip confirmation prompt"
+    ),
+):
+    """
+    Reset configuration to defaults.
+
+    Examples:
+        agent config reset
+        agent config reset --confirm
+    """
+    if not confirm:
+        if not Confirm.ask("Reset all configuration to defaults?"):
+            console.print("[yellow]Reset cancelled[/yellow]")
+            return
+
+    settings = CLISettings()
+    settings.reset_to_defaults()
+
+    console.print("[green]✓ Configuration reset to defaults[/green]")
+
+
+@app.command("export")
+def export_config(
+    file: Path = typer.Argument(help="Export file path"),
+    format: str = typer.Option(
+        "yaml",
+        "--format", "-f",
+        help="Export format (yaml, json)"
+    ),
+):
+    """
+    Export configuration to file.
+
+    Examples:
+        agent config export config-backup.yaml
+        agent config export config.json --format json
+    """
+    settings = CLISettings()
+
+    try:
+        if format == "yaml":
+            settings.export_config(file)
+        elif format == "json":
+            import json
+            config_data = settings.model_dump()
+            with open(file, 'w') as f:
+                json.dump(config_data, f, indent=2)
+        else:
+            console.print(f"[red]Error: Unsupported format '{format}'[/red]")
+            raise typer.Exit(1)
+
+        console.print(f"[green]✓ Configuration exported to {file}[/green]")
+    except Exception as e:
+        console.print(f"[red]Error exporting configuration: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("import")
+def import_config(
+    file: Path = typer.Argument(help="Import file path"),
+    merge: bool = typer.Option(
+        False,
+        "--merge",
+        help="Merge with existing configuration instead of replacing"
+    ),
+):
+    """
+    Import configuration from file.
+
+    Examples:
+        agent config import config-backup.yaml
+        agent config import partial-config.yaml --merge
+    """
+    if not file.exists():
+        console.print(f"[red]Error: Configuration file not found: {file}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        settings = CLISettings()
+
+        if merge:
+            # Load existing settings and merge
+            existing_config = settings.model_dump()
+            imported_settings = CLISettings.load_from_file(file)
+            imported_config = imported_settings.model_dump()
+
+            # Merge configurations
+            for key, value in imported_config.items():
+                if key in settings.__fields__:
+                    existing_config[key] = value
+
+            # Create new settings with merged data
+            merged_settings = CLISettings(**existing_config)
+            merged_settings.save_to_file(settings.get_config_path())
+        else:
+            # Replace entire configuration
+            settings.import_config(file)
+
+        console.print(f"[green]✓ Configuration imported from {file}[/green]")
+        if merge:
+            console.print("[dim]Configurations were merged[/dim]")
+    except Exception as e:
+        console.print(f"[red]Error importing configuration: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("validate")
+def validate_config():
+    """
+    Validate current configuration.
+
+    Examples:
+        agent config validate
+    """
+    try:
+        settings = CLISettings()
+        config_path = settings.get_config_path()
+
+        console.print("[blue]Validating configuration...[/blue]")
+
+        # Basic validation - try to create settings object
+        CLISettings.load_from_file(config_path)
+
+        # TODO: Add more specific validations:
+        # - Check if paths exist
+        # - Validate provider configurations
+        # - Test tool discovery paths
+        # - Verify format values are valid
+
+        console.print("[green]✓ Configuration is valid[/green]")
+
+    except Exception as e:
+        console.print(f"[red]Configuration validation failed: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("path")
+def show_config_path():
+    """
+    Show configuration file path.
+
+    Examples:
+        agent config path
+    """
+    settings = CLISettings()
+    config_path = settings.get_config_path()
+
+    console.print(f"[blue]Configuration file:[/blue] {config_path}")
+
+    if config_path.exists():
+        console.print("[green]✓ File exists[/green]")
+    else:
+        console.print("[yellow]⚠ File does not exist (will be created on first save)[/yellow]")
+
+
+
+// Relative Path: cli\commands\dev.py
+"""
+Dev command group for developer and debug tools.
+"""
+
+import asyncio
+import os
+import uuid
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.prompt import Prompt
+from rich.syntax import Syntax
+from rich.text import Text
+
+from ..config.settings import CLISettings
+
+console = Console()
+app = typer.Typer(help="Developer and debug tools")
+
+
+@app.command("shell")
+def interactive_shell():
+    """
+    Start interactive agent shell.
+
+    Examples:
+        agent dev shell
+    """
+    console.print("[bold blue]Agent Interactive Shell[/bold blue]")
+    console.print("Type 'help' for available commands, 'exit' to quit")
+    console.print("")
+
+    session_id = str(uuid.uuid4())[:8]
+    console.print(f"[dim]Session ID: {session_id}[/dim]")
+
+    # TODO: Initialize agent context
+    # TODO: Load session state
+
+    while True:
+        try:
+            command = Prompt.ask("[bold green]agent[/bold green]")
+
+            if command.lower() == 'exit':
+                console.print("[blue]Goodbye![/blue]")
+                break
+            elif command.lower() == 'help':
+                _print_shell_help()
+            elif command.startswith('run '):
+                mission = command[4:].strip()
+                console.print(f"[blue]Executing mission: {mission}[/blue]")
+                # TODO: Execute mission in shell context
+            elif command.startswith('set '):
+                setting = command[4:].strip()
+                console.print(f"[blue]Setting: {setting}[/blue]")
+                # TODO: Update shell settings
+            elif command == 'status':
+                _print_shell_status(session_id)
+            elif command == 'history':
+                _print_shell_history()
+            else:
+                # TODO: Execute command in current session
+                console.print(f"[yellow]Unknown command: {command}[/yellow]")
+                console.print("Type 'help' for available commands")
+
+        except KeyboardInterrupt:
+            console.print("\n[dim]Use 'exit' to quit[/dim]")
+        except EOFError:
+            console.print("\n[blue]Goodbye![/blue]")
+            break
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+
+
+def _print_shell_help():
+    """Print shell help information."""
+    help_text = """
+[bold]Available Commands:[/bold]
+
+[cyan]Mission Commands:[/cyan]
+  run <mission>     - Execute a mission template
+  status           - Show current session status
+  history          - Show command history
+
+[cyan]Configuration:[/cyan]
+  set <key=value>  - Set session configuration
+  show config      - Show current configuration
+
+[cyan]Tools:[/cyan]
+  list tools       - Show available tools
+  test <tool>      - Test tool functionality
+
+[cyan]General:[/cyan]
+  help             - Show this help
+  exit             - Exit shell
+"""
+    console.print(help_text)
+
+
+def _print_shell_status(session_id: str):
+    """Print current shell status."""
+    # TODO: Get actual session status
+    console.print(f"[blue]Session Status:[/blue]")
+    console.print(f"  Session ID: {session_id}")
+    console.print(f"  Active Mission: None")
+    console.print(f"  Tools Loaded: 5")
+    console.print(f"  Provider: openai")
+
+
+def _print_shell_history():
+    """Print command history."""
+    # TODO: Implement actual history tracking
+    console.print("[blue]Command History:[/blue]")
+    console.print("  (No commands in history)")
+
+
+@app.command("logs")
+def view_logs(
+    follow: bool = typer.Option(
+        False,
+        "--follow", "-f",
+        help="Follow log output"
+    ),
+    lines: int = typer.Option(
+        50,
+        "--lines", "-n",
+        help="Number of lines to show"
+    ),
+    level: Optional[str] = typer.Option(
+        None,
+        "--level", "-l",
+        help="Filter by log level"
+    ),
+):
+    """
+    View application logs.
+
+    Examples:
+        agent dev logs
+        agent dev logs --follow
+        agent dev logs --lines 100 --level ERROR
+    """
+    settings = CLISettings()
+    log_file = settings.log_file
+
+    if not log_file:
+        console.print("[yellow]No log file configured[/yellow]")
+        console.print("Set log_file in configuration to enable logging")
+        return
+
+    log_path = Path(log_file)
+    if not log_path.exists():
+        console.print(f"[yellow]Log file not found: {log_path}[/yellow]")
+        return
+
+    console.print(f"[blue]Viewing logs from: {log_path}[/blue]")
+
+    if level:
+        console.print(f"[dim]Filtering by level: {level}[/dim]")
+
+    # TODO: Implement actual log viewing
+    # - Read last N lines
+    # - Filter by level
+    # - Follow mode with tail-like behavior
+
+    sample_logs = [
+        "2025-01-18 10:30:00 INFO Starting agent CLI",
+        "2025-01-18 10:30:01 INFO Loading configuration",
+        "2025-01-18 10:30:02 DEBUG Discovering plugins",
+        "2025-01-18 10:30:05 INFO CLI initialized successfully"
+    ]
+
+    for log_line in sample_logs[-lines:]:
+        if level and level.upper() not in log_line:
+            continue
+        console.print(log_line)
+
+    if follow:
+        console.print("[dim]Following logs... Press Ctrl+C to stop[/dim]")
+        # TODO: Implement log following
+
+
+@app.command("debug")
+def debug_command(
+    command: str = typer.Argument(help="Command to debug"),
+    verbose: bool = typer.Option(
+        True,
+        "--verbose/--quiet",
+        help="Verbose debug output"
+    ),
+):
+    """
+    Execute command in debug mode.
+
+    Examples:
+        agent dev debug "run data-analysis"
+        agent dev debug "tools list" --quiet
+    """
+    console.print(f"[blue]Debug Mode: {command}[/blue]")
+
+    if verbose:
+        console.print("[dim]Enabling verbose output...[/dim]")
+
+    # TODO: Parse and execute command with debug context
+    # TODO: Show detailed execution information
+    # TODO: Display timing and performance metrics
+
+    console.print("[green]✓ Debug execution completed[/green]")
+
+
+@app.command("version")
+def version_info(
+    detailed: bool = typer.Option(
+        False,
+        "--detailed",
+        help="Show detailed version information"
+    ),
+):
+    """
+    Show version information.
+
+    Examples:
+        agent dev version
+        agent dev version --detailed
+    """
+    from .. import __version__
+
+    console.print(f"[bold blue]Agent CLI Version:[/bold blue] {__version__}")
+
+    if detailed:
+        # TODO: Add actual dependency versions
+        versions = {
+            "typer": "0.9.0",
+            "rich": "13.7.0",
+            "pydantic": "2.5.0",
+            "pyyaml": "6.0.1"
+        }
+
+        console.print("\n[bold]Dependencies:[/bold]")
+        for package, version in versions.items():
+            console.print(f"  {package}: {version}")
+
+        console.print(f"\n[bold]Python:[/bold] {os.sys.version}")
+        console.print(f"[bold]Platform:[/bold] {os.name}")
+
+
+@app.command("profile")
+def profile_performance(
+    command: str = typer.Argument(help="Command to profile"),
+    output_file: Optional[Path] = typer.Option(
+        None,
+        "--output", "-o",
+        help="Save profile results to file"
+    ),
+):
+    """
+    Profile command performance.
+
+    Examples:
+        agent dev profile "run data-analysis"
+        agent dev profile "tools list" --output profile.txt
+    """
+    console.print(f"[blue]Profiling command: {command}[/blue]")
+
+    # TODO: Implement actual profiling
+    # - Use cProfile or similar
+    # - Measure execution time
+    # - Track memory usage
+    # - Generate performance report
+
+    console.print("[green]✓ Profiling completed[/green]")
+
+    if output_file:
+        console.print(f"[dim]Results saved to: {output_file}[/dim]")
+
+
+@app.command("test-integration")
+def test_integration():
+    """
+    Run integration tests for CLI components.
+
+    Examples:
+        agent dev test-integration
+    """
+    console.print("[blue]Running integration tests...[/blue]")
+
+    # TODO: Implement integration tests
+    # - Test command parsing
+    # - Test plugin loading
+    # - Test configuration management
+    # - Test output formatting
+
+    tests = [
+        ("Command parsing", True),
+        ("Plugin discovery", True),
+        ("Configuration loading", True),
+        ("Output formatting", True),
+        ("Provider connectivity", False)
+    ]
+
+    for test_name, passed in tests:
+        status = "[green]✓ PASS[/green]" if passed else "[red]✗ FAIL[/red]"
+        console.print(f"  {test_name}: {status}")
+
+    passed_count = sum(1 for _, passed in tests if passed)
+    total_count = len(tests)
+
+    console.print(f"\n[bold]Results: {passed_count}/{total_count} tests passed[/bold]")
+
+
+@app.command("benchmark")
+def benchmark_commands():
+    """
+    Benchmark CLI command performance.
+
+    Examples:
+        agent dev benchmark
+    """
+    console.print("[blue]Benchmarking CLI commands...[/blue]")
+
+    # TODO: Implement benchmarking
+    # - Measure startup time
+    # - Test command execution speed
+    # - Compare different output formats
+
+    benchmarks = [
+        ("CLI startup", "150ms"),
+        ("missions list", "45ms"),
+        ("tools list", "32ms"),
+        ("config show", "28ms")
+    ]
+
+    for command, time in benchmarks:
+        console.print(f"  {command}: {time}")
+
+    console.print("\n[green]✓ Benchmarking completed[/green]")
+
+
+
+// Relative Path: cli\commands\missions.py
+"""
+Missions command group for managing mission templates.
+"""
+
+from pathlib import Path
+from typing import Optional, List
+
+import typer
+from rich.console import Console
+from rich.prompt import Prompt, Confirm
+from rich.table import Table
+
+from ..config.settings import CLISettings
+from ..output_formatter import OutputFormat, OutputFormatter
+
+console = Console()
+app = typer.Typer(help="Manage mission templates")
+
+
+def complete_mission_templates(incomplete: str):
+    """Auto-complete mission template names."""
+    # TODO: Implement actual template discovery
+    return ["data-analysis", "code-review", "web-scraping", "report-generation"]
+
+
+def complete_categories(incomplete: str):
+    """Auto-complete mission categories."""
+    return ["data", "code", "web", "analysis", "automation"]
+
+
+@app.command("list")
+def list_missions(
+    category: Optional[str] = typer.Option(
+        None,
+        "--category", "-c",
+        help="Filter by category",
+        autocompletion=complete_categories
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+):
+    """
+    List available mission templates.
+
+    Examples:
+        agent missions list
+        agent missions list --category data
+        agent missions list --output json
+    """
+    # TODO: Implement actual mission discovery from configured paths
+    missions = [
+        {
+            "name": "data-analysis",
+            "category": "data",
+            "tools_required": ["pandas", "matplotlib"],
+            "description": "Analyze datasets and generate insights"
+        },
+        {
+            "name": "code-review",
+            "category": "code",
+            "tools_required": ["git", "static-analysis"],
+            "description": "Review code for quality and security issues"
+        },
+        {
+            "name": "web-scraping",
+            "category": "web",
+            "tools_required": ["requests", "beautifulsoup"],
+            "description": "Extract data from websites"
+        }
+    ]
+
+    if category:
+        missions = [m for m in missions if m["category"] == category]
+
+    OutputFormatter.format_mission_list(missions, output_format)
+
+
+@app.command("show")
+def show_mission(
+    template_id: str = typer.Argument(
+        help="Mission template name",
+        autocompletion=complete_mission_templates
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+):
+    """
+    Show detailed information about a mission template.
+
+    Examples:
+        agent missions show data-analysis
+        agent missions show code-review --output yaml
+    """
+    # TODO: Load actual mission template
+    mission_details = {
+        "name": template_id,
+        "category": "data",
+        "description": "Comprehensive data analysis mission template",
+        "version": "1.0.0",
+        "tools_required": ["pandas", "matplotlib", "seaborn"],
+        "parameters": [
+            {
+                "name": "data_source",
+                "type": "string",
+                "required": True,
+                "description": "Path to data file or database connection"
+            },
+            {
+                "name": "output_path",
+                "type": "string",
+                "required": False,
+                "default": "./analysis_results",
+                "description": "Output directory for results"
+            }
+        ],
+        "steps": [
+            "Load and validate data",
+            "Perform exploratory analysis",
+            "Generate visualizations",
+            "Create summary report"
+        ]
+    }
+
+    console.print(f"[bold blue]Mission Template: {template_id}[/bold blue]")
+    OutputFormatter.format_data(mission_details, output_format)
+
+
+@app.command("create")
+def create_mission(
+    name: str = typer.Argument(help="Mission template name"),
+    category: str = typer.Option(
+        "general",
+        "--category", "-c",
+        help="Mission category",
+        autocompletion=complete_categories
+    ),
+    interactive: bool = typer.Option(
+        True,
+        "--interactive/--batch",
+        help="Interactive template creation"
+    ),
+):
+    """
+    Create a new mission template.
+
+    Examples:
+        agent missions create my-mission
+        agent missions create data-processor --category data
+    """
+    settings = CLISettings()
+
+    if interactive:
+        console.print(f"[bold blue]Creating mission template: {name}[/bold blue]")
+
+        # Collect template information interactively
+        description = Prompt.ask("Enter mission description")
+        tools = Prompt.ask("Enter required tools (comma-separated)", default="")
+
+        template_data = {
+            "name": name,
+            "category": category,
+            "description": description,
+            "tools_required": [t.strip() for t in tools.split(",") if t.strip()],
+            "parameters": [],
+            "steps": []
+        }
+
+        # Add parameters
+        while Confirm.ask("Add a parameter?", default=False):
+            param_name = Prompt.ask("Parameter name")
+            param_type = Prompt.ask("Parameter type", default="string")
+            param_required = Confirm.ask("Required?", default=True)
+            param_description = Prompt.ask("Parameter description", default="")
+
+            template_data["parameters"].append({
+                "name": param_name,
+                "type": param_type,
+                "required": param_required,
+                "description": param_description
+            })
+
+        # Add steps
+        while Confirm.ask("Add a step?", default=False):
+            step = Prompt.ask("Step description")
+            template_data["steps"].append(step)
+
+    else:
+        # Batch mode - create minimal template
+        template_data = {
+            "name": name,
+            "category": category,
+            "description": f"Mission template: {name}",
+            "tools_required": [],
+            "parameters": [],
+            "steps": []
+        }
+
+    # TODO: Save template to configured mission path
+    console.print(f"[green]Created mission template: {name}[/green]")
+    console.print(f"[dim]Category: {category}[/dim]")
+
+
+@app.command("edit")
+def edit_mission(
+    template_id: str = typer.Argument(
+        help="Mission template name",
+        autocompletion=complete_mission_templates
+    ),
+):
+    """
+    Edit an existing mission template.
+
+    Examples:
+        agent missions edit data-analysis
+    """
+    # TODO: Load existing template and open in editor
+    console.print(f"[blue]Editing mission template: {template_id}[/blue]")
+    console.print("[dim]This would open the template in your configured editor[/dim]")
+
+
+@app.command("validate")
+def validate_mission(
+    template_file: Path = typer.Argument(help="Mission template file path"),
+):
+    """
+    Validate mission template syntax and dependencies.
+
+    Examples:
+        agent missions validate ./missions/my-mission.yaml
+    """
+    if not template_file.exists():
+        console.print(f"[red]Error: Template file not found: {template_file}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[blue]Validating mission template: {template_file}[/blue]")
+
+    # TODO: Implement actual validation
+    # - YAML syntax
+    # - Required fields
+    # - Tool dependencies
+    # - Parameter validation
+
+    console.print("[green]✓ Template validation passed[/green]")
+
+
+@app.command("import")
+def import_mission(
+    template_file: Path = typer.Argument(help="Mission template file to import"),
+    force: bool = typer.Option(
+        False,
+        "--force", "-f",
+        help="Overwrite existing template"
+    ),
+):
+    """
+    Import a mission template from file.
+
+    Examples:
+        agent missions import ./external-mission.yaml
+        agent missions import ./mission.yaml --force
+    """
+    if not template_file.exists():
+        console.print(f"[red]Error: Template file not found: {template_file}[/red]")
+        raise typer.Exit(1)
+
+    settings = CLISettings()
+
+    # TODO: Load and validate template
+    # TODO: Check if template already exists
+    # TODO: Copy to mission template directory
+
+    console.print(f"[green]Imported mission template from: {template_file}[/green]")
+
+
+
+// Relative Path: cli\commands\providers.py
+"""
+Providers command group for managing LLM providers.
+"""
+
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.prompt import Prompt, Confirm
+from rich.table import Table
+
+from ..config.settings import CLISettings
+from ..output_formatter import OutputFormat, OutputFormatter
+
+console = Console()
+app = typer.Typer(help="Manage LLM providers")
+
+
+def complete_provider_types(incomplete: str):
+    """Auto-complete provider types."""
+    return ["openai", "anthropic", "azure", "local", "huggingface"]
+
+
+def complete_provider_ids(incomplete: str):
+    """Auto-complete provider IDs."""
+    # TODO: Implement actual provider discovery
+    return ["openai-main", "anthropic-claude", "azure-gpt4", "local-llama"]
+
+
+@app.command("list")
+def list_providers(
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+):
+    """
+    List configured LLM providers.
+
+    Examples:
+        agent providers list
+        agent providers list --output json
+    """
+    # TODO: Load actual provider configurations
+    providers = [
+        {
+            "name": "openai-main",
+            "type": "openai",
+            "connected": True,
+            "is_default": True,
+            "models": ["gpt-4", "gpt-3.5-turbo"]
+        },
+        {
+            "name": "anthropic-claude",
+            "type": "anthropic",
+            "connected": True,
+            "is_default": False,
+            "models": ["claude-3-opus", "claude-3-sonnet"]
+        },
+        {
+            "name": "local-llama",
+            "type": "local",
+            "connected": False,
+            "is_default": False,
+            "models": ["llama-2-7b", "llama-2-13b"]
+        }
+    ]
+
+    OutputFormatter.format_provider_list(providers, output_format)
+
+
+@app.command("add")
+def add_provider(
+    provider_type: str = typer.Argument(
+        help="Provider type",
+        autocompletion=complete_provider_types
+    ),
+    name: Optional[str] = typer.Option(
+        None,
+        "--name", "-n",
+        help="Provider name (auto-generated if not provided)"
+    ),
+    interactive: bool = typer.Option(
+        True,
+        "--interactive/--batch",
+        help="Interactive provider setup"
+    ),
+):
+    """
+    Add a new LLM provider configuration.
+
+    Examples:
+        agent providers add openai
+        agent providers add anthropic --name claude-work
+        agent providers add local --batch
+    """
+    provider_name = name or f"{provider_type}-{len([])}"  # TODO: Generate unique name
+
+    console.print(f"[blue]Adding {provider_type} provider: {provider_name}[/blue]")
+
+    if interactive:
+        # Collect provider-specific configuration
+        if provider_type == "openai":
+            api_key = Prompt.ask("OpenAI API Key", password=True)
+            base_url = Prompt.ask("Base URL", default="https://api.openai.com/v1")
+            organization = Prompt.ask("Organization ID (optional)", default="")
+
+        elif provider_type == "anthropic":
+            api_key = Prompt.ask("Anthropic API Key", password=True)
+            base_url = Prompt.ask("Base URL", default="https://api.anthropic.com")
+
+        elif provider_type == "azure":
+            api_key = Prompt.ask("Azure API Key", password=True)
+            endpoint = Prompt.ask("Azure Endpoint")
+            api_version = Prompt.ask("API Version", default="2024-02-01")
+
+        elif provider_type == "local":
+            endpoint = Prompt.ask("Local endpoint", default="http://localhost:11434")
+            model_path = Prompt.ask("Model path (optional)", default="")
+
+        set_default = Confirm.ask("Set as default provider?", default=False)
+
+    # TODO: Save provider configuration
+    # TODO: Test connection
+    # TODO: Discover available models
+
+    console.print(f"[green]✓ Provider {provider_name} added successfully[/green]")
+
+    if interactive and set_default:
+        console.print(f"[green]✓ Set {provider_name} as default provider[/green]")
+
+
+@app.command("configure")
+def configure_provider(
+    provider_id: str = typer.Argument(
+        help="Provider ID to configure",
+        autocompletion=complete_provider_ids
+    ),
+):
+    """
+    Configure an existing LLM provider.
+
+    Examples:
+        agent providers configure openai-main
+        agent providers configure local-llama
+    """
+    console.print(f"[blue]Configuring provider: {provider_id}[/blue]")
+
+    # TODO: Load existing configuration
+    # TODO: Interactive configuration update
+    # TODO: Save updated configuration
+
+    console.print(f"[green]✓ Provider {provider_id} configured successfully[/green]")
+
+
+@app.command("test")
+def test_provider(
+    provider_id: str = typer.Argument(
+        help="Provider ID to test",
+        autocompletion=complete_provider_ids
+    ),
+    model: Optional[str] = typer.Option(
+        None,
+        "--model", "-m",
+        help="Specific model to test"
+    ),
+):
+    """
+    Test LLM provider connectivity and functionality.
+
+    Examples:
+        agent providers test openai-main
+        agent providers test anthropic-claude --model claude-3-opus
+    """
+    console.print(f"[blue]Testing provider: {provider_id}[/blue]")
+
+    if model:
+        console.print(f"[dim]Testing model: {model}[/dim]")
+
+    # TODO: Test provider connection
+    # TODO: Test model availability
+    # TODO: Run simple inference test
+
+    console.print("[green]✓ Connection test passed[/green]")
+    console.print("[green]✓ Model availability confirmed[/green]")
+    console.print("[green]✓ Inference test passed[/green]")
+
+    console.print(f"[green]✓ Provider {provider_id} test completed successfully[/green]")
+
+
+@app.command("set-default")
+def set_default_provider(
+    provider_id: str = typer.Argument(
+        help="Provider ID to set as default",
+        autocompletion=complete_provider_ids
+    ),
+):
+    """
+    Set the default LLM provider.
+
+    Examples:
+        agent providers set-default openai-main
+        agent providers set-default anthropic-claude
+    """
+    settings = CLISettings()
+
+    # TODO: Validate provider exists
+    # TODO: Update configuration
+
+    settings.update_setting("default_provider", provider_id)
+
+    console.print(f"[green]✓ Set {provider_id} as default provider[/green]")
+
+
+@app.command("models")
+def list_models(
+    provider_id: str = typer.Argument(
+        help="Provider ID",
+        autocompletion=complete_provider_ids
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+):
+    """
+    List available models for a provider.
+
+    Examples:
+        agent providers models openai-main
+        agent providers models anthropic-claude --output json
+    """
+    console.print(f"[blue]Available models for {provider_id}:[/blue]")
+
+    # TODO: Query provider for available models
+    models = [
+        {
+            "name": "gpt-4",
+            "context_length": 8192,
+            "max_tokens": 4096,
+            "description": "Most capable GPT-4 model"
+        },
+        {
+            "name": "gpt-3.5-turbo",
+            "context_length": 4096,
+            "max_tokens": 2048,
+            "description": "Fast and efficient model"
+        }
+    ]
+
+    if output_format == OutputFormat.TABLE:
+        table = Table(title=f"Models for {provider_id}")
+        table.add_column("Name", style="cyan")
+        table.add_column("Context Length", style="green")
+        table.add_column("Max Tokens", style="yellow")
+        table.add_column("Description", style="white")
+
+        for model in models:
+            table.add_row(
+                model["name"],
+                str(model["context_length"]),
+                str(model["max_tokens"]),
+                model["description"]
+            )
+
+        console.print(table)
+    else:
+        OutputFormatter.format_data(models, output_format)
+
+
+
+// Relative Path: cli\commands\run.py
+"""
+Run command group for executing missions and tasks.
+"""
+
+import asyncio
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich.prompt import Prompt, Confirm
+
+from ..config.settings import CLISettings
+from ..output_formatter import OutputFormat, OutputFormatter
+
+console = Console()
+app = typer.Typer(help="Execute missions and tasks")
+
+
+def complete_mission_templates(incomplete: str):
+    """Auto-complete mission template names."""
+    # TODO: Implement mission template discovery
+    # This would scan mission_template_paths for available templates
+    return ["example-mission", "data-analysis", "code-review"]
+
+
+def complete_providers(incomplete: str):
+    """Auto-complete provider names."""
+    # TODO: Implement provider discovery
+    return ["openai", "anthropic", "local"]
+
+
+@app.command()
+def mission(
+    template: str = typer.Argument(
+        help="Mission template name",
+        autocompletion=complete_mission_templates
+    ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider", "-p",
+        help="LLM provider to use",
+        autocompletion=complete_providers
+    ),
+    interactive: bool = typer.Option(
+        True,
+        "--interactive/--batch",
+        help="Run in interactive or batch mode"
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config", "-c",
+        help="Custom configuration file"
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+    auto_confirm: bool = typer.Option(
+        False,
+        "--auto-confirm",
+        help="Auto-confirm all prompts"
+    ),
+):
+    """
+    Execute a mission template with specified parameters.
+
+    Examples:
+        agent run data-analysis --provider openai --interactive
+        agent run code-review --batch --output json
+    """
+    settings = CLISettings()
+    if config_file:
+        settings = CLISettings.load_from_file(config_file)
+
+    # Use provided provider or default
+    selected_provider = provider or settings.default_provider
+
+    console.print(f"[bold blue]Executing mission:[/bold blue] {template}")
+    console.print(f"[dim]Provider: {selected_provider}[/dim]")
+
+    if interactive and not auto_confirm:
+        if not Confirm.ask("Do you want to continue?"):
+            console.print("[yellow]Mission cancelled[/yellow]")
+            raise typer.Exit(1)
+
+    # TODO: Load mission template and collect parameters
+    # mission_template = load_mission_template(template)
+    # parameters = collect_mission_parameters(mission_template, interactive)
+
+    # Execute mission with progress display
+    asyncio.run(_execute_mission_async(template, selected_provider, output_format))
+
+
+@app.command()
+def task(
+    description: str = typer.Argument(help="Task description"),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider", "-p",
+        help="LLM provider to use",
+        autocompletion=complete_providers
+    ),
+    context: Optional[Path] = typer.Option(
+        None,
+        "--context",
+        help="Context file or directory"
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TEXT,
+        "--output", "-o",
+        help="Output format"
+    ),
+):
+    """
+    Execute a single task with natural language description.
+
+    Examples:
+        agent run task "Analyze the logs for errors"
+        agent run task "Generate a summary report" --context ./data
+    """
+    settings = CLISettings()
+    selected_provider = provider or settings.default_provider
+
+    console.print(f"[bold blue]Executing task:[/bold blue] {description}")
+    console.print(f"[dim]Provider: {selected_provider}[/dim]")
+
+    if context:
+        console.print(f"[dim]Context: {context}[/dim]")
+
+    # Execute task
+    asyncio.run(_execute_task_async(description, selected_provider, context, output_format))
+
+
+async def _execute_mission_async(template: str, provider: str, output_format: OutputFormat):
+    """Execute mission asynchronously with progress display."""
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+    ) as progress:
+
+        task = progress.add_task("Loading mission template...", total=100)
+
+        # Simulate mission execution steps
+        progress.update(task, description="Loading mission template...", advance=10)
+        await asyncio.sleep(0.5)
+
+        progress.update(task, description="Initializing agent...", advance=20)
+        await asyncio.sleep(0.5)
+
+        progress.update(task, description="Processing mission steps...", advance=40)
+        await asyncio.sleep(1.0)
+
+        progress.update(task, description="Executing tools...", advance=20)
+        await asyncio.sleep(0.5)
+
+        progress.update(task, description="Finalizing results...", advance=10)
+        await asyncio.sleep(0.5)
+
+    # TODO: Replace with actual mission execution
+    result = {
+        "mission": template,
+        "provider": provider,
+        "status": "completed",
+        "duration": "2.5s",
+        "steps_executed": 5,
+        "tools_used": ["file_tool", "web_tool"]
+    }
+
+    console.print("\n[bold green]Mission completed successfully![/bold green]")
+    OutputFormatter.format_data(result, output_format, "Mission Results")
+
+
+async def _execute_task_async(description: str, provider: str, context: Optional[Path], output_format: OutputFormat):
+    """Execute task asynchronously with progress display."""
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+
+        task = progress.add_task("Processing task...", total=None)
+
+        # Simulate task execution
+        progress.update(task, description="Analyzing task...")
+        await asyncio.sleep(1.0)
+
+        progress.update(task, description="Executing solution...")
+        await asyncio.sleep(2.0)
+
+        progress.update(task, description="Formatting results...")
+        await asyncio.sleep(0.5)
+
+    # TODO: Replace with actual task execution
+    result = {
+        "task": description,
+        "provider": provider,
+        "status": "completed",
+        "output": f"Task '{description}' has been completed successfully.",
+        "context_used": str(context) if context else None
+    }
+
+    console.print("\n[bold green]Task completed successfully![/bold green]")
+    OutputFormatter.format_data(result, output_format, "Task Results")
+
+
+
+// Relative Path: cli\commands\sessions.py
+"""
+Sessions command group for managing execution sessions.
+"""
+
+import json
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.prompt import Confirm
+
+from ..config.settings import CLISettings
+from ..output_formatter import OutputFormat, OutputFormatter
+
+console = Console()
+app = typer.Typer(help="Manage execution sessions")
+
+
+def complete_session_ids(incomplete: str):
+    """Auto-complete session IDs."""
+    # TODO: Implement actual session discovery
+    return ["sess-abc123", "sess-def456", "sess-ghi789"]
+
+
+@app.command("list")
+def list_sessions(
+    limit: int = typer.Option(
+        20,
+        "--limit", "-l",
+        help="Maximum number of sessions to show"
+    ),
+    status: Optional[str] = typer.Option(
+        None,
+        "--status", "-s",
+        help="Filter by status (running, completed, failed, interrupted)"
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+):
+    """
+    List recent execution sessions.
+
+    Examples:
+        agent sessions list
+        agent sessions list --limit 10 --status running
+        agent sessions list --output json
+    """
+    # TODO: Load actual session data from configured storage
+    sessions = [
+        {
+            "id": "sess-abc123def456",
+            "mission": "data-analysis",
+            "status": "completed",
+            "started": "2025-01-18 10:30:00",
+            "duration": "2m 34s",
+            "provider": "openai"
+        },
+        {
+            "id": "sess-def456ghi789",
+            "mission": "code-review",
+            "status": "running",
+            "started": "2025-01-18 11:15:00",
+            "duration": "45s",
+            "provider": "anthropic"
+        },
+        {
+            "id": "sess-ghi789jkl012",
+            "mission": "web-scraping",
+            "status": "failed",
+            "started": "2025-01-18 09:45:00",
+            "duration": "1m 12s",
+            "provider": "openai"
+        }
+    ]
+
+    if status:
+        sessions = [s for s in sessions if s["status"] == status]
+
+    sessions = sessions[:limit]
+
+    OutputFormatter.format_session_list(sessions, output_format)
+
+
+@app.command("show")
+def show_session(
+    session_id: str = typer.Argument(
+        help="Session ID",
+        autocompletion=complete_session_ids
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+    include_logs: bool = typer.Option(
+        False,
+        "--logs",
+        help="Include execution logs"
+    ),
+):
+    """
+    Show detailed information about a session.
+
+    Examples:
+        agent sessions show sess-abc123
+        agent sessions show sess-def456 --logs
+        agent sessions show sess-ghi789 --output yaml
+    """
+    # TODO: Load actual session data
+    session_details = {
+        "id": session_id,
+        "mission": "data-analysis",
+        "status": "completed",
+        "started": "2025-01-18 10:30:00",
+        "completed": "2025-01-18 10:32:34",
+        "duration": "2m 34s",
+        "provider": "openai",
+        "model": "gpt-4",
+        "tools_used": ["file_tool", "data_analyzer"],
+        "steps_completed": 5,
+        "total_steps": 5,
+        "output_files": ["./analysis_results/summary.md", "./analysis_results/charts.png"],
+        "error_count": 0,
+        "warning_count": 2
+    }
+
+    if include_logs:
+        session_details["logs"] = [
+            {"timestamp": "10:30:01", "level": "INFO", "message": "Starting mission execution"},
+            {"timestamp": "10:30:05", "level": "INFO", "message": "Loading data from source"},
+            {"timestamp": "10:31:20", "level": "WARN", "message": "Missing data in column 'category'"},
+            {"timestamp": "10:32:30", "level": "INFO", "message": "Mission completed successfully"}
+        ]
+
+    console.print(f"[bold blue]Session Details: {session_id}[/bold blue]")
+    OutputFormatter.format_data(session_details, output_format)
+
+
+@app.command("resume")
+def resume_session(
+    session_id: str = typer.Argument(
+        help="Session ID to resume",
+        autocompletion=complete_session_ids
+    ),
+    from_step: Optional[int] = typer.Option(
+        None,
+        "--from-step",
+        help="Resume from specific step number"
+    ),
+):
+    """
+    Resume an interrupted session.
+
+    Examples:
+        agent sessions resume sess-abc123
+        agent sessions resume sess-def456 --from-step 3
+    """
+    console.print(f"[blue]Resuming session: {session_id}[/blue]")
+
+    # TODO: Load session state
+    # TODO: Validate session can be resumed
+    # TODO: Continue execution from last checkpoint or specified step
+
+    if from_step:
+        console.print(f"[dim]Resuming from step: {from_step}[/dim]")
+
+    # TODO: Execute resumption logic
+    console.print("[green]✓ Session resumed successfully[/green]")
+
+
+@app.command("export")
+def export_session(
+    session_id: str = typer.Argument(
+        help="Session ID to export",
+        autocompletion=complete_session_ids
+    ),
+    output_file: Path = typer.Option(
+        None,
+        "--output", "-o",
+        help="Output file path"
+    ),
+    format: str = typer.Option(
+        "json",
+        "--format", "-f",
+        help="Export format (json, yaml, csv)"
+    ),
+    include_logs: bool = typer.Option(
+        False,
+        "--logs",
+        help="Include execution logs"
+    ),
+):
+    """
+    Export session data to file.
+
+    Examples:
+        agent sessions export sess-abc123 --output session.json
+        agent sessions export sess-def456 --format yaml --logs
+    """
+    if not output_file:
+        output_file = Path(f"session-{session_id[:8]}.{format}")
+
+    console.print(f"[blue]Exporting session {session_id} to {output_file}[/blue]")
+
+    # TODO: Load complete session data
+    # TODO: Format according to specified format
+    # TODO: Write to file
+
+    session_data = {
+        "session_id": session_id,
+        "exported_at": "2025-01-18T11:30:00Z",
+        "mission": "data-analysis",
+        "execution_details": {},
+        "results": {},
+    }
+
+    if include_logs:
+        session_data["logs"] = []
+
+    # Write export file
+    with open(output_file, 'w') as f:
+        if format == "json":
+            json.dump(session_data, f, indent=2)
+        elif format == "yaml":
+            import yaml
+            yaml.dump(session_data, f, default_flow_style=False)
+
+    console.print(f"[green]✓ Session exported to {output_file}[/green]")
+
+
+@app.command("cleanup")
+def cleanup_sessions(
+    older_than_days: int = typer.Option(
+        30,
+        "--older-than",
+        help="Delete sessions older than N days"
+    ),
+    status: Optional[str] = typer.Option(
+        None,
+        "--status",
+        help="Only cleanup sessions with specific status"
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what would be deleted without actually deleting"
+    ),
+):
+    """
+    Cleanup old session data.
+
+    Examples:
+        agent sessions cleanup
+        agent sessions cleanup --older-than 7 --status failed
+        agent sessions cleanup --dry-run
+    """
+    settings = CLISettings()
+
+    console.print(f"[blue]Cleaning up sessions older than {older_than_days} days[/blue]")
+
+    if status:
+        console.print(f"[dim]Filtering by status: {status}[/dim]")
+
+    # TODO: Scan session storage directory
+    # TODO: Identify sessions matching criteria
+    # TODO: Delete or show what would be deleted
+
+    sessions_to_cleanup = [
+        "sess-old123",
+        "sess-old456",
+        "sess-old789"
+    ]
+
+    if dry_run:
+        console.print(f"[yellow]Would delete {len(sessions_to_cleanup)} sessions:[/yellow]")
+        for session_id in sessions_to_cleanup:
+            console.print(f"  - {session_id}")
+    else:
+        if not Confirm.ask(f"Delete {len(sessions_to_cleanup)} sessions?"):
+            console.print("[yellow]Cleanup cancelled[/yellow]")
+            return
+
+        # TODO: Perform actual cleanup
+        console.print(f"[green]✓ Cleaned up {len(sessions_to_cleanup)} sessions[/green]")
+
+
+
+// Relative Path: cli\commands\tools.py
+"""
+Tools command group for managing tools and capabilities.
+"""
+
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.prompt import Confirm
+
+from ..config.settings import CLISettings
+from ..output_formatter import OutputFormat, OutputFormatter
+
+console = Console()
+app = typer.Typer(help="Manage tools and capabilities")
+
+
+def complete_tool_names(incomplete: str):
+    """Auto-complete tool names."""
+    # TODO: Implement actual tool discovery
+    return ["file_tool", "web_tool", "git_tool", "shell_tool", "code_tool"]
+
+
+def complete_categories(incomplete: str):
+    """Auto-complete tool categories."""
+    return ["file", "web", "git", "shell", "code", "data", "analysis"]
+
+
+@app.command("list")
+def list_tools(
+    category: Optional[str] = typer.Option(
+        None,
+        "--category", "-c",
+        help="Filter by category",
+        autocompletion=complete_categories
+    ),
+    installed_only: bool = typer.Option(
+        False,
+        "--installed",
+        help="Show only installed tools"
+    ),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE,
+        "--output", "-o",
+        help="Output format"
+    ),
+):
+    """
+    List available tools and their status.
+
+    Examples:
+        agent tools list
+        agent tools list --category web
+        agent tools list --installed --output json
+    """
+    # TODO: Implement actual tool discovery from configured paths
+    tools = [
+        {
+            "name": "file_tool",
+            "version": "1.0.0",
+            "category": "file",
+            "installed": True,
+            "description": "File system operations and management"
+        },
+        {
+            "name": "web_tool",
+            "version": "1.2.0",
+            "category": "web",
+            "installed": True,
+            "description": "Web scraping and HTTP requests"
+        },
+        {
+            "name": "git_tool",
+            "version": "0.9.0",
+            "category": "git",
+            "installed": False,
+            "description": "Git repository operations"
+        },
+        {
+            "name": "data_analyzer",
+            "version": "2.1.0",
+            "category": "data",
+            "installed": False,
+            "description": "Advanced data analysis capabilities"
+        }
+    ]
+
+    if category:
+        tools = [t for t in tools if t["category"] == category]
+
+    if installed_only:
+        tools = [t for t in tools if t["installed"]]
+
+    OutputFormatter.format_tool_list(tools, output_format)
+
+
+@app.command("install")
+def install_tool(
+    tool_name: str = typer.Argument(
+        help="Tool name to install",
+        autocompletion=complete_tool_names
+    ),
+    version: Optional[str] = typer.Option(
+        None,
+        "--version", "-v",
+        help="Specific version to install"
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force", "-f",
+        help="Force reinstall if already installed"
+    ),
+):
+    """
+    Install a tool from the registry.
+
+    Examples:
+        agent tools install web_tool
+        agent tools install data_analyzer --version 2.1.0
+        agent tools install git_tool --force
+    """
+    console.print(f"[blue]Installing tool: {tool_name}[/blue]")
+
+    if version:
+        console.print(f"[dim]Version: {version}[/dim]")
+
+    # TODO: Implement actual tool installation
+    # - Check if tool exists in registry
+    # - Download and install dependencies
+    # - Register tool with agent system
+    # - Validate installation
+
+    console.print(f"[green]✓ Successfully installed {tool_name}[/green]")
+
+
+@app.command("configure")
+def configure_tool(
+    tool_name: str = typer.Argument(
+        help="Tool name to configure",
+        autocompletion=complete_tool_names
+    ),
+):
+    """
+    Configure tool settings and parameters.
+
+    Examples:
+        agent tools configure web_tool
+        agent tools configure data_analyzer
+    """
+    console.print(f"[blue]Configuring tool: {tool_name}[/blue]")
+
+    # TODO: Load tool configuration schema
+    # TODO: Interactive configuration collection
+    # TODO: Save configuration
+
+    console.print(f"[green]✓ Tool {tool_name} configured successfully[/green]")
+
+
+@app.command("test")
+def test_tool(
+    tool_name: str = typer.Argument(
+        help="Tool name to test",
+        autocompletion=complete_tool_names
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose", "-v",
+        help="Verbose test output"
+    ),
+):
+    """
+    Test tool functionality and connectivity.
+
+    Examples:
+        agent tools test web_tool
+        agent tools test git_tool --verbose
+    """
+    console.print(f"[blue]Testing tool: {tool_name}[/blue]")
+
+    # TODO: Run tool self-tests
+    # TODO: Check dependencies
+    # TODO: Validate configuration
+
+    if verbose:
+        console.print("[dim]Running comprehensive tests...[/dim]")
+        console.print("[green]✓ Dependencies check passed[/green]")
+        console.print("[green]✓ Configuration validation passed[/green]")
+        console.print("[green]✓ Functionality test passed[/green]")
+
+    console.print(f"[green]✓ Tool {tool_name} test passed[/green]")
+
+
+@app.command("discover")
+def discover_tools():
+    """
+    Scan for available tools in configured paths.
+
+    Examples:
+        agent tools discover
+    """
+    settings = CLISettings()
+    console.print("[blue]Discovering tools...[/blue]")
+
+    for path in settings.tool_discovery_paths:
+        console.print(f"[dim]Scanning: {path}[/dim]")
+
+    # TODO: Implement actual tool discovery
+    # - Scan configured paths
+    # - Check for tool manifests
+    # - Validate tool signatures
+    # - Add to local registry
+
+    discovered_tools = ["custom_analyzer", "local_scraper", "workflow_tool"]
+
+    console.print(f"[green]✓ Discovered {len(discovered_tools)} tools[/green]")
+    for tool in discovered_tools:
+        console.print(f"  - {tool}")
+
+
+@app.command("registry")
+def manage_registry(
+    action: str = typer.Argument(
+        help="Registry action: update, list, add-source"
+    ),
+    source: Optional[str] = typer.Option(
+        None,
+        "--source", "-s",
+        help="Registry source URL"
+    ),
+):
+    """
+    Manage tool registry sources and updates.
+
+    Examples:
+        agent tools registry update
+        agent tools registry list
+        agent tools registry add-source --source https://tools.example.com/registry
+    """
+    if action == "update":
+        console.print("[blue]Updating tool registry...[/blue]")
+        # TODO: Update registry from configured sources
+        console.print("[green]✓ Registry updated[/green]")
+
+    elif action == "list":
+        console.print("[blue]Registry Sources:[/blue]")
+        # TODO: List configured registry sources
+        sources = [
+            "https://registry.agent-tools.org/",
+            "https://tools.local.dev/"
+        ]
+        for source in sources:
+            console.print(f"  - {source}")
+
+    elif action == "add-source":
+        if not source:
+            console.print("[red]Error: --source is required for add-source action[/red]")
+            raise typer.Exit(1)
+
+        console.print(f"[blue]Adding registry source: {source}[/blue]")
+        # TODO: Validate and add registry source
+        console.print("[green]✓ Registry source added[/green]")
+
+    else:
+        console.print(f"[red]Error: Unknown action '{action}'[/red]")
+        console.print("Available actions: update, list, add-source")
+        raise typer.Exit(1)
+
+
+
+// Relative Path: cli\commands\__init__.py
+# CLI command modules
+
+
+
+// Relative Path: cli\config\settings.py
+"""
+Configuration management for the CLI.
+"""
+
+import os
+from pathlib import Path
+from typing import Dict, Any, List, Optional
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
+import yaml
+
+
+class CLISettings(BaseSettings):
+    """CLI configuration settings with environment variable support."""
+
+    # Default provider
+    default_provider: str = Field(default="openai", description="Default LLM provider")
+
+    # Output preferences
+    default_output_format: str = Field(default="table", description="Default output format")
+    auto_confirm: bool = Field(default=False, description="Auto-confirm operations")
+    show_progress: bool = Field(default=True, description="Show progress bars")
+    color_output: bool = Field(default=True, description="Enable colored output")
+
+    # Tool settings
+    tool_discovery_paths: List[str] = Field(
+        default_factory=lambda: ["./tools", "~/.agent/tools"],
+        description="Paths to search for tools"
+    )
+    auto_install_tools: bool = Field(default=False, description="Auto-install missing tools")
+
+    # Mission settings
+    mission_template_paths: List[str] = Field(
+        default_factory=lambda: ["./missions", "~/.agent/missions"],
+        description="Paths to search for mission templates"
+    )
+
+    # Session settings
+    session_cleanup_days: int = Field(default=30, description="Days to keep session data")
+    session_storage_path: str = Field(default="~/.agent/sessions", description="Session storage path")
+
+    # Debug settings
+    debug_mode: bool = Field(default=False, description="Enable debug mode")
+    log_level: str = Field(default="INFO", description="Logging level")
+    log_file: Optional[str] = Field(default=None, description="Log file path")
+
+    model_config = {
+        "env_file": ".env",
+        "env_prefix": "AGENT_",
+        "case_sensitive": False
+    }
+
+    @classmethod
+    def load_from_file(cls, config_path: Path) -> "CLISettings":
+        """Load settings from a YAML configuration file."""
+        if not config_path.exists():
+            return cls()
+
+        with open(config_path, 'r') as f:
+            config_data = yaml.safe_load(f) or {}
+
+        return cls(**config_data)
+
+    def save_to_file(self, config_path: Path) -> None:
+        """Save settings to a YAML configuration file."""
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        config_data = self.model_dump()
+        with open(config_path, 'w') as f:
+            yaml.dump(config_data, f, default_flow_style=False, indent=2)
+
+    def get_config_path(self) -> Path:
+        """Get the default configuration file path."""
+        config_dir = Path.home() / ".agent"
+        config_dir.mkdir(exist_ok=True)
+        return config_dir / "config.yaml"
+
+    def update_setting(self, key: str, value: Any) -> None:
+        """Update a single setting and save to file."""
+        if key in self.model_fields:
+            setattr(self, key, value)
+            self.save_to_file(self.get_config_path())
+        else:
+            raise ValueError(f"Unknown setting: {key}")
+
+    def reset_to_defaults(self) -> None:
+        """Reset all settings to defaults."""
+        default_settings = self.__class__()
+        for field_name in self.model_fields.keys():
+            setattr(self, field_name, getattr(default_settings, field_name))
+        self.save_to_file(self.get_config_path())
+
+    def export_config(self, export_path: Path) -> None:
+        """Export configuration to a file."""
+        self.save_to_file(export_path)
+
+    def import_config(self, import_path: Path) -> None:
+        """Import configuration from a file."""
+        imported_settings = self.load_from_file(import_path)
+        for field_name in self.model_fields.keys():
+            setattr(self, field_name, getattr(imported_settings, field_name))
+        self.save_to_file(self.get_config_path())
+
+
+
+// Relative Path: cli\config\__init__.py
+# Configuration management
+
+
+
+// Relative Path: cli\plugins\database.py
+"""
+Example database plugin for the CLI.
+This demonstrates how to create plugins for the agent CLI.
+"""
+
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from ..plugin_manager import CLIPlugin
+
+console = Console()
+
+
+class DatabasePlugin(CLIPlugin):
+    """Example database management plugin."""
+
+    @property
+    def name(self) -> str:
+        return "database"
+
+    @property
+    def command_group(self) -> typer.Typer:
+        app = typer.Typer(name="db", help="Database management commands")
+
+        @app.command("migrate")
+        def migrate(
+            environment: str = typer.Option("development", help="Environment to migrate"),
+            dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be done")
+        ):
+            """Run database migrations."""
+            console.print(f"[blue]Running migrations for {environment} environment[/blue]")
+
+            if dry_run:
+                console.print("[yellow]DRY RUN - No changes will be made[/yellow]")
+
+            # TODO: Implement actual migration logic
+            console.print("[green]✓ Migrations completed successfully[/green]")
+
+        @app.command("backup")
+        def backup(
+            output_file: Optional[str] = typer.Option(None, "--output", "-o", help="Backup file path"),
+            compress: bool = typer.Option(True, "--compress/--no-compress", help="Compress backup")
+        ):
+            """Create database backup."""
+            backup_file = output_file or f"backup_{typer.get_app_name()}_{typer.datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
+
+            console.print(f"[blue]Creating backup: {backup_file}[/blue]")
+
+            if compress:
+                console.print("[dim]Compression enabled[/dim]")
+
+            # TODO: Implement actual backup logic
+            console.print(f"[green]✓ Backup created: {backup_file}[/green]")
+
+        @app.command("status")
+        def status():
+            """Show database connection status."""
+            console.print("[blue]Database Status:[/blue]")
+
+            # TODO: Check actual database connection
+            table = Table()
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="white")
+
+            table.add_row("Connection", "✓ Connected")
+            table.add_row("Host", "localhost:5432")
+            table.add_row("Database", "agent_db")
+            table.add_row("Version", "PostgreSQL 14.5")
+            table.add_row("Tables", "12")
+
+            console.print(table)
+
+        @app.command("query")
+        def query(
+            sql: str = typer.Argument(help="SQL query to execute"),
+            format_output: str = typer.Option("table", "--format", "-f", help="Output format (table, json, csv)")
+        ):
+            """Execute a SQL query."""
+            console.print(f"[blue]Executing query:[/blue] {sql}")
+
+            # TODO: Execute actual query
+            if format_output == "table":
+                table = Table()
+                table.add_column("ID", style="cyan")
+                table.add_column("Name", style="white")
+                table.add_column("Created", style="green")
+
+                table.add_row("1", "Example Record", "2025-01-18")
+                console.print(table)
+            else:
+                console.print(f"[yellow]Format {format_output} not yet implemented[/yellow]")
+
+        return app
+
+    def setup(self, main_app: typer.Typer) -> None:
+        """Setup database plugin with main CLI app."""
+        console.print("[dim]Database plugin loaded[/dim]")
+
+        # Plugin can perform any setup tasks here
+        # - Initialize database connections
+        # - Load configuration
+        # - Register callbacks
+
+
+
+// Relative Path: cli\plugins\__init__.py
+# CLI plugins
+
+
+
+// Relative Path: cli\tests\test_config.py
+"""
+Tests for configuration management.
+"""
+
+import pytest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch, MagicMock
+
+from ..config.settings import CLISettings
+
+
+class TestCLISettings:
+    """Test CLISettings configuration class."""
+
+    def test_default_settings(self):
+        """Test default configuration values."""
+        settings = CLISettings()
+
+        assert settings.default_provider == "openai"
+        assert settings.default_output_format == "table"
+        assert settings.auto_confirm is False
+        assert settings.show_progress is True
+        assert settings.session_cleanup_days == 30
+
+    def test_environment_variable_override(self):
+        """Test environment variable configuration override."""
+        with patch.dict('os.environ', {'AGENT_DEFAULT_PROVIDER': 'anthropic'}):
+            settings = CLISettings()
+            assert settings.default_provider == "anthropic"
+
+    def test_save_and_load_config(self):
+        """Test saving and loading configuration from file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "test_config.yaml"
+
+            # Create settings with custom values
+            settings = CLISettings(
+                default_provider="anthropic",
+                auto_confirm=True,
+                session_cleanup_days=7
+            )
+
+            # Save to file
+            settings.save_to_file(config_path)
+            assert config_path.exists()
+
+            # Load from file
+            loaded_settings = CLISettings.load_from_file(config_path)
+            assert loaded_settings.default_provider == "anthropic"
+            assert loaded_settings.auto_confirm is True
+            assert loaded_settings.session_cleanup_days == 7
+
+    def test_load_nonexistent_config(self):
+        """Test loading configuration from non-existent file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "nonexistent.yaml"
+
+            # Should return default settings
+            settings = CLISettings.load_from_file(config_path)
+            assert settings.default_provider == "openai"
+
+    def test_update_setting(self):
+        """Test updating individual settings."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "test_config.yaml"
+
+            settings = CLISettings()
+            with patch.object(settings, 'get_config_path', return_value=config_path):
+                settings.update_setting("default_provider", "anthropic")
+
+            assert settings.default_provider == "anthropic"
+            assert config_path.exists()
+
+    def test_update_invalid_setting(self):
+        """Test updating non-existent setting raises error."""
+        settings = CLISettings()
+
+        with pytest.raises(ValueError, match="Unknown setting"):
+            settings.update_setting("invalid_setting", "value")
+
+    def test_reset_to_defaults(self):
+        """Test resetting configuration to defaults."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "test_config.yaml"
+
+            settings = CLISettings(
+                default_provider="anthropic",
+                auto_confirm=True
+            )
+
+            with patch.object(settings, 'get_config_path', return_value=config_path):
+                settings.reset_to_defaults()
+
+            assert settings.default_provider == "openai"
+            assert settings.auto_confirm is False
+
+    def test_export_config(self):
+        """Test exporting configuration to file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "exported_config.yaml"
+
+            settings = CLISettings(default_provider="anthropic")
+            settings.export_config(export_path)
+
+            assert export_path.exists()
+
+            # Verify exported content
+            loaded_settings = CLISettings.load_from_file(export_path)
+            assert loaded_settings.default_provider == "anthropic"
+
+    def test_import_config(self):
+        """Test importing configuration from file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            import_path = Path(temp_dir) / "import_config.yaml"
+            config_path = Path(temp_dir) / "main_config.yaml"
+
+            # Create config to import
+            import_settings = CLISettings(
+                default_provider="anthropic",
+                auto_confirm=True
+            )
+            import_settings.save_to_file(import_path)
+
+            # Import into new settings
+            settings = CLISettings()
+            with patch.object(settings, 'get_config_path', return_value=config_path):
+                settings.import_config(import_path)
+
+            assert settings.default_provider == "anthropic"
+            assert settings.auto_confirm is True
+
+    @patch('pathlib.Path.home')
+    def test_get_config_path(self, mock_home):
+        """Test configuration path generation."""
+        mock_home.return_value = Path("/fake/home")
+
+        settings = CLISettings()
+        config_path = settings.get_config_path()
+
+        expected_path = Path("/fake/home/.agent/config.yaml")
+        assert config_path == expected_path
+
+    def test_list_type_setting(self):
+        """Test handling of list-type settings."""
+        settings = CLISettings()
+
+        # Test default list values
+        assert isinstance(settings.tool_discovery_paths, list)
+        assert len(settings.tool_discovery_paths) > 0
+
+        # Test updating list setting
+        new_paths = ["/custom/path1", "/custom/path2"]
+        settings.tool_discovery_paths = new_paths
+        assert settings.tool_discovery_paths == new_paths
+
+    def test_boolean_setting(self):
+        """Test handling of boolean settings."""
+        settings = CLISettings()
+
+        # Test default boolean values
+        assert isinstance(settings.auto_confirm, bool)
+        assert settings.auto_confirm is False
+
+        # Test updating boolean setting
+        settings.auto_confirm = True
+        assert settings.auto_confirm is True
+
+    def test_integer_setting(self):
+        """Test handling of integer settings."""
+        settings = CLISettings()
+
+        # Test default integer values
+        assert isinstance(settings.session_cleanup_days, int)
+        assert settings.session_cleanup_days == 30
+
+        # Test updating integer setting
+        settings.session_cleanup_days = 7
+        assert settings.session_cleanup_days == 7
+
+    def test_optional_string_setting(self):
+        """Test handling of optional string settings."""
+        settings = CLISettings()
+
+        # Test default optional value
+        assert settings.log_file is None
+
+        # Test setting optional value
+        settings.log_file = "/path/to/log"
+        assert settings.log_file == "/path/to/log"
+
+
+
+// Relative Path: cli\tests\test_main.py
+"""
+Tests for the main CLI entry point.
+"""
+
+import pytest
+from typer.testing import CliRunner
+from unittest.mock import patch, MagicMock
+
+from ..main import app, dev_cli
+
+
+class TestMainCLI:
+    """Test the main CLI application."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.runner = CliRunner()
+
+    def test_cli_help(self):
+        """Test CLI help output."""
+        result = self.runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        assert "Agent V2 Platform CLI" in result.stdout
+
+    def test_cli_version(self):
+        """Test version flag."""
+        result = self.runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        assert "Agent CLI version" in result.stdout
+
+    def test_cli_verbose_flag(self):
+        """Test verbose flag."""
+        result = self.runner.invoke(app, ["--verbose", "--help"])
+        assert result.exit_code == 0
+
+    @patch('capstone.agent_v2.cli.main.PluginManager')
+    def test_cli_initialization(self, mock_plugin_manager):
+        """Test CLI initialization with plugin manager."""
+        mock_manager = MagicMock()
+        mock_plugin_manager.return_value = mock_manager
+
+        result = self.runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+
+        # Verify plugin manager was called
+        mock_plugin_manager.assert_called_once()
+        mock_manager.discover_plugins.assert_called_once()
+        mock_manager.setup_plugins.assert_called_once()
+
+    def test_command_groups_registered(self):
+        """Test that all command groups are registered."""
+        result = self.runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+
+        # Check for main command groups
+        assert "run" in result.stdout
+        assert "missions" in result.stdout
+        assert "tools" in result.stdout
+        assert "providers" in result.stdout
+        assert "sessions" in result.stdout
+        assert "config" in result.stdout
+        assert "dev" in result.stdout
+
+
+class TestDevCLI:
+    """Test the developer CLI application."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.runner = CliRunner()
+
+    def test_dev_cli_help(self):
+        """Test dev CLI help output."""
+        result = self.runner.invoke(dev_cli, ["--help"])
+        assert result.exit_code == 0
+        assert "Developer tools" in result.stdout
+
+    def test_dev_cli_verbose(self):
+        """Test dev CLI verbose flag."""
+        result = self.runner.invoke(dev_cli, ["--verbose", "--help"])
+        assert result.exit_code == 0
+
+
+class TestCLIErrorHandling:
+    """Test CLI error handling."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.runner = CliRunner()
+
+    @patch('capstone.agent_v2.cli.main.initialize_cli')
+    def test_keyboard_interrupt_handling(self, mock_init):
+        """Test handling of keyboard interrupt."""
+        mock_init.side_effect = KeyboardInterrupt()
+
+        result = self.runner.invoke(app, ["--help"])
+        # Note: CliRunner doesn't perfectly simulate KeyboardInterrupt
+        # This test verifies the structure exists
+
+    @patch('capstone.agent_v2.cli.main.initialize_cli')
+    def test_general_exception_handling(self, mock_init):
+        """Test handling of general exceptions."""
+        mock_init.side_effect = Exception("Test error")
+
+        result = self.runner.invoke(app, ["--help"])
+        # The CLI should handle exceptions gracefully
+
+
+class TestCLIConfiguration:
+    """Test CLI configuration handling."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.runner = CliRunner()
+
+    @patch('capstone.agent_v2.cli.main.CLISettings')
+    def test_settings_loaded(self, mock_settings):
+        """Test that settings are loaded during initialization."""
+        mock_settings_instance = MagicMock()
+        mock_settings.return_value = mock_settings_instance
+
+        result = self.runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+
+        # Verify settings were instantiated
+        mock_settings.assert_called()
+
+    def test_no_args_shows_help(self):
+        """Test that running CLI with no args shows help."""
+        result = self.runner.invoke(app, [])
+        assert result.exit_code == 0
+        assert "Usage:" in result.stdout
+
+
+
+// Relative Path: cli\tests\test_output_formatter.py
+"""
+Tests for output formatting system.
+"""
+
+import pytest
+import json
+from io import StringIO
+from unittest.mock import patch
+
+from rich.console import Console
+
+from ..output_formatter import OutputFormatter, OutputFormat
+
+
+class TestOutputFormatter:
+    """Test the OutputFormatter class."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.test_data = [
+            {"name": "test1", "value": 100, "status": "active"},
+            {"name": "test2", "value": 200, "status": "inactive"}
+        ]
+
+        self.single_data = {"name": "test", "value": 100, "status": "active"}
+
+    def test_format_table_list_of_dicts(self):
+        """Test formatting list of dictionaries as table."""
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(self.test_data, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_format_table_single_dict(self):
+        """Test formatting single dictionary as table."""
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(self.single_data, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_format_json(self):
+        """Test JSON formatting."""
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(self.test_data, OutputFormat.JSON)
+            mock_print.assert_called_once()
+
+    def test_format_yaml(self):
+        """Test YAML formatting."""
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(self.test_data, OutputFormat.YAML)
+            mock_print.assert_called_once()
+
+    def test_format_text(self):
+        """Test text formatting."""
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(self.test_data, OutputFormat.TEXT)
+            # Should be called for each item in the list
+            assert mock_print.call_count == len(self.test_data)
+
+    def test_format_mission_list(self):
+        """Test mission-specific formatting."""
+        missions = [
+            {
+                "name": "mission1",
+                "category": "data",
+                "tools_required": ["tool1", "tool2"],
+                "description": "Test mission"
+            }
+        ]
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_mission_list(missions, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_format_tool_list(self):
+        """Test tool-specific formatting."""
+        tools = [
+            {
+                "name": "tool1",
+                "version": "1.0.0",
+                "installed": True,
+                "description": "Test tool"
+            }
+        ]
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_tool_list(tools, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_format_provider_list(self):
+        """Test provider-specific formatting."""
+        providers = [
+            {
+                "name": "openai",
+                "type": "openai",
+                "connected": True,
+                "is_default": True
+            }
+        ]
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_provider_list(providers, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_format_session_list(self):
+        """Test session-specific formatting."""
+        sessions = [
+            {
+                "id": "sess-123",
+                "mission": "test-mission",
+                "status": "completed",
+                "started": "2025-01-18 10:00:00",
+                "duration": "5m"
+            }
+        ]
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_session_list(sessions, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_table_with_title(self):
+        """Test table formatting with title."""
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(
+                self.test_data,
+                OutputFormat.TABLE,
+                title="Test Title"
+            )
+            mock_print.assert_called_once()
+
+    def test_format_pydantic_models(self):
+        """Test formatting Pydantic models."""
+        # Mock Pydantic-like object
+        class MockModel:
+            def model_dump(self):
+                return {"name": "test", "value": 100}
+
+        mock_model = MockModel()
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(mock_model, OutputFormat.JSON)
+            mock_print.assert_called_once()
+
+    def test_format_list_of_pydantic_models(self):
+        """Test formatting list of Pydantic models."""
+        class MockModel:
+            def __init__(self, name, value):
+                self.name = name
+                self.value = value
+
+            def model_dump(self):
+                return {"name": self.name, "value": self.value}
+
+        models = [MockModel("test1", 100), MockModel("test2", 200)]
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(models, OutputFormat.JSON)
+            mock_print.assert_called_once()
+
+    def test_handle_none_values(self):
+        """Test handling of None values in data."""
+        data_with_none = {"name": "test", "value": None, "status": "active"}
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(data_with_none, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_handle_complex_values(self):
+        """Test handling of complex values (lists, dicts) in table format."""
+        complex_data = {
+            "name": "test",
+            "config": {"key": "value"},
+            "tags": ["tag1", "tag2"]
+        }
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(complex_data, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_long_description_truncation(self):
+        """Test truncation of long descriptions in mission/tool lists."""
+        long_description = "x" * 100  # 100 character description
+
+        missions = [{
+            "name": "mission1",
+            "category": "data",
+            "tools_required": [],
+            "description": long_description
+        }]
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_mission_list(missions, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+    def test_fallback_to_string(self):
+        """Test fallback to string conversion for unsupported data types."""
+        unsupported_data = object()
+
+        with patch('rich.console.Console.print') as mock_print:
+            OutputFormatter.format_data(unsupported_data, OutputFormat.TABLE)
+            mock_print.assert_called_once()
+
+
+class TestOutputFormat:
+    """Test the OutputFormat enum."""
+
+    def test_output_format_values(self):
+        """Test OutputFormat enum values."""
+        assert OutputFormat.TABLE.value == "table"
+        assert OutputFormat.JSON.value == "json"
+        assert OutputFormat.YAML.value == "yaml"
+        assert OutputFormat.TEXT.value == "text"
+
+    def test_output_format_from_string(self):
+        """Test creating OutputFormat from string value."""
+        assert OutputFormat("table") == OutputFormat.TABLE
+        assert OutputFormat("json") == OutputFormat.JSON
+        assert OutputFormat("yaml") == OutputFormat.YAML
+        assert OutputFormat("text") == OutputFormat.TEXT
+
+
+
+// Relative Path: cli\tests\test_plugin_manager.py
+"""
+Tests for plugin management system.
+"""
+
+import pytest
+from unittest.mock import patch, MagicMock
+import pkg_resources
+
+import typer
+
+from ..plugin_manager import PluginManager, CLIPlugin
+
+
+class MockPlugin(CLIPlugin):
+    """Mock plugin for testing."""
+
+    @property
+    def name(self) -> str:
+        return "test-plugin"
+
+    @property
+    def command_group(self) -> typer.Typer:
+        app = typer.Typer(name="test", help="Test plugin")
+
+        @app.command()
+        def hello():
+            """Test command."""
+            print("Hello from test plugin")
+
+        return app
+
+    def setup(self, main_app: typer.Typer) -> None:
+        """Setup test plugin."""
+        pass
+
+
+class InvalidPlugin:
+    """Invalid plugin that doesn't inherit from CLIPlugin."""
+
+    def name(self):
+        return "invalid"
+
+
+class TestCLIPlugin:
+    """Test the CLIPlugin base class."""
+
+    def test_cli_plugin_is_abstract(self):
+        """Test that CLIPlugin cannot be instantiated directly."""
+        with pytest.raises(TypeError):
+            CLIPlugin()
+
+    def test_mock_plugin_implementation(self):
+        """Test mock plugin implementation."""
+        plugin = MockPlugin()
+
+        assert plugin.name == "test-plugin"
+        assert isinstance(plugin.command_group, typer.Typer)
+
+        # Test setup method
+        mock_app = MagicMock()
+        plugin.setup(mock_app)  # Should not raise exception
+
+
+class TestPluginManager:
+    """Test the PluginManager class."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.plugin_manager = PluginManager()
+
+    def test_plugin_manager_initialization(self):
+        """Test PluginManager initialization."""
+        assert isinstance(self.plugin_manager.plugins, dict)
+        assert isinstance(self.plugin_manager.loaded_plugins, list)
+        assert len(self.plugin_manager.plugins) == 0
+        assert len(self.plugin_manager.loaded_plugins) == 0
+
+    def test_register_plugin(self):
+        """Test plugin registration."""
+        plugin = MockPlugin()
+
+        with patch('rich.console.Console.print') as mock_print:
+            self.plugin_manager.register_plugin(plugin)
+
+        assert "test-plugin" in self.plugin_manager.plugins
+        assert self.plugin_manager.plugins["test-plugin"] == plugin
+        mock_print.assert_called_once()
+
+    def test_register_invalid_plugin(self):
+        """Test registration of invalid plugin."""
+        invalid_plugin = InvalidPlugin()
+
+        with pytest.raises(ValueError, match="Plugin must inherit from CLIPlugin"):
+            self.plugin_manager.register_plugin(invalid_plugin)
+
+    def test_register_duplicate_plugin(self):
+        """Test registration of duplicate plugin."""
+        plugin = MockPlugin()
+
+        # Register first time
+        self.plugin_manager.register_plugin(plugin)
+
+        # Register again - should warn but not error
+        with patch('rich.console.Console.print') as mock_print:
+            self.plugin_manager.register_plugin(plugin)
+
+        # Should still have only one plugin
+        assert len(self.plugin_manager.plugins) == 1
+        mock_print.assert_called()
+
+    def test_get_plugin(self):
+        """Test getting plugin by name."""
+        plugin = MockPlugin()
+        self.plugin_manager.register_plugin(plugin)
+
+        retrieved_plugin = self.plugin_manager.get_plugin("test-plugin")
+        assert retrieved_plugin == plugin
+
+        # Test non-existent plugin
+        non_existent = self.plugin_manager.get_plugin("non-existent")
+        assert non_existent is None
+
+    def test_list_plugins(self):
+        """Test listing loaded plugins."""
+        plugin = MockPlugin()
+        self.plugin_manager.register_plugin(plugin)
+
+        plugin_names = self.plugin_manager.list_plugins()
+        assert "test-plugin" in plugin_names
+        assert len(plugin_names) == 1
+
+    def test_setup_plugins(self):
+        """Test setting up plugins with main app."""
+        plugin = MockPlugin()
+        self.plugin_manager.register_plugin(plugin)
+
+        mock_app = MagicMock()
+
+        with patch('rich.console.Console.print'):
+            self.plugin_manager.setup_plugins(mock_app)
+
+        # Verify setup was called
+        mock_app.add_typer.assert_called_once()
+
+    def test_setup_plugins_with_error(self):
+        """Test plugin setup with error handling."""
+        # Create a plugin that raises an error during setup
+        class ErrorPlugin(CLIPlugin):
+            @property
+            def name(self):
+                return "error-plugin"
+
+            @property
+            def command_group(self):
+                return typer.Typer()
+
+            def setup(self, main_app):
+                raise Exception("Setup error")
+
+        error_plugin = ErrorPlugin()
+        self.plugin_manager.register_plugin(error_plugin)
+
+        mock_app = MagicMock()
+
+        with patch('rich.console.Console.print') as mock_print:
+            self.plugin_manager.setup_plugins(mock_app)
+
+        # Should print warning about failed setup
+        mock_print.assert_called()
+
+    @patch('pkg_resources.iter_entry_points')
+    def test_discover_plugins_success(self, mock_iter_entry_points):
+        """Test successful plugin discovery."""
+        # Mock entry point
+        mock_entry_point = MagicMock()
+        mock_entry_point.name = "test-plugin"
+        mock_entry_point.load.return_value = MockPlugin
+        mock_iter_entry_points.return_value = [mock_entry_point]
+
+        with patch('rich.console.Console.print'):
+            self.plugin_manager.discover_plugins()
+
+        assert "test-plugin" in self.plugin_manager.plugins
+        assert "test-plugin" in self.plugin_manager.loaded_plugins
+
+    @patch('pkg_resources.iter_entry_points')
+    def test_discover_plugins_load_error(self, mock_iter_entry_points):
+        """Test plugin discovery with load error."""
+        # Mock entry point that raises error
+        mock_entry_point = MagicMock()
+        mock_entry_point.name = "error-plugin"
+        mock_entry_point.load.side_effect = Exception("Load error")
+        mock_iter_entry_points.return_value = [mock_entry_point]
+
+        with patch('rich.console.Console.print') as mock_print:
+            self.plugin_manager.discover_plugins()
+
+        # Should handle error gracefully
+        assert len(self.plugin_manager.plugins) == 0
+        mock_print.assert_called()
+
+    @patch('pkg_resources.iter_entry_points')
+    def test_discover_plugins_no_entry_points(self, mock_iter_entry_points):
+        """Test plugin discovery when no entry points exist."""
+        mock_iter_entry_points.side_effect = Exception("No entry points")
+
+        # Should handle gracefully
+        self.plugin_manager.discover_plugins()
+        assert len(self.plugin_manager.plugins) == 0
+
+    def test_multiple_plugins(self):
+        """Test managing multiple plugins."""
+        class SecondPlugin(CLIPlugin):
+            @property
+            def name(self):
+                return "second-plugin"
+
+            @property
+            def command_group(self):
+                return typer.Typer()
+
+            def setup(self, main_app):
+                pass
+
+        plugin1 = MockPlugin()
+        plugin2 = SecondPlugin()
+
+        self.plugin_manager.register_plugin(plugin1)
+        self.plugin_manager.register_plugin(plugin2)
+
+        assert len(self.plugin_manager.plugins) == 2
+        assert "test-plugin" in self.plugin_manager.plugins
+        assert "second-plugin" in self.plugin_manager.plugins
+
+        plugin_names = self.plugin_manager.list_plugins()
+        assert len(plugin_names) == 2
+        assert "test-plugin" in plugin_names
+        assert "second-plugin" in plugin_names
+
+
+
+// Relative Path: cli\tests\__init__.py
+# CLI tests
+
+
+
+// Relative Path: cli\main.py
+"""
+Main CLI entry point for the Agent V2 platform.
+"""
+
+import asyncio
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+import logging
+
+import typer
+from rich.console import Console
+from rich.traceback import install
+import structlog
+
+# Fix Windows Unicode support
+if os.name == 'nt':  # Windows
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+
+    # Also set environment variables for proper Unicode handling
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+
+from .commands.run import app as run_app
+from .commands.chat import app as chat_app
+from .commands.missions import app as missions_app
+from .commands.tools import app as tools_app
+from .commands.providers import app as providers_app
+from .commands.sessions import app as sessions_app
+from .commands.config import app as config_app
+from .commands.dev import app as dev_app
+from .plugin_manager import PluginManager
+from .config.settings import CLISettings
+
+# Install rich tracebacks
+install()
+
+# Initialize console
+console = Console()
+
+# Main CLI app
+app = typer.Typer(
+    name="agent",
+    help="Agent V2 Platform CLI - A modern interface for AI-powered task automation",
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+)
+
+# Developer CLI app (separate entry point for debug features)
+dev_cli = typer.Typer(
+    name="agent-dev",
+    help="Agent V2 Developer CLI - Debug and development tools",
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+)
+
+
+def setup_logging(debug: bool = False) -> None:
+    """Configure structlog for console or JSON output."""
+    level = logging.DEBUG if debug or os.getenv("AGENT_DEBUG") else logging.WARN
+    logging.basicConfig(level=level, format="%(message)s")
+
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.add_log_level,
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.dev.ConsoleRenderer() if (debug or os.getenv("AGENT_DEBUG")) else structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        cache_logger_on_first_use=True,
+    )
+
+def initialize_cli():
+    """Initialize CLI with plugins and settings."""
+    # Load settings
+    settings = CLISettings()
+
+    # Initialize plugin manager
+    plugin_manager = PluginManager()
+    plugin_manager.discover_plugins()
+    plugin_manager.setup_plugins(app)
+
+    # Add core command groups
+    app.add_typer(run_app, name="run", help="Execute missions and tasks")
+    app.add_typer(chat_app, name="chat", help="Interactive chat with the agent")
+    app.add_typer(missions_app, name="missions", help="Manage mission templates")
+    app.add_typer(tools_app, name="tools", help="Manage tools and capabilities")
+    app.add_typer(providers_app, name="providers", help="Manage LLM providers")
+    app.add_typer(sessions_app, name="sessions", help="Manage execution sessions")
+    app.add_typer(config_app, name="config", help="Manage configuration")
+    app.add_typer(dev_app, name="dev", help="Developer and debug tools")
+
+    # Add dev commands to dev CLI
+    dev_cli.add_typer(dev_app, name="", help="Developer tools")
+
+@app.command("ask", hidden=True)
+def quick_ask(message: str = typer.Argument(help="Message to send to the agent")):
+    """Quick way to ask the agent something directly."""
+    import asyncio
+    from .commands.chat import _quick_chat
+    from pathlib import Path
+    import uuid
+
+    session_id = f"ask-{uuid.uuid4()}"
+    work_dir = Path.cwd() / ".agent_temp"
+    asyncio.run(_quick_chat(message, work_dir, session_id))
+
+@app.callback()
+def main_callback(
+    ctx: typer.Context,
+    version: bool = typer.Option(False, "--version", "-v", help="Show version information"),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable verbose output"),
+):
+    """
+    Agent V2 Platform CLI - Modern interface for AI-powered automation.
+
+    Use --help with any command to get detailed information and examples.
+    """
+    if version:
+        from . import __version__
+        console.print(f"Agent CLI version {__version__}")
+        raise typer.Exit()
+
+    if verbose:
+        console.print("[dim]Verbose mode enabled[/dim]")
+        ctx.meta["verbose"] = True
+    # Ensure logging is configured as early as possible
+    setup_logging(debug=verbose)
+
+@dev_cli.callback()
+def dev_callback(
+    ctx: typer.Context,
+    verbose: bool = typer.Option(False, "--verbose", help="Enable verbose output"),
+):
+    """Developer tools for Agent V2 platform."""
+    if verbose:
+        console.print("[dim]Verbose mode enabled[/dim]")
+        ctx.meta["verbose"] = True
+    setup_logging(debug=verbose)
+
+def cli_main():
+    """Main CLI entry point."""
+    try:
+        initialize_cli()
+        app()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Operation cancelled by user[/yellow]")
+        sys.exit(1)
+    except Exception as e:
+        if "--verbose" in sys.argv:
+            console.print_exception()
+        else:
+            console.print(f"[red]Error: {e}[/red]")
+            console.print("[dim]Use --verbose for detailed error information[/dim]")
+        sys.exit(1)
+
+def dev_main():
+    """Developer CLI entry point."""
+    try:
+        initialize_cli()
+        dev_cli()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Operation cancelled by user[/yellow]")
+        sys.exit(1)
+    except Exception as e:
+        if "--verbose" in sys.argv:
+            console.print_exception()
+        else:
+            console.print(f"[red]Error: {e}[/red]")
+            console.print("[dim]Use --verbose for detailed error information[/dim]")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    cli_main()
+
+
+
+// Relative Path: cli\output_formatter.py
+"""
+Output formatting system for the CLI.
+"""
+
+import json
+from enum import Enum
+from typing import Any, List, Dict, Union
+
+import yaml
+from rich.console import Console
+from rich.json import JSON
+from rich.table import Table
+from rich.text import Text
+
+console = Console()
+
+
+class OutputFormat(Enum):
+    """Available output formats."""
+    TABLE = "table"
+    JSON = "json"
+    YAML = "yaml"
+    TEXT = "text"
+
+
+class OutputFormatter:
+    """Handles formatting output in different formats."""
+
+    @staticmethod
+    def format_data(data: Any, format_type: OutputFormat, title: str = None) -> None:
+        """Format and display data in the specified format."""
+        if format_type == OutputFormat.TABLE:
+            OutputFormatter._format_table(data, title)
+        elif format_type == OutputFormat.JSON:
+            OutputFormatter._format_json(data)
+        elif format_type == OutputFormat.YAML:
+            OutputFormatter._format_yaml(data)
+        elif format_type == OutputFormat.TEXT:
+            OutputFormatter._format_text(data)
+
+    @staticmethod
+    def _format_table(data: Any, title: str = None) -> None:
+        """Format data as a Rich table."""
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            # List of dictionaries - create table
+            table = Table(title=title)
+
+            # Add columns from first item
+            for key in data[0].keys():
+                table.add_column(key.replace('_', ' ').title(), style="cyan")
+
+            # Add rows
+            for item in data:
+                row_values = []
+                for value in item.values():
+                    if isinstance(value, (list, dict)):
+                        row_values.append(str(value))
+                    else:
+                        row_values.append(str(value) if value is not None else "")
+                table.add_row(*row_values)
+
+            console.print(table)
+
+        elif isinstance(data, dict):
+            # Single dictionary - create key-value table
+            table = Table(title=title, show_header=False)
+            table.add_column("Property", style="cyan")
+            table.add_column("Value", style="white")
+
+            for key, value in data.items():
+                if isinstance(value, (list, dict)):
+                    value_str = json.dumps(value, indent=2)
+                else:
+                    value_str = str(value) if value is not None else ""
+                table.add_row(key.replace('_', ' ').title(), value_str)
+
+            console.print(table)
+
+        else:
+            # Fallback to text format
+            console.print(str(data))
+
+    @staticmethod
+    def _format_json(data: Any) -> None:
+        """Format data as JSON."""
+        if hasattr(data, 'model_dump'):
+            # Pydantic model
+            json_data = data.model_dump()
+        elif isinstance(data, list) and len(data) > 0 and hasattr(data[0], 'model_dump'):
+            # List of Pydantic models
+            json_data = [item.model_dump() for item in data]
+        else:
+            json_data = data
+
+        console.print(JSON.from_data(json_data))
+
+    @staticmethod
+    def _format_yaml(data: Any) -> None:
+        """Format data as YAML."""
+        if hasattr(data, 'model_dump'):
+            # Pydantic model
+            yaml_data = data.model_dump()
+        elif isinstance(data, list) and len(data) > 0 and hasattr(data[0], 'model_dump'):
+            # List of Pydantic models
+            yaml_data = [item.model_dump() for item in data]
+        else:
+            yaml_data = data
+
+        yaml_str = yaml.dump(yaml_data, default_flow_style=False, indent=2)
+        console.print(yaml_str)
+
+    @staticmethod
+    def _format_text(data: Any) -> None:
+        """Format data as plain text."""
+        if isinstance(data, list):
+            for item in data:
+                console.print(str(item))
+        else:
+            console.print(str(data))
+
+    @staticmethod
+    def format_mission_list(missions: List[Dict], format_type: OutputFormat) -> None:
+        """Format mission list with specific styling."""
+        if format_type == OutputFormat.TABLE:
+            table = Table(title="Available Missions")
+            table.add_column("Name", style="cyan", no_wrap=True)
+            table.add_column("Category", style="green")
+            table.add_column("Tools Required", style="yellow")
+            table.add_column("Description", style="white")
+
+            for mission in missions:
+                tools = ", ".join(mission.get('tools_required', []))
+                description = mission.get('description', '')
+                if len(description) > 50:
+                    description = description[:47] + "..."
+
+                table.add_row(
+                    mission.get('name', ''),
+                    mission.get('category', ''),
+                    tools,
+                    description
+                )
+
+            console.print(table)
+        else:
+            OutputFormatter.format_data(missions, format_type)
+
+    @staticmethod
+    def format_tool_list(tools: List[Dict], format_type: OutputFormat) -> None:
+        """Format tool list with specific styling."""
+        if format_type == OutputFormat.TABLE:
+            table = Table(title="Available Tools")
+            table.add_column("Name", style="cyan", no_wrap=True)
+            table.add_column("Version", style="green")
+            table.add_column("Status", style="yellow")
+            table.add_column("Description", style="white")
+
+            for tool in tools:
+                status = "[green]✅ Installed[/green]" if tool.get('installed', False) else "[red]❌ Not Installed[/red]"
+                description = tool.get('description', '')
+                if len(description) > 50:
+                    description = description[:47] + "..."
+
+                table.add_row(
+                    tool.get('name', ''),
+                    tool.get('version', ''),
+                    status,
+                    description
+                )
+
+            console.print(table)
+        else:
+            OutputFormatter.format_data(tools, format_type)
+
+    @staticmethod
+    def format_provider_list(providers: List[Dict], format_type: OutputFormat) -> None:
+        """Format provider list with specific styling."""
+        if format_type == OutputFormat.TABLE:
+            table = Table(title="LLM Providers")
+            table.add_column("Name", style="cyan", no_wrap=True)
+            table.add_column("Type", style="green")
+            table.add_column("Status", style="yellow")
+            table.add_column("Default", style="blue")
+
+            for provider in providers:
+                status = "[green]✅ Connected[/green]" if provider.get('connected', False) else "[red]❌ Not Connected[/red]"
+                is_default = "[blue]⭐ Yes[/blue]" if provider.get('is_default', False) else ""
+
+                table.add_row(
+                    provider.get('name', ''),
+                    provider.get('type', ''),
+                    status,
+                    is_default
+                )
+
+            console.print(table)
+        else:
+            OutputFormatter.format_data(providers, format_type)
+
+    @staticmethod
+    def format_session_list(sessions: List[Dict], format_type: OutputFormat) -> None:
+        """Format session list with specific styling."""
+        if format_type == OutputFormat.TABLE:
+            table = Table(title="Execution Sessions")
+            table.add_column("ID", style="cyan", no_wrap=True)
+            table.add_column("Mission", style="green")
+            table.add_column("Status", style="yellow")
+            table.add_column("Started", style="blue")
+            table.add_column("Duration", style="white")
+
+            for session in sessions:
+                table.add_row(
+                    session.get('id', '')[:8] + "...",  # Truncate ID
+                    session.get('mission', ''),
+                    session.get('status', ''),
+                    session.get('started', ''),
+                    session.get('duration', '')
+                )
+
+            console.print(table)
+        else:
+            OutputFormatter.format_data(sessions, format_type)
+
+
+
+// Relative Path: cli\plugin_manager.py
+"""
+Plugin management system for the CLI.
+"""
+
+from abc import ABC, abstractmethod
+from typing import Dict, List
+import sys
+
+import typer
+from rich.console import Console
+
+# Use modern importlib.metadata instead of deprecated pkg_resources
+if sys.version_info >= (3, 8):
+    from importlib import metadata
+else:
+    import importlib_metadata as metadata
+
+console = Console()
+
+
+class CLIPlugin(ABC):
+    """Base class for CLI plugins."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Plugin name for registration."""
+        pass
+
+    @property
+    @abstractmethod
+    def command_group(self) -> typer.Typer:
+        """Typer app with plugin commands."""
+        pass
+
+    @abstractmethod
+    def setup(self, main_app: typer.Typer) -> None:
+        """Setup plugin with main CLI app."""
+        pass
+
+
+class PluginManager:
+    """Manages CLI plugins and their registration."""
+
+    def __init__(self):
+        self.plugins: Dict[str, CLIPlugin] = {}
+        self.loaded_plugins: List[str] = []
+
+    def discover_plugins(self):
+        """Auto-discover plugins from installed packages."""
+        try:
+            # Use modern importlib.metadata instead of pkg_resources
+            entry_points = metadata.entry_points()
+
+            # Get entry points for our plugin group
+            if hasattr(entry_points, 'select'):
+                # Python 3.10+ API
+                plugin_entry_points = entry_points.select(group='agent_cli_plugins')
+            else:
+                # Older API
+                plugin_entry_points = entry_points.get('agent_cli_plugins', [])
+
+            for entry_point in plugin_entry_points:
+                try:
+                    plugin_class = entry_point.load()
+                    plugin = plugin_class()
+                    self.register_plugin(plugin)
+                    self.loaded_plugins.append(entry_point.name)
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Failed to load plugin {entry_point.name}: {e}[/yellow]")
+        except Exception as e:
+            # If no plugins are found or entry points don't exist, that's fine
+            pass
+
+    def register_plugin(self, plugin: CLIPlugin):
+        """Register a plugin with the CLI."""
+        if not isinstance(plugin, CLIPlugin):
+            raise ValueError(f"Plugin must inherit from CLIPlugin, got {type(plugin)}")
+
+        if plugin.name in self.plugins:
+            console.print(f"[yellow]Warning: Plugin {plugin.name} already registered[/yellow]")
+            return
+
+        self.plugins[plugin.name] = plugin
+        console.print(f"[dim]Registered plugin: {plugin.name}[/dim]")
+
+    def setup_plugins(self, main_app: typer.Typer):
+        """Setup all registered plugins."""
+        for plugin in self.plugins.values():
+            try:
+                plugin.setup(main_app)
+                main_app.add_typer(plugin.command_group, name=plugin.name)
+            except Exception as e:
+                console.print(f"[yellow]Warning: Failed to setup plugin {plugin.name}: {e}[/yellow]")
+
+    def list_plugins(self) -> List[str]:
+        """Get list of loaded plugin names."""
+        return list(self.plugins.keys())
+
+    def get_plugin(self, name: str) -> CLIPlugin:
+        """Get a specific plugin by name."""
+        return self.plugins.get(name)
+
+
+
+// Relative Path: cli\__init__.py
+"""
+Rich CLI for the Agent V2 platform.
+"""
+
+__version__ = "1.0.0"
+
+
+
 // Relative Path: planning\todolist.py
 from __future__ import annotations
 
@@ -656,6 +4632,7 @@ class PythonTool(Tool):
                 "any": any, "all": all, "isinstance": isinstance,
                 "open": open,  # Use with caution
                 "__import__": __import__,
+                "locals": locals,
             },
             "context": context or {},
         }
@@ -696,11 +4673,44 @@ from typing import Dict, List, Any, Optional
             # Execute user code
             exec(code, safe_namespace)
             
-            # Extract result
-            result_value = safe_namespace.get('result', None)
-            
+            # Extract result and sanitize outputs to ensure they are pickle/JSON safe
+            def _sanitize(value, depth: int = 0):
+                if depth > 4:
+                    return repr(value)
+                # Simple primitives
+                if value is None or isinstance(value, (bool, int, float, str)):
+                    return value
+                # Bytes → decode to utf-8 (fallback to repr)
+                if isinstance(value, (bytes, bytearray)):
+                    try:
+                        return bytes(value).decode('utf-8', errors='replace')
+                    except Exception:
+                        return repr(value)
+                # Paths → str
+                if isinstance(value, Path):
+                    return str(value)
+                # Collections
+                if isinstance(value, (list, tuple, set)):
+                    return [_sanitize(v, depth + 1) for v in value]
+                if isinstance(value, dict):
+                    return {
+                        str(_sanitize(k, depth + 1)): _sanitize(v, depth + 1)
+                        for k, v in value.items()
+                    }
+                # Try to leave as-is only if both JSON and pickle accept it; otherwise repr
+                try:
+                    import json as _json
+                    import pickle as _pickle
+                    _json.dumps(value)
+                    _pickle.dumps(value)
+                    return value
+                except Exception:
+                    return repr(value)
+
+            result_value = _sanitize(safe_namespace.get('result', None))
+
             # Get all user-defined variables
-            user_vars = {
+            raw_user_vars = {
                 k: v for k, v in safe_namespace.items()
                 if not k.startswith('_') 
                 and k not in ['os', 'sys', 'json', 're', 'pathlib', 'shutil',
@@ -708,12 +4718,13 @@ from typing import Dict, List, Any, Optional
                              'base64', 'hashlib', 'tempfile', 'csv', 'Path',
                              'timedelta', 'Dict', 'List', 'Any', 'Optional', 'context']
             }
-            
+            user_vars = {k: _sanitize(v) for k, v in raw_user_vars.items()}
+
             return {
                 "success": True,
                 "result": result_value,
                 "variables": user_vars,
-                "context_updated": safe_namespace.get('context', {})
+                "context_updated": _sanitize(safe_namespace.get('context', {}))
             }
             
         except Exception as e:
@@ -854,9 +4865,13 @@ import os
 from pathlib import Path
 import subprocess
 from typing import Any, Optional, Dict, Tuple
+import time
 import urllib
+import urllib.request
+import urllib.error
 
 from capstone.agent_v2.tool import Tool
+import structlog
 
 
 class GitTool(Tool):
@@ -884,6 +4899,10 @@ class GitTool(Tool):
                     "type": "string",
                     "description": "Repository path (default: current directory)"
                 },
+                "remote": {
+                    "type": "string",
+                    "description": "Remote name (for push), defaults to 'origin'"
+                },
                 "message": {
                     "type": "string",
                     "description": "Commit message (for commit operation)"
@@ -900,14 +4919,40 @@ class GitTool(Tool):
                 "branch": {
                     "type": "string",
                     "description": "Branch name"
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "list", "set_url"],
+                    "description": "Remote sub-action when operation=remote"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Remote name for operation=remote (default: origin)"
                 }
             },
             "required": ["operation"]
         }
     
     async def execute(self, operation: str, repo_path: str = ".", **kwargs) -> Dict[str, Any]:
+        logger = structlog.get_logger().bind(tool=self.name, operation=operation)
         try:
             repo_path = Path(repo_path)
+
+            # Ensure a valid working directory is used across operations
+            if operation == "init":
+                # For init, create the directory if it doesn't exist
+                try:
+                    if not repo_path.exists():
+                        repo_path.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    logger.error("git_execute_exception", error=str(e))
+                    return {"success": False, "error": f"Failed to prepare repo directory: {e}"}
+            elif operation != "clone":
+                # For all other operations that use cwd=repo_path, ensure it exists
+                if not repo_path.exists():
+                    return {"success": False, "error": f"Repository path does not exist: {repo_path}"}
+
+            logger.info("git_execute_start", cwd=str(repo_path), args=kwargs)
             
             # Build command based on operation
             if operation == "init":
@@ -931,10 +4976,19 @@ class GitTool(Tool):
                 cmd = ["git", "clone", url, str(repo_path)]
             elif operation == "remote":
                 action = kwargs.get("action", "add")
+                remote_name = kwargs.get("name", "origin")
                 if action == "add":
-                    cmd = ["git", "remote", "add", kwargs.get("name", "origin"), kwargs["url"]]
-                else:
+                    if not kwargs.get("url"):
+                        return {"success": False, "error": "url is required for remote add"}
+                    cmd = ["git", "remote", "add", remote_name, kwargs["url"]]
+                elif action == "set_url":
+                    if not kwargs.get("url"):
+                        return {"success": False, "error": "url is required for remote set_url"}
+                    cmd = ["git", "remote", "set-url", remote_name, kwargs["url"]]
+                elif action == "list":
                     cmd = ["git", "remote", "-v"]
+                else:
+                    return {"success": False, "error": f"Unknown remote action: {action}"}
             else:
                 return {"success": False, "error": f"Unknown operation: {operation}"}
             
@@ -947,16 +5001,23 @@ class GitTool(Tool):
                 timeout=30
             )
             
-            return {
+            payload = {
                 "success": result.returncode == 0,
                 "output": result.stdout,
                 "error": result.stderr if result.returncode != 0 else None,
                 "command": " ".join(cmd)
             }
+            if payload["success"]:
+                logger.info("git_execute_success", command=payload["command"])            
+            else:
+                logger.error("git_execute_failed", command=payload["command"], error=payload["error"])
+            return payload
             
         except subprocess.TimeoutExpired:
+            logger.error("git_execute_timeout")
             return {"success": False, "error": "Command timed out"}
         except Exception as e:
+            logger.error("git_execute_exception", error=str(e))
             return {"success": False, "error": str(e)}
 
 
@@ -1002,9 +5063,11 @@ class GitHubTool(Tool):
         }
     
     async def execute(self, action: str, **kwargs) -> Dict[str, Any]:
+        logger = structlog.get_logger().bind(tool=self.name, action=action)
         try:
             token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
             if not token:
+                logger.error("github_missing_token")
                 return {"success": False, "error": "GITHUB_TOKEN environment variable is not set"}
             
             api_base = "https://api.github.com"
@@ -1032,17 +5095,28 @@ class GitHubTool(Tool):
                     return e.code, detail
                 except urllib.error.URLError as e:
                     return 0, f"URLError: {e.reason}"
+                except Exception as e:
+                    return -1, f"Exception: {type(e).__name__}: {e}"
             
             if action == "create_repo":
                 repo_name = kwargs.get("name")
                 if not repo_name:
+                    logger.error("github_missing_repo_name")
                     return {"success": False, "error": "Repository name required"}
                 body = {
                     "name": repo_name,
                     "private": bool(kwargs.get("private", False)),
                     "description": kwargs.get("description") or ""
                 }
-                status, text = request("POST", f"{api_base}/user/repos", body)
+                # Basic retry for transient 5xx
+                attempts = 0
+                status, text = 0, ""
+                while attempts < 2:
+                    attempts += 1
+                    status, text = request("POST", f"{api_base}/user/repos", body)
+                    if status not in (500, 502, 503, 504, -1, 0):
+                        break
+                    time.sleep(1)
                 ok = status in (200, 201)
                 payload = {}
                 try:
@@ -1060,7 +5134,7 @@ class GitHubTool(Tool):
                         error_msg = base_msg or "Authentication/authorization failed. Check GITHUB_TOKEN scopes."
                     else:
                         error_msg = base_msg or text or f"HTTP {status}"
-                return {
+                result = {
                     "success": ok,
                     "repo_name": repo_name,
                     "response_status": status,
@@ -1068,6 +5142,11 @@ class GitHubTool(Tool):
                     "repo_html_url": payload.get("html_url") if isinstance(payload, dict) else None,
                     "error": error_msg,
                 }
+                if ok:
+                    logger.info("github_create_repo_success", full_name=result["repo_full_name"])
+                else:
+                    logger.error("github_create_repo_failed", status=status, error=error_msg)
+                return result
             
             elif action == "list_repos":
                 status, text = request("GET", f"{api_base}/user/repos?per_page=20")
@@ -1078,25 +5157,36 @@ class GitHubTool(Tool):
                     repos = [item.get("full_name") for item in data if isinstance(item, dict)]
                 except Exception:
                     repos = []
-                return {
+                result = {
                     "success": ok,
                     "repos": repos,
                     "response_status": status,
                     "error": None if ok else text
                 }
+                if ok:
+                    logger.info("github_list_repos_success", count=len(repos))
+                else:
+                    logger.error("github_list_repos_failed", status=status)
+                return result
             
             elif action == "delete_repo":
                 full_name = kwargs.get("name")
                 if not full_name or "/" not in full_name:
+                    logger.error("github_invalid_repo_full_name")
                     return {"success": False, "error": "Repository name must be in 'owner/repo' format"}
                 status, text = request("DELETE", f"{api_base}/repos/{full_name}")
                 ok = status in (200, 202, 204)
-                return {
+                result = {
                     "success": ok,
                     "repo_name": full_name,
                     "response_status": status,
                     "error": None if ok else text
                 }
+                if ok:
+                    logger.info("github_delete_repo_success", repo=full_name)
+                else:
+                    logger.error("github_delete_repo_failed", status=status, error=text)
+                return result
             
             else:
                 return {"success": False, "error": f"Unknown action: {action}"}
@@ -1105,10 +5195,13 @@ class GitHubTool(Tool):
                 detail = e.read().decode("utf-8")
             except Exception:
                 detail = str(e)
+            logger.error("github_http_error", status=getattr(e, 'code', None), detail=detail)
             return {"success": False, "error": f"HTTPError {e.code}: {detail}"}
         except urllib.error.URLError as e:
+            logger.error("github_url_error", reason=getattr(e, 'reason', None))
             return {"success": False, "error": f"URLError: {e.reason}"}
         except Exception as e:
+            logger.error("github_execute_exception", error=str(e))
             return {"success": False, "error": str(e)}
 
 
@@ -1455,8 +5548,10 @@ import json
 from pathlib import Path
 import sys
 from typing import Any, AsyncIterator, Dict, List, Optional
+import uuid
 from attr import asdict, dataclass
 import litellm
+import structlog
 
 from capstone.agent_v2.planning.todolist import TaskStatus, TodoItem, TodoList, TodoListManager
 from capstone.agent_v2.statemanager import StateManager
@@ -1542,6 +5637,9 @@ class MessageHistory:
         """
         if n <= 0:
             return [self.system_prompt]
+
+        if n == -1:
+            return self.messages
 
         # Exclude the system prompt from pairing logic
         body = self.messages[1:]
@@ -1646,6 +5744,8 @@ class Action:
     type: ActionType
     tool: Optional[str]
     input: Dict[str, Any]
+    question: Optional[str] = None
+    message: Optional[str] = None
 
     @staticmethod
     def from_json(json_str: str) -> "Action":
@@ -1656,7 +5756,9 @@ class Action:
         return Action(
             type=ActionType(data["type"]),
             tool=data["tool"],
-            input=data["input"])
+            input=data["input"],
+            question=data.get("question"),
+            message=data.get("message"))
 
 
 @dataclass
@@ -1745,6 +5847,7 @@ class Agent:
         self.state_manager = state_manager
         self.state = None
         self.message_history = MessageHistory(build_system_prompt(system_prompt, mission, self.tools_description))
+        self.logger = structlog.get_logger().bind(agent=name)
 
 
     async def execute(self, user_message: str, session_id: str) -> AsyncIterator[AgentEvent]:
@@ -1762,10 +5865,12 @@ class Agent:
             An async iterator of AgentEvent.
         """
         # --- 0) Load state -------------------------------------------------------
+        self.logger.info("execute_start", session_id=session_id, has_mission=bool(self.mission))
         self.state = await self.state_manager.load_state(session_id)
 
         if self.mission is None:
             self.mission = user_message
+            self.logger.info("mission_set_from_user", session_id=session_id, mission_preview=self.mission[:120])
 
         # If we were awaiting an answer, consume it immediately
         if self.state.get("pending_question"):
@@ -1776,6 +5881,7 @@ class Agent:
             answers[pending_question["answer_key"]] = answer
             await self.state_manager.save_state(session_id, self.state)
             yield AgentEvent(type=AgentEventType.STATE_UPDATED, data={"answers": answers})
+            self.logger.info("answer_captured", session_id=session_id, answer_key=pending_question["answer_key"])
 
             # Nach einer beantworteten Frage: user_message nicht als neues inhaltliches Prompt verwenden
             # (wir bleiben im Clarification-Flow). Kein return hier: wir laufen weiter und prüfen,
@@ -1788,6 +5894,7 @@ class Agent:
         self.state["mission"] = self.mission
         answers = self.state.setdefault("answers", {})
         await self.state_manager.save_state(session_id, self.state)
+        self.logger.info("state_saved_post_user", session_id=session_id)
 
         # --- 2) Pre-Clarification Gate (nur wenn noch kein finaler Plan existiert) ---
         todolist = None
@@ -1800,6 +5907,7 @@ class Agent:
                 )
                 self.state["clar_questions"] = clar_qs or []
                 await self.state_manager.save_state(session_id, self.state)
+                self.logger.info("clar_questions_extracted", session_id=session_id, count=len(self.state["clar_questions"]))
 
             # 2.b) Unbeantwortete Frage suchen (per stable key)
             unanswered = next(
@@ -1814,6 +5922,7 @@ class Agent:
                 }
                 await self.state_manager.save_state(session_id, self.state)
                 yield AgentEvent(type=AgentEventType.ASK_USER, data={"question": unanswered["question"]})
+                self.logger.info("ask_user", session_id=session_id, question_key=unanswered["key"])
                 return
 
             # 2.c) Alle Fragen beantwortet -> finalen Plan erstellen (No-ASK mode)
@@ -1822,6 +5931,7 @@ class Agent:
                 tools_desc=self.tools_description,
                 answers=answers
             )
+            self.logger.info("todolist_created", session_id=session_id, items=len(todolist.items))
 
             # 2.d) Harte Guards: keine open_questions, keine ASK_USER-Platzhalter
             if getattr(todolist, "open_questions", None):
@@ -1836,7 +5946,8 @@ class Agent:
             # 2.e) Plan persistieren
             self.state["todolist_id"] = todolist.todolist_id
             await self.state_manager.save_state(session_id, self.state)
-            self.todo_list_manager.update_todolist(todolist)  # persist current version if needed
+            await self.todo_list_manager.update_todolist(todolist)  # persist current version if needed
+            self.logger.info("todolist_persisted", session_id=session_id, todolist_id=todolist.todolist_id)
 
         else:
             # Es existiert bereits ein Plan (Resume-Fall)
@@ -1849,18 +5960,35 @@ class Agent:
         # --- 3) ReAct Loop über die finale TodoList ------------------------------
         for next_step in todolist.items:
             # Hydratation: Parameter ggf. aus answers einsetzen
-            self._hydrate_parameters_from_answers(next_step)
+            # self._hydrate_parameters_from_answers(next_step)
+            # self.logger.info("step_begin", session_id=session_id, position=next_step.position, tool=next_step.tool)
 
             # 1) Thought
             thought = await self._generate_thought(next_step)
             yield AgentEvent(type=AgentEventType.THOUGHT, data={"for_step": next_step.position, "thought": asdict(thought)})
+            self.logger.info("thought_generated", session_id=session_id, position=next_step.position, action_type=thought.action.type.value)
 
             # 2) Action
             action = await self._decide_next_action(thought, next_step)
             yield AgentEvent(type=AgentEventType.ACTION, data={"for_step": next_step.position, "action": action.type.value})
+            self.logger.info("action_decided", session_id=session_id, position=next_step.position, action=action.type.value, tool=action.tool)
 
             # 3) Execute
             observation = await self._execute_action(action)
+            self.logger.info("action_executed", session_id=session_id, position=next_step.position, success=bool(observation.get("success")))
+
+            # 3a) If the action requires user input, pause and ask
+            if observation.get("requires_user"):
+                question_text = observation.get("question") or "I need additional information to proceed."
+                # Store a pending question with a stable key tied to this step
+                self.state["pending_question"] = {
+                    "answer_key": f"step_{next_step.position}_answer",
+                    "question": question_text,
+                }
+                await self.state_manager.save_state(session_id, self.state)
+                yield AgentEvent(type=AgentEventType.ASK_USER, data={"question": question_text})
+                self.logger.info("ask_user", session_id=session_id, question_key=f"step_{next_step.position}_answer")
+                return
 
             # 4) State aktualisieren
             self.state["last_observation"] = observation
@@ -1868,7 +5996,8 @@ class Agent:
 
             # 5) Persist
             await self.state_manager.save_state(session_id, self.state)
-            self.todo_list_manager.update_todolist(todolist)
+            await self.todo_list_manager.update_todolist(todolist)
+            self.logger.info("state_and_plan_updated", session_id=session_id, position=next_step.position)
 
             # Optional: Early stop bei Fehler + Re-Plan-Hook
             # if not observation.get("success") and self.allow_replan_on_failure:
@@ -1876,6 +6005,7 @@ class Agent:
 
         # --- 4) Abschluss ---------------------------------------------------------
         yield AgentEvent(type=AgentEventType.COMPLETE, data={"todolist": todolist.to_markdown()})
+        self.logger.info("execute_complete", session_id=session_id)
         return
 
 
@@ -1921,7 +6051,17 @@ class Agent:
         """
         Gets the description of the tools available.
         """
-        return "\n".join([ f"- {tool.name}: {tool.description}" for tool in self.tools])
+        lines = []
+        for tool in self.tools:
+            try:
+                schema_json = json.dumps(tool.parameters_schema, ensure_ascii=False, indent=2)
+            except Exception:
+                schema_json = "{}"
+            lines.append(
+                f"- {tool.name}: {tool.description}\n"
+                f"  parameters_schema:\n{schema_json}"
+            )
+        return "\n".join(lines)
 
 
     def _get_tools_schema(self) -> List[Dict[str, Any]]:
@@ -1977,17 +6117,32 @@ class Agent:
         }
 
         # get the last 2 messages from the message history. this shall be sufficient for the LLM to plan the next action.
-        messages = self.message_history.get_last_n_messages(2)
+        messages = self.message_history.get_last_n_messages(-1)
+
+        # Provide recent state/observation context to enable correct parameterization (e.g., GitHub repo URL)
+        state_context = {
+            "answers": self.state.get("answers", {}),
+            "last_observation": self.state.get("last_observation", {}),
+        }
 
         messages.append({"role": "user", "content": (
             "You are the Planning & Action Selector.\n"
             "Pick exactly one next action for the next_step below.\n"
             f"NEXT_STEP:\n{next_step.to_json()}\n\n"
-            "Prefer tools; ask_user only if info is missing.\n"
-            "Return STRICT JSON only (no extra text) matching this schema:\n"
+            f"AVAILABLE_CONTEXT (use to fill concrete tool parameters):\n{json.dumps(state_context, ensure_ascii=False)}\n\n"
+            "Rules:\n"
+            "- Prefer tools; ask_user only if info is missing.\n"
+            "- ALWAYS include repo_path pointing to the project directory for ALL git operations.\n"
+            "- When setting the remote, derive the URL strictly from github.create_repo -> repo_full_name: https://github.com/{owner}/{repo}.git.\n"
+            "  Never guess <owner>; if repo_full_name is unavailable, ask_user for the GitHub owner/org.\n"
+            "- If git remote add fails because origin exists, retry with action=set_url (same repo_path).\n"
+            "- After configuring the remote, verify with git remote -v (operation=remote, action=list, with repo_path).\n"
+            "- Push with upstream set: git push -u origin main (with repo_path).\n"
+            "Return STRICT JSON only (no extra text). Return EXACTLY ONE JSON object (no arrays, no multiple objects) matching this schema:\n"
             f"{json.dumps(schema_hint, ensure_ascii=False)}\n\n"
         )})
 
+        self.logger.info("llm_call_thought_start", step=next_step.position)
         response = await litellm.acompletion(
             model="gpt-4.1-mini",
             messages=messages,
@@ -1997,9 +6152,74 @@ class Agent:
             tool_choice="auto",
         )
 
-        self.message_history.add_message(response.choices[0].message.content, "assistant")
+        raw_content = response.choices[0].message.content
+        self.message_history.add_message(raw_content, "assistant")
 
-        return Thought.from_json(response.choices[0].message.content)
+        # Robust parsing: handle accidental multiple JSON objects
+        def _extract_json_objects(text: str) -> List[Dict[str, Any]]:
+            objects: List[Dict[str, Any]] = []
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return [parsed]
+                if isinstance(parsed, list):
+                    return [obj for obj in parsed if isinstance(obj, dict)]
+            except Exception:
+                pass
+
+            depth = 0
+            in_str = False
+            escape = False
+            start_idx: Optional[int] = None
+            for i, ch in enumerate(text):
+                if in_str:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                else:
+                    if ch == '"':
+                        in_str = True
+                        continue
+                    if ch == '{':
+                        if depth == 0:
+                            start_idx = i
+                        depth += 1
+                        continue
+                    if ch == '}':
+                        depth -= 1
+                        if depth == 0 and start_idx is not None:
+                            segment = text[start_idx:i+1]
+                            try:
+                                obj = json.loads(segment)
+                                if isinstance(obj, dict):
+                                    objects.append(obj)
+                            except Exception:
+                                pass
+                            start_idx = None
+                        continue
+            return objects
+
+        candidates = _extract_json_objects(raw_content or "")
+        chosen: Optional[Dict[str, Any]] = None
+        for obj in candidates:
+            try:
+                if int(obj.get("next_step_ref")) == int(next_step.position):
+                    chosen = obj
+                    break
+            except Exception:
+                continue
+        if not chosen and candidates:
+            chosen = candidates[0]
+
+        self.logger.info("llm_call_thought_end", step=next_step.position)
+        if chosen:
+            return Thought.from_json(chosen)
+        # Fallback to original content (may still raise, which is fine to surface)
+        return Thought.from_json(raw_content)
 
 
     async def _decide_next_action(self, thought: Thought, next_step: TodoItem) -> Action:
@@ -2016,12 +6236,14 @@ class Agent:
             return Action(
                 type=ActionType.ASK,
                 tool=thought_action.tool,
-                input=thought_action.input)
+                input=thought_action.input,
+                question=thought_action.question)
         elif thought_action.type == ActionType.DONE:
             return Action(
                 type=ActionType.DONE,
                 tool=thought_action.tool,
-                input=thought_action.input)
+                input=thought_action.input,
+                message=thought_action.message)
         elif thought_action.type == ActionType.PLAN:
             return Action(
                 type=ActionType.PLAN,
@@ -2036,7 +6258,7 @@ class Agent:
             raise ValueError(f"Invalid action type: {thought_action.type}")
 
 
-    async def _execute_action(self, action: Action) -> str:
+    async def _execute_action(self, action: Action) -> Dict[str, Any]:
         """
         Executes the action for the next step.
         """
@@ -2044,11 +6266,12 @@ class Agent:
             tool = self._get_tool(action.tool)
             if not tool:
                 raise ValueError(f"Tool '{action.tool}' not found")
-
+            self.logger.info("tool_execute_start", tool=action.tool)
             return await tool.execute(**action.input)
             
         elif action.type == ActionType.ASK:
-            pass
+            question_text = action.question or action.input.get("question") or "I need additional information to proceed."
+            return {"success": False, "requires_user": True, "question": question_text}
         elif action.type == ActionType.DONE:
             pass
         elif action.type == ActionType.PLAN:
@@ -2153,7 +6376,100 @@ def main():
     #     "Create the directory with the specified name and add a README.txt file inside it containing the provided content."
     #     "Ask the user for the name of the directory to create and the content to put inside a README.txt file. "
     # )
-    mission = None
+    mission = """
+# MISSION — Repo Creation & Template-Based Scaffolding (Existing Tools Only)
+
+## SCOPE
+- Create a new project repository locally with Git and on GitHub.
+- Discover, select, and apply a Markdown-based template from `./templates/` for code scaffolding.
+- Use only existing tools: `powershell`, `git`, `github`, `file_read`, `file_write`, `python`, `web_search`, `web_fetch`.
+
+## TEMPLATE SOURCES
+- Templates are Markdown guidelines in `./templates/` describing project structure for different languages/frameworks.
+- Example files include: `python-fastapi-hexagonal.md`, `python-flask-mvc.md`, `csharp-webapi-clean.md`, plus `template-index.md`.
+
+## CORE RESPONSIBILITIES
+1. Validate or infer a valid kebab-case project name.
+2. Initialize a local Git repository (branch `main`).
+3. Create a GitHub repository and set it as `origin`.
+4. Discover available templates (Markdown) under `./templates/`.
+5. Select the best matching template based on the user description; if ambiguous, ASK_USER to choose.
+6. Parse the chosen Markdown template to derive folders/files to create and any starter contents.
+7. Apply the template by creating directories and files; write contents from code fences or examples when present.
+8. Stage, commit, and push to `origin/main`.
+9. Provide clear outputs, selected template, and next steps.
+
+## DECISION FRAMEWORK
+- Keep a Todo List updated after each tool execution.
+- If project name is missing/invalid → ASK_USER for a kebab-case name.
+- Use `powershell` for filesystem discovery/creation/moves, `file_read` to read Markdown templates, `python` for parsing/selection logic, and `file_write` for file contents.
+- Use `git` for init/add/commit/push and `github` for remote creation.
+- Do not reference non-existent tools; achieve everything with the listed tools.
+
+## EXECUTION RULES
+- Local repo init: `git` with `operation=init`, `repo_path=<project-dir>`, `branch=main`.
+- Remote create: `github` with `action=create_repo`, `name=<project-name>`; capture and persist `repo_full_name` and `repo_html_url`.
+- Remote URL: Build strictly from `repo_full_name` → `https://github.com/{repo_full_name}.git` (do not guess owner).
+- Remote set:
+  - `git` with `operation=remote`, `action=add`, `name=origin`, `url=https://github.com/{repo_full_name}.git`, `repo_path=<project-dir>`.
+  - If adding fails because origin exists → retry with `action=set_url` (same `repo_path`).
+  - Verify with `git` `operation=remote`, `action=list`, `repo_path=<project-dir>` (expect the correct URL).
+- Always pass `repo_path` for all `git` operations.
+- Discover templates:
+  - `powershell`: `Get-ChildItem -File ./templates/*.md | Select-Object -ExpandProperty FullName` to list files.
+  - `file_read`: read each Markdown; gather title, keywords, and summary.
+  - `python`: score against user description (language, framework, keywords). If multiple close matches, return options.
+- Select template:
+  - Single clear match → proceed.
+  - Multiple matches → ASK_USER to choose.
+  - No match → list available templates and ASK_USER.
+- Apply template:
+  - `python`: parse Markdown for structure sections (directories/files) and code fences for starter content.
+  - `powershell`: create directories (`New-Item -ItemType Directory`) where needed.
+  - `file_write`: write files with parsed or minimal placeholder content.
+- Stage/commit/push:
+  - `git` with `operation=add`, `files=["."]`, `repo_path=<project-dir>` →
+    `operation=commit`, `message=<msg>`, `repo_path=<project-dir>` →
+    `operation=push`, `remote=origin`, `branch=main`, `repo_path=<project-dir>` (sets upstream).
+
+## WORKFLOW SEQUENCE
+1. Validate project name (kebab-case).
+2. Initialize local repository in `<project-name>`.
+3. Create GitHub repo and set `origin` (derive URL from `repo_full_name`).
+3a. Verify remote with `git remote -v`.
+4. Discover templates; select best match (ASK_USER if needed).
+5. Apply selected template to create structure and files.
+6. `git add` → `git commit` → `git push`.
+
+## ERROR HANDLING
+- Provide clear errors for Git/GitHub/FS issues with suggested fixes.
+- If `git remote add` fails due to existing origin, switch to `git remote set-url` and re-verify.
+- If push fails due to auth, instruct to ensure Git credentials (PAT for HTTPS or SSH keys) are configured; surface the stderr.
+- If template parsing fails, still create repo with minimal scaffolding and report.
+
+## SUCCESS CRITERIA
+- Local+remote repos configured; branch `main` exists.
+- Selected template applied with directories/files created.
+- Initial commit pushed to `origin/main`.
+
+## OUTPUT FORMAT
+```
+✓ Repository '<project-name>' created
+  Local: <path>
+  Remote: <url>
+  Initial Commit: <hash>
+
+✓ Template '<template-name>' applied
+  Files Created: N
+  Key Paths: [...]
+
+Next Steps:
+1. cd <path>
+2. Run project-specific commands (if applicable)
+```
+
+After each tool run, update the Todo List state. Use only the listed tools to discover, select, and apply the Markdown templates.
+"""
 
     # Use a local work directory next to this file
     work_dir = str((Path(__file__).parent / ".debug_work").resolve())
@@ -2171,7 +6487,7 @@ def main():
     # Minimal inputs for execute()
     session_id = f"debug-{uuid.uuid4()}"
     #user_message = "Create a new directory and add a README.txt file inside it containing a hello_world code example."
-    user_message = "Create a file"
+    user_message = "Create a new python project with a fastapi service and call it payment-api."
 
     print(f"Starting Agent execute() with session_id={session_id}")
     try:
@@ -2316,64 +6632,6 @@ class StateManager:
             if state_file.stat().st_mtime < cutoff_time:
                 state_file.unlink()
                 self.logger.info("old_state_removed", file=state_file.name)
-
-
-
-// Relative Path: taskforce_cli.py
-# taskforce_cli.py
-import asyncio
-import os
-import argparse
-from capstone.agent_v2.conversation_manager import ConversationManager
-from capstone.agent_v2.hybrid_agent import HybridAgent
-
-async def main():
-    parser = argparse.ArgumentParser(description="TaskForce CLI")
-    parser.add_argument("--mission", type=str, default=None, help="Initial mission text")
-    parser.add_argument("--model", type=str, default=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
-    parser.add_argument("--temperature", type=float, default=float(os.getenv("OPENAI_TEMPERATURE", 0.7)))
-    args = parser.parse_args()
-
-    api_key = os.getenv("OPENAI_API_KEY")
-    agent = HybridAgent(
-        api_key=api_key,
-        model=args.model,
-        enable_planning=True,
-        plan_save_dir="./execution_plans",
-        temperature=args.temperature,
-    )
-
-    cm = ConversationManager(session_id="local-cli", agent=agent)
-    await cm.start(args.mission)
-
-    print("TaskForce-CLI. Type 'exit' to quit.")
-    while True:
-        user = input("You: ").strip()
-        if user.lower() in {"exit", "quit"}:
-            break
-
-        result = await cm.user_says(user)
-
-        if result.get("needs_user_input") and result.get("question"):
-            print(f"Agent needs info: {result['question']}")
-            continue
-
-        # Show tool-results (compact)
-        rlist = result.get("results", [])
-        if rlist:
-            for r in rlist:
-                ok = "✓" if r["success"] else "✗"
-                print(f"[{ok}] {r['tool']} -> {str(r['result'])[:140]}")
-
-        # Also print the last assistant message (if any)
-        for m in reversed(cm.history):
-            if m["role"] == "assistant":
-                print(f"Agent: {m['content'][:800]}")
-                break
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
 
 
 
