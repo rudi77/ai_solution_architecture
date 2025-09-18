@@ -569,9 +569,13 @@ class Agent:
             f"AVAILABLE_CONTEXT (use to fill concrete tool parameters):\n{json.dumps(state_context, ensure_ascii=False)}\n\n"
             "Rules:\n"
             "- Prefer tools; ask_user only if info is missing.\n"
-            "- Use the last_observation data when it contains outputs from prior steps (e.g., github.create_repo returns repo_full_name/html_url).\n"
-            "- For git.remote, supply a full https URL, e.g., https://github.com/<owner>/<repo>.git derived from prior step outputs if available.\n"
-            "Return STRICT JSON only (no extra text) matching this schema:\n"
+            "- ALWAYS include repo_path pointing to the project directory for ALL git operations.\n"
+            "- When setting the remote, derive the URL strictly from github.create_repo -> repo_full_name: https://github.com/{owner}/{repo}.git.\n"
+            "  Never guess <owner>; if repo_full_name is unavailable, ask_user for the GitHub owner/org.\n"
+            "- If git remote add fails because origin exists, retry with action=set_url (same repo_path).\n"
+            "- After configuring the remote, verify with git remote -v (operation=remote, action=list, with repo_path).\n"
+            "- Push with upstream set: git push -u origin main (with repo_path).\n"
+            "Return STRICT JSON only (no extra text). Return EXACTLY ONE JSON object (no arrays, no multiple objects) matching this schema:\n"
             f"{json.dumps(schema_hint, ensure_ascii=False)}\n\n"
         )})
 
@@ -585,10 +589,74 @@ class Agent:
             tool_choice="auto",
         )
 
-        self.message_history.add_message(response.choices[0].message.content, "assistant")
+        raw_content = response.choices[0].message.content
+        self.message_history.add_message(raw_content, "assistant")
+
+        # Robust parsing: handle accidental multiple JSON objects
+        def _extract_json_objects(text: str) -> List[Dict[str, Any]]:
+            objects: List[Dict[str, Any]] = []
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return [parsed]
+                if isinstance(parsed, list):
+                    return [obj for obj in parsed if isinstance(obj, dict)]
+            except Exception:
+                pass
+
+            depth = 0
+            in_str = False
+            escape = False
+            start_idx: Optional[int] = None
+            for i, ch in enumerate(text):
+                if in_str:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                else:
+                    if ch == '"':
+                        in_str = True
+                        continue
+                    if ch == '{':
+                        if depth == 0:
+                            start_idx = i
+                        depth += 1
+                        continue
+                    if ch == '}':
+                        depth -= 1
+                        if depth == 0 and start_idx is not None:
+                            segment = text[start_idx:i+1]
+                            try:
+                                obj = json.loads(segment)
+                                if isinstance(obj, dict):
+                                    objects.append(obj)
+                            except Exception:
+                                pass
+                            start_idx = None
+                        continue
+            return objects
+
+        candidates = _extract_json_objects(raw_content or "")
+        chosen: Optional[Dict[str, Any]] = None
+        for obj in candidates:
+            try:
+                if int(obj.get("next_step_ref")) == int(next_step.position):
+                    chosen = obj
+                    break
+            except Exception:
+                continue
+        if not chosen and candidates:
+            chosen = candidates[0]
 
         self.logger.info("llm_call_thought_end", step=next_step.position)
-        return Thought.from_json(response.choices[0].message.content)
+        if chosen:
+            return Thought.from_json(chosen)
+        # Fallback to original content (may still raise, which is fine to surface)
+        return Thought.from_json(raw_content)
 
 
     async def _decide_next_action(self, thought: Thought, next_step: TodoItem) -> Action:
@@ -743,68 +811,98 @@ def main():
     #     "Ask the user for the name of the directory to create and the content to put inside a README.txt file. "
     # )
     mission = """
-# MISSION — Repo Creation & Basic Scaffolding (Existing Tools Only)
+# MISSION — Repo Creation & Template-Based Scaffolding (Existing Tools Only)
 
 ## SCOPE
-- Create a new project repository locally with Git and optionally on GitHub.
-- Scaffold a minimal project structure/files based on the user description.
+- Create a new project repository locally with Git and on GitHub.
+- Discover, select, and apply a Markdown-based template from `./templates/` for code scaffolding.
 - Use only existing tools: `powershell`, `git`, `github`, `file_read`, `file_write`, `python`, `web_search`, `web_fetch`.
+
+## TEMPLATE SOURCES
+- Templates are Markdown guidelines in `./templates/` describing project structure for different languages/frameworks.
+- Example files include: `python-fastapi-hexagonal.md`, `python-flask-mvc.md`, `csharp-webapi-clean.md`, plus `template-index.md`.
 
 ## CORE RESPONSIBILITIES
 1. Validate or infer a valid kebab-case project name.
-2. Create a local Git repository (branch `main`).
-3. Optionally create a GitHub repository and set it as `origin`.
-4. Create minimal project files/folders (README, .gitignore, src folder, etc.) per user’s description.
-5. Stage, commit, and optionally push.
-6. Provide clear outputs and next steps.
+2. Initialize a local Git repository (branch `main`).
+3. Create a GitHub repository and set it as `origin`.
+4. Discover available templates (Markdown) under `./templates/`.
+5. Select the best matching template based on the user description; if ambiguous, ASK_USER to choose.
+6. Parse the chosen Markdown template to derive folders/files to create and any starter contents.
+7. Apply the template by creating directories and files; write contents from code fences or examples when present.
+8. Stage, commit, and push to `origin/main`.
+9. Provide clear outputs, selected template, and next steps.
 
 ## DECISION FRAMEWORK
-- Always keep a Todo List; update it after every tool execution.
-- If project name is missing/invalid → ASK_USER for kebab-case name.
-- Prefer `powershell` for filesystem discovery/creation and `file_write` for file content.
-- Use `git` for VCS operations and `github` for remote creation.
-- Do not reference non-existent tools (no template discovery/selection/apply tools).
+- Keep a Todo List updated after each tool execution.
+- If project name is missing/invalid → ASK_USER for a kebab-case name.
+- Use `powershell` for filesystem discovery/creation/moves, `file_read` to read Markdown templates, `python` for parsing/selection logic, and `file_write` for file contents.
+- Use `git` for init/add/commit/push and `github` for remote creation.
+- Do not reference non-existent tools; achieve everything with the listed tools.
 
 ## EXECUTION RULES
 - Local repo init: `git` with `operation=init`, `repo_path=<project-dir>`, `branch=main`.
-- Remote create (optional): `github` with `action=create_repo`, `name=<project-name>`.
-- Remote set: `git` with `operation=remote`, `action=add|set_url`, `name=origin`, `url=https://github.com/<owner>/<repo>.git`.
-- Files/folders:
-  - Use `powershell` to `New-Item -ItemType Directory`, move/copy files, list templates on disk if needed.
-  - Use `file_write` to write content for `README.md`, `.gitignore`, and starter source files.
-- Stage/commit: `git` with `operation=add`, `files=["."]` then `operation=commit`, `message`.
-- Push (optional): `git` with `operation=push`, `remote=origin`, `branch=main`.
+- Remote create: `github` with `action=create_repo`, `name=<project-name>`; capture and persist `repo_full_name` and `repo_html_url`.
+- Remote URL: Build strictly from `repo_full_name` → `https://github.com/{repo_full_name}.git` (do not guess owner).
+- Remote set:
+  - `git` with `operation=remote`, `action=add`, `name=origin`, `url=https://github.com/{repo_full_name}.git`, `repo_path=<project-dir>`.
+  - If adding fails because origin exists → retry with `action=set_url` (same `repo_path`).
+  - Verify with `git` `operation=remote`, `action=list`, `repo_path=<project-dir>` (expect the correct URL).
+- Always pass `repo_path` for all `git` operations.
+- Discover templates:
+  - `powershell`: `Get-ChildItem -File ./templates/*.md | Select-Object -ExpandProperty FullName` to list files.
+  - `file_read`: read each Markdown; gather title, keywords, and summary.
+  - `python`: score against user description (language, framework, keywords). If multiple close matches, return options.
+- Select template:
+  - Single clear match → proceed.
+  - Multiple matches → ASK_USER to choose.
+  - No match → list available templates and ASK_USER.
+- Apply template:
+  - `python`: parse Markdown for structure sections (directories/files) and code fences for starter content.
+  - `powershell`: create directories (`New-Item -ItemType Directory`) where needed.
+  - `file_write`: write files with parsed or minimal placeholder content.
+- Stage/commit/push:
+  - `git` with `operation=add`, `files=["."]`, `repo_path=<project-dir>` →
+    `operation=commit`, `message=<msg>`, `repo_path=<project-dir>` →
+    `operation=push`, `remote=origin`, `branch=main`, `repo_path=<project-dir>` (sets upstream).
 
 ## WORKFLOW SEQUENCE
 1. Validate project name (kebab-case).
 2. Initialize local repository in `<project-name>`.
-3. Optionally create GitHub repo and set `origin`.
-4. Create minimal structure and files using `powershell` + `file_write`.
-5. `git add` → `git commit` → optionally `git push`.
+3. Create GitHub repo and set `origin` (derive URL from `repo_full_name`).
+3a. Verify remote with `git remote -v`.
+4. Discover templates; select best match (ASK_USER if needed).
+5. Apply selected template to create structure and files.
+6. `git add` → `git commit` → `git push`.
 
 ## ERROR HANDLING
-- Clear messages for Git/GitHub/FS errors with suggested next steps.
+- Provide clear errors for Git/GitHub/FS issues with suggested fixes.
+- If `git remote add` fails due to existing origin, switch to `git remote set-url` and re-verify.
+- If push fails due to auth, instruct to ensure Git credentials (PAT for HTTPS or SSH keys) are configured; surface the stderr.
+- If template parsing fails, still create repo with minimal scaffolding and report.
 
 ## SUCCESS CRITERIA
-- Local Git repo exists (branch `main`), optional GitHub remote configured.
-- Minimal project structure created and committed.
-- Optional push completed if remote set.
+- Local+remote repos configured; branch `main` exists.
+- Selected template applied with directories/files created.
+- Initial commit pushed to `origin/main`.
 
 ## OUTPUT FORMAT
 ```
 ✓ Repository '<project-name>' created
   Local: <path>
-  Remote: <url-or-none>
-  Initial Commit: <hash-or-n/a>
+  Remote: <url>
+  Initial Commit: <hash>
 
-✓ Scaffolding created (files listed)
+✓ Template '<template-name>' applied
+  Files Created: N
+  Key Paths: [...]
 
 Next Steps:
 1. cd <path>
 2. Run project-specific commands (if applicable)
 ```
 
-After each tool run, update the Todo List state. Prefer clarity and reliability. Use only the listed tools.
+After each tool run, update the Todo List state. Use only the listed tools to discover, select, and apply the Markdown templates.
 """
 
     # Use a local work directory next to this file

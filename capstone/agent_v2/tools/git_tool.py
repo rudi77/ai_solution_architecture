@@ -7,7 +7,10 @@ import os
 from pathlib import Path
 import subprocess
 from typing import Any, Optional, Dict, Tuple
+import time
 import urllib
+import urllib.request
+import urllib.error
 
 from capstone.agent_v2.tool import Tool
 import structlog
@@ -234,6 +237,8 @@ class GitHubTool(Tool):
                     return e.code, detail
                 except urllib.error.URLError as e:
                     return 0, f"URLError: {e.reason}"
+                except Exception as e:
+                    return -1, f"Exception: {type(e).__name__}: {e}"
             
             if action == "create_repo":
                 repo_name = kwargs.get("name")
@@ -245,7 +250,15 @@ class GitHubTool(Tool):
                     "private": bool(kwargs.get("private", False)),
                     "description": kwargs.get("description") or ""
                 }
-                status, text = request("POST", f"{api_base}/user/repos", body)
+                # Basic retry for transient 5xx
+                attempts = 0
+                status, text = 0, ""
+                while attempts < 2:
+                    attempts += 1
+                    status, text = request("POST", f"{api_base}/user/repos", body)
+                    if status not in (500, 502, 503, 504, -1, 0):
+                        break
+                    time.sleep(1)
                 ok = status in (200, 201)
                 payload = {}
                 try:
