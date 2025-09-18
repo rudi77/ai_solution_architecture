@@ -63,6 +63,21 @@ class GitTool(Tool):
         logger = structlog.get_logger().bind(tool=self.name, operation=operation)
         try:
             repo_path = Path(repo_path)
+
+            # Ensure a valid working directory is used across operations
+            if operation == "init":
+                # For init, create the directory if it doesn't exist
+                try:
+                    if not repo_path.exists():
+                        repo_path.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    logger.error("git_execute_exception", error=str(e))
+                    return {"success": False, "error": f"Failed to prepare repo directory: {e}"}
+            elif operation != "clone":
+                # For all other operations that use cwd=repo_path, ensure it exists
+                if not repo_path.exists():
+                    return {"success": False, "error": f"Repository path does not exist: {repo_path}"}
+
             logger.info("git_execute_start", cwd=str(repo_path), args=kwargs)
             
             # Build command based on operation
