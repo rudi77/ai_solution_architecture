@@ -299,8 +299,8 @@ class Agent:
         # get the current state of the agent
         self.state = await self.state_manager.load_state(session_id)
 
-        # if we were writing on an answer, consume it right now
-        if self.state.get("preding_question"):
+        # if we were are awaiting an answer, consume it right now
+        if self.state.get("pending_question"):
             answer = user_message.strip()
             pending_question = self.state.pop("pending_question")
             # store the answer by key for later parameter filling
@@ -322,6 +322,24 @@ class Agent:
 
         # get the current todolist
         todolist = await self._create_or_get_todolist(session_id, self.state)
+
+        # if the todolist has open questions, we need to ask the user for the answers
+        if todolist.open_questions:
+            # pick the first unanswered question
+            # Note: We use the question text itself as the key in state["answers"].
+            # - The membership check above relies on dict keys being the exact question strings.
+            # - We later store replies as answers[question_text] = user_answer.
+            # Therefore, set answer_key = unanswered_question to keep lookup and storage aligned
+            # without introducing separate IDs (assuming question strings are stable/unique).
+            unanswered_question = next((q for q in todolist.open_questions if q not in self.state.get("answers", {})), None)
+            if unanswered_question:
+                self.state["pending_question"] = {
+                    "answer_key": unanswered_question,
+                    "question": unanswered_question
+                }
+                await self.state_manager.save_state(session_id, self.state)
+                yield AgentEvent(type=AgentEventType.STATE_UPDATED, data={"pending_question": self.state["pending_question"]})
+                return            
 
         # now that we have the todolist, we can execute the todolist in a ReAct loop
         for next_step in todolist.items:
