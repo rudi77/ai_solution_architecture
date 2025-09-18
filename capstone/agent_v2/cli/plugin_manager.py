@@ -2,12 +2,18 @@
 Plugin management system for the CLI.
 """
 
-import pkg_resources
 from abc import ABC, abstractmethod
 from typing import Dict, List
+import sys
 
 import typer
 from rich.console import Console
+
+# Use modern importlib.metadata instead of deprecated pkg_resources
+if sys.version_info >= (3, 8):
+    from importlib import metadata
+else:
+    import importlib_metadata as metadata
 
 console = Console()
 
@@ -43,7 +49,18 @@ class PluginManager:
     def discover_plugins(self):
         """Auto-discover plugins from installed packages."""
         try:
-            for entry_point in pkg_resources.iter_entry_points('agent_cli_plugins'):
+            # Use modern importlib.metadata instead of pkg_resources
+            entry_points = metadata.entry_points()
+
+            # Get entry points for our plugin group
+            if hasattr(entry_points, 'select'):
+                # Python 3.10+ API
+                plugin_entry_points = entry_points.select(group='agent_cli_plugins')
+            else:
+                # Older API
+                plugin_entry_points = entry_points.get('agent_cli_plugins', [])
+
+            for entry_point in plugin_entry_points:
                 try:
                     plugin_class = entry_point.load()
                     plugin = plugin_class()

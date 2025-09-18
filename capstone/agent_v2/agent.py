@@ -8,6 +8,7 @@ import sys
 from typing import Any, AsyncIterator, Dict, List, Optional
 from attr import asdict, dataclass
 import litellm
+import structlog
 
 from capstone.agent_v2.planning.todolist import TaskStatus, TodoItem, TodoList, TodoListManager
 from capstone.agent_v2.statemanager import StateManager
@@ -296,6 +297,7 @@ class Agent:
         self.state_manager = state_manager
         self.state = None
         self.message_history = MessageHistory(build_system_prompt(system_prompt, mission, self.tools_description))
+        self.logger = structlog.get_logger().bind(agent=name)
 
 
     async def execute(self, user_message: str, session_id: str) -> AsyncIterator[AgentEvent]:
@@ -313,10 +315,12 @@ class Agent:
             An async iterator of AgentEvent.
         """
         # --- 0) Load state -------------------------------------------------------
+        self.logger.info("execute_start", session_id=session_id, has_mission=bool(self.mission))
         self.state = await self.state_manager.load_state(session_id)
 
         if self.mission is None:
             self.mission = user_message
+            self.logger.info("mission_set_from_user", session_id=session_id, mission_preview=self.mission[:120])
 
         # If we were awaiting an answer, consume it immediately
         if self.state.get("pending_question"):
@@ -327,6 +331,7 @@ class Agent:
             answers[pending_question["answer_key"]] = answer
             await self.state_manager.save_state(session_id, self.state)
             yield AgentEvent(type=AgentEventType.STATE_UPDATED, data={"answers": answers})
+            self.logger.info("answer_captured", session_id=session_id, answer_key=pending_question["answer_key"])
 
             # Nach einer beantworteten Frage: user_message nicht als neues inhaltliches Prompt verwenden
             # (wir bleiben im Clarification-Flow). Kein return hier: wir laufen weiter und prüfen,
@@ -339,6 +344,7 @@ class Agent:
         self.state["mission"] = self.mission
         answers = self.state.setdefault("answers", {})
         await self.state_manager.save_state(session_id, self.state)
+        self.logger.info("state_saved_post_user", session_id=session_id)
 
         # --- 2) Pre-Clarification Gate (nur wenn noch kein finaler Plan existiert) ---
         todolist = None
@@ -351,6 +357,7 @@ class Agent:
                 )
                 self.state["clar_questions"] = clar_qs or []
                 await self.state_manager.save_state(session_id, self.state)
+                self.logger.info("clar_questions_extracted", session_id=session_id, count=len(self.state["clar_questions"]))
 
             # 2.b) Unbeantwortete Frage suchen (per stable key)
             unanswered = next(
@@ -365,6 +372,7 @@ class Agent:
                 }
                 await self.state_manager.save_state(session_id, self.state)
                 yield AgentEvent(type=AgentEventType.ASK_USER, data={"question": unanswered["question"]})
+                self.logger.info("ask_user", session_id=session_id, question_key=unanswered["key"])
                 return
 
             # 2.c) Alle Fragen beantwortet -> finalen Plan erstellen (No-ASK mode)
@@ -373,6 +381,7 @@ class Agent:
                 tools_desc=self.tools_description,
                 answers=answers
             )
+            self.logger.info("todolist_created", session_id=session_id, items=len(todolist.items))
 
             # 2.d) Harte Guards: keine open_questions, keine ASK_USER-Platzhalter
             if getattr(todolist, "open_questions", None):
@@ -388,6 +397,7 @@ class Agent:
             self.state["todolist_id"] = todolist.todolist_id
             await self.state_manager.save_state(session_id, self.state)
             self.todo_list_manager.update_todolist(todolist)  # persist current version if needed
+            self.logger.info("todolist_persisted", session_id=session_id, todolist_id=todolist.todolist_id)
 
         else:
             # Es existiert bereits ein Plan (Resume-Fall)
@@ -401,17 +411,21 @@ class Agent:
         for next_step in todolist.items:
             # Hydratation: Parameter ggf. aus answers einsetzen
             self._hydrate_parameters_from_answers(next_step)
+            self.logger.info("step_begin", session_id=session_id, position=next_step.position, tool=next_step.tool)
 
             # 1) Thought
             thought = await self._generate_thought(next_step)
             yield AgentEvent(type=AgentEventType.THOUGHT, data={"for_step": next_step.position, "thought": asdict(thought)})
+            self.logger.info("thought_generated", session_id=session_id, position=next_step.position, action_type=thought.action.type.value)
 
             # 2) Action
             action = await self._decide_next_action(thought, next_step)
             yield AgentEvent(type=AgentEventType.ACTION, data={"for_step": next_step.position, "action": action.type.value})
+            self.logger.info("action_decided", session_id=session_id, position=next_step.position, action=action.type.value, tool=action.tool)
 
             # 3) Execute
             observation = await self._execute_action(action)
+            self.logger.info("action_executed", session_id=session_id, position=next_step.position, success=bool(observation.get("success")))
 
             # 4) State aktualisieren
             self.state["last_observation"] = observation
@@ -419,7 +433,8 @@ class Agent:
 
             # 5) Persist
             await self.state_manager.save_state(session_id, self.state)
-            self.todo_list_manager.update_todolist(todolist)
+            await self.todo_list_manager.update_todolist(todolist)
+            self.logger.info("state_and_plan_updated", session_id=session_id, position=next_step.position)
 
             # Optional: Early stop bei Fehler + Re-Plan-Hook
             # if not observation.get("success") and self.allow_replan_on_failure:
@@ -427,6 +442,7 @@ class Agent:
 
         # --- 4) Abschluss ---------------------------------------------------------
         yield AgentEvent(type=AgentEventType.COMPLETE, data={"todolist": todolist.to_markdown()})
+        self.logger.info("execute_complete", session_id=session_id)
         return
 
 
@@ -539,6 +555,7 @@ class Agent:
             f"{json.dumps(schema_hint, ensure_ascii=False)}\n\n"
         )})
 
+        self.logger.info("llm_call_thought_start", step=next_step.position)
         response = await litellm.acompletion(
             model="gpt-4.1-mini",
             messages=messages,
@@ -550,6 +567,7 @@ class Agent:
 
         self.message_history.add_message(response.choices[0].message.content, "assistant")
 
+        self.logger.info("llm_call_thought_end", step=next_step.position)
         return Thought.from_json(response.choices[0].message.content)
 
 
@@ -595,7 +613,7 @@ class Agent:
             tool = self._get_tool(action.tool)
             if not tool:
                 raise ValueError(f"Tool '{action.tool}' not found")
-
+            self.logger.info("tool_execute_start", tool=action.tool)
             return await tool.execute(**action.input)
             
         elif action.type == ActionType.ASK:
@@ -722,7 +740,7 @@ def main():
     # Minimal inputs for execute()
     session_id = f"debug-{uuid.uuid4()}"
     #user_message = "Create a new directory and add a README.txt file inside it containing a hello_world code example."
-    user_message = "Create a file"
+    user_message = "Create a new git repo lokal and push it to github. The repo should be public and it should contain a README.txt."
 
     print(f"Starting Agent execute() with session_id={session_id}")
     try:
