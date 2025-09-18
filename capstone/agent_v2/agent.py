@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import sys
 from typing import Any, AsyncIterator, Dict, List, Optional
-from attr import dataclass
+from attr import asdict, dataclass
 import litellm
 
 from capstone.agent_v2.planning.todolist import TaskStatus, TodoItem, TodoList, TodoListManager
@@ -318,8 +318,6 @@ class Agent:
         # save the state
         await self.state_manager.save_state(session_id, self.state)
 
-        # Before a plan is created, we shall check if there are some open questions that need to be answered
-
         # get the current todolist
         todolist = await self._create_or_get_todolist(session_id, self.state)
 
@@ -343,10 +341,17 @@ class Agent:
 
         # now that we have the todolist, we can execute the todolist in a ReAct loop
         for next_step in todolist.items:
+            # Fill ASK_USER placeholders from state["answers"]
+            self._hydrate_parameters_from_answers(next_step)
             # 1. generate a thought
             thought = await self._generate_thought(next_step)
-            # 2. decide the next action
+            yield AgentEvent(type=AgentEventType.THOUGHT, data={"for_step": next_step.position, "thought": asdict(thought)})
+            
+
+            # 2. decide the next action            
             action = await self._decide_next_action(thought, next_step)
+            yield AgentEvent(type=AgentEventType.ACTION, data={"for_step": next_step.position, "action": action.type.value})
+
             # 3. execute the action
             observation = await self._execute_action(action)
             # 4. update the state with the observation
@@ -407,6 +412,20 @@ class Agent:
         Gets the schema of the tools available which can be used as a function calling schema for the LLM.
         """
         return [tool.function_tool_schema for tool in self.tools]
+
+
+    def _hydrate_parameters_from_answers(self, step: TodoItem) -> None:
+        """
+        Hydrates the parameters of the step from the answers in the state.
+
+        Args:
+            step: The step to hydrate the parameters from the answers.
+        """
+        answers = self.state.get("answers", {})
+        for k, v in list(step.parameters.items()):
+            if isinstance(v, str) and v == "ASK_USER":
+                if k in answers:
+                    step.parameters[k] = answers[k]
 
 
     async def _generate_thought(self, next_step: TodoItem) -> Thought:
