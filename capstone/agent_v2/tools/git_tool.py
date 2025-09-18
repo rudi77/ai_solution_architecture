@@ -10,6 +10,7 @@ from typing import Any, Optional, Dict, Tuple
 import urllib
 
 from capstone.agent_v2.tool import Tool
+import structlog
 
 
 class GitTool(Tool):
@@ -59,8 +60,10 @@ class GitTool(Tool):
         }
     
     async def execute(self, operation: str, repo_path: str = ".", **kwargs) -> Dict[str, Any]:
+        logger = structlog.get_logger().bind(tool=self.name, operation=operation)
         try:
             repo_path = Path(repo_path)
+            logger.info("git_execute_start", cwd=str(repo_path), args=kwargs)
             
             # Build command based on operation
             if operation == "init":
@@ -100,16 +103,23 @@ class GitTool(Tool):
                 timeout=30
             )
             
-            return {
+            payload = {
                 "success": result.returncode == 0,
                 "output": result.stdout,
                 "error": result.stderr if result.returncode != 0 else None,
                 "command": " ".join(cmd)
             }
+            if payload["success"]:
+                logger.info("git_execute_success", command=payload["command"])            
+            else:
+                logger.error("git_execute_failed", command=payload["command"], error=payload["error"])
+            return payload
             
         except subprocess.TimeoutExpired:
+            logger.error("git_execute_timeout")
             return {"success": False, "error": "Command timed out"}
         except Exception as e:
+            logger.error("git_execute_exception", error=str(e))
             return {"success": False, "error": str(e)}
 
 
@@ -155,9 +165,11 @@ class GitHubTool(Tool):
         }
     
     async def execute(self, action: str, **kwargs) -> Dict[str, Any]:
+        logger = structlog.get_logger().bind(tool=self.name, action=action)
         try:
             token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
             if not token:
+                logger.error("github_missing_token")
                 return {"success": False, "error": "GITHUB_TOKEN environment variable is not set"}
             
             api_base = "https://api.github.com"
@@ -189,6 +201,7 @@ class GitHubTool(Tool):
             if action == "create_repo":
                 repo_name = kwargs.get("name")
                 if not repo_name:
+                    logger.error("github_missing_repo_name")
                     return {"success": False, "error": "Repository name required"}
                 body = {
                     "name": repo_name,
@@ -213,7 +226,7 @@ class GitHubTool(Tool):
                         error_msg = base_msg or "Authentication/authorization failed. Check GITHUB_TOKEN scopes."
                     else:
                         error_msg = base_msg or text or f"HTTP {status}"
-                return {
+                result = {
                     "success": ok,
                     "repo_name": repo_name,
                     "response_status": status,
@@ -221,6 +234,11 @@ class GitHubTool(Tool):
                     "repo_html_url": payload.get("html_url") if isinstance(payload, dict) else None,
                     "error": error_msg,
                 }
+                if ok:
+                    logger.info("github_create_repo_success", full_name=result["repo_full_name"])
+                else:
+                    logger.error("github_create_repo_failed", status=status, error=error_msg)
+                return result
             
             elif action == "list_repos":
                 status, text = request("GET", f"{api_base}/user/repos?per_page=20")
@@ -231,25 +249,36 @@ class GitHubTool(Tool):
                     repos = [item.get("full_name") for item in data if isinstance(item, dict)]
                 except Exception:
                     repos = []
-                return {
+                result = {
                     "success": ok,
                     "repos": repos,
                     "response_status": status,
                     "error": None if ok else text
                 }
+                if ok:
+                    logger.info("github_list_repos_success", count=len(repos))
+                else:
+                    logger.error("github_list_repos_failed", status=status)
+                return result
             
             elif action == "delete_repo":
                 full_name = kwargs.get("name")
                 if not full_name or "/" not in full_name:
+                    logger.error("github_invalid_repo_full_name")
                     return {"success": False, "error": "Repository name must be in 'owner/repo' format"}
                 status, text = request("DELETE", f"{api_base}/repos/{full_name}")
                 ok = status in (200, 202, 204)
-                return {
+                result = {
                     "success": ok,
                     "repo_name": full_name,
                     "response_status": status,
                     "error": None if ok else text
                 }
+                if ok:
+                    logger.info("github_delete_repo_success", repo=full_name)
+                else:
+                    logger.error("github_delete_repo_failed", status=status, error=text)
+                return result
             
             else:
                 return {"success": False, "error": f"Unknown action: {action}"}
@@ -258,8 +287,11 @@ class GitHubTool(Tool):
                 detail = e.read().decode("utf-8")
             except Exception:
                 detail = str(e)
+            logger.error("github_http_error", status=getattr(e, 'code', None), detail=detail)
             return {"success": False, "error": f"HTTPError {e.code}: {detail}"}
         except urllib.error.URLError as e:
+            logger.error("github_url_error", reason=getattr(e, 'reason', None))
             return {"success": False, "error": f"URLError: {e.reason}"}
         except Exception as e:
+            logger.error("github_execute_exception", error=str(e))
             return {"success": False, "error": str(e)}

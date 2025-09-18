@@ -29,9 +29,12 @@ dev = [
     "pytest-mock>=3.10.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["cli*", "planning*"]
+
 [project.scripts]
-agent = "capstone.agent_v2.cli.main:cli_main"
-agent-dev = "capstone.agent_v2.cli.main:dev_main"
+agent = "cli.main:cli_main"
+agent-dev = "cli.main:dev_main"
 
 [project.entry-points."agent_cli_plugins"]
 # Example plugin entry points (to be added by plugin packages)

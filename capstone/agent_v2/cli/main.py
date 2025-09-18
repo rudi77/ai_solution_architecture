@@ -7,12 +7,24 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional
+import logging
 
 import typer
 from rich.console import Console
 from rich.traceback import install
+import structlog
+
+# Fix Windows Unicode support
+if os.name == 'nt':  # Windows
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+
+    # Also set environment variables for proper Unicode handling
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 from .commands.run import app as run_app
+from .commands.chat import app as chat_app
 from .commands.missions import app as missions_app
 from .commands.tools import app as tools_app
 from .commands.providers import app as providers_app
@@ -46,6 +58,24 @@ dev_cli = typer.Typer(
     rich_markup_mode="rich",
 )
 
+
+def setup_logging(debug: bool = False) -> None:
+    """Configure structlog for console or JSON output."""
+    level = logging.DEBUG if debug or os.getenv("AGENT_DEBUG") else logging.INFO
+    logging.basicConfig(level=level, format="%(message)s")
+
+    structlog.configure(
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.add_log_level,
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.dev.ConsoleRenderer() if (debug or os.getenv("AGENT_DEBUG")) else structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        cache_logger_on_first_use=True,
+    )
+
 def initialize_cli():
     """Initialize CLI with plugins and settings."""
     # Load settings
@@ -58,6 +88,7 @@ def initialize_cli():
 
     # Add core command groups
     app.add_typer(run_app, name="run", help="Execute missions and tasks")
+    app.add_typer(chat_app, name="chat", help="Interactive chat with the agent")
     app.add_typer(missions_app, name="missions", help="Manage mission templates")
     app.add_typer(tools_app, name="tools", help="Manage tools and capabilities")
     app.add_typer(providers_app, name="providers", help="Manage LLM providers")
@@ -67,6 +98,18 @@ def initialize_cli():
 
     # Add dev commands to dev CLI
     dev_cli.add_typer(dev_app, name="", help="Developer tools")
+
+@app.command("ask", hidden=True)
+def quick_ask(message: str = typer.Argument(help="Message to send to the agent")):
+    """Quick way to ask the agent something directly."""
+    import asyncio
+    from .commands.chat import _quick_chat
+    from pathlib import Path
+    import uuid
+
+    session_id = f"ask-{uuid.uuid4()}"
+    work_dir = Path.cwd() / ".agent_temp"
+    asyncio.run(_quick_chat(message, work_dir, session_id))
 
 @app.callback()
 def main_callback(
@@ -87,6 +130,8 @@ def main_callback(
     if verbose:
         console.print("[dim]Verbose mode enabled[/dim]")
         ctx.meta["verbose"] = True
+    # Ensure logging is configured as early as possible
+    setup_logging(debug=verbose)
 
 @dev_cli.callback()
 def dev_callback(
@@ -97,6 +142,7 @@ def dev_callback(
     if verbose:
         console.print("[dim]Verbose mode enabled[/dim]")
         ctx.meta["verbose"] = True
+    setup_logging(debug=verbose)
 
 def cli_main():
     """Main CLI entry point."""
