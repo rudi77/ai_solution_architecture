@@ -37,6 +37,7 @@ class PythonTool(Tool):
                 "any": any, "all": all, "isinstance": isinstance,
                 "open": open,  # Use with caution
                 "__import__": __import__,
+                "locals": locals,
             },
             "context": context or {},
         }
