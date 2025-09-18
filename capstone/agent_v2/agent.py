@@ -390,6 +390,7 @@ class Agent:
                 answers=answers
             )
             self.logger.info("todolist_created", session_id=session_id, items=len(todolist.items))
+            yield AgentEvent(type=AgentEventType.STATE_UPDATED, data={"todolist": todolist.to_markdown()})
 
             # 2.d) Harte Guards: keine open_questions, keine ASK_USER-Platzhalter
             if getattr(todolist, "open_questions", None):
@@ -413,7 +414,7 @@ class Agent:
             if hasattr(self.todo_list_manager, "load_todolist_by_id"):
                 todolist = await self.todo_list_manager.load_todolist_by_id(self.state["todolist_id"])
             else:
-                todolist = await self._create_or_get_todolist(session_id, self.state)
+                todolist = await self._create_or_get_todolist(session_id, self.state)            
 
         # --- 3) ReAct Loop über die finale TodoList ------------------------------
         for next_step in todolist.items:
@@ -835,49 +836,25 @@ def main():
     #     "Ask the user for the name of the directory to create and the content to put inside a README.txt file. "
     # )
     mission = r"""
-# MISSION — Einfache CSV-Analyse (ohne zusätzliche Abhängigkeiten)
+# MISSION — CSV nach Markdown (einfach)
 
 ## ZIEL
-- Analysiere die CSV-Datei unter `"C:\Users\rudi\source\ai_solution_architecture\assignments\assignment3\data\heart.csv"` und erstelle einen kompakten Bericht.
-- Verwende ausschließlich vorhandene Tools: `python`, `file_read`, `file_write`.
-- Keine externen Bibliotheken (kein pandas); nutze das Python-Standardmodul `csv` und Grundfunktionen.
+- Lies die CSV-Datei `assignments/assignment3/data/heart.csv` ein und erzeuge daraus eine Markdown-Tabelle.
+- Speichere das Ergebnis unter `capstone/documents/report.md`.
 
 ## AUFGABEN
-1. Lade die Datei und erkenne Robustheit:
-   - Erkenne Trennzeichen (`,`, `;`, `\t`) heuristisch aus den ersten Zeilen.
-   - Lies Header; wenn keiner vorhanden, generiere `col_1..N`.
-   - Behandle fehlende Werte (leere Strings, `NA`, `N/A`, `null`).
-2. Erstelle Spalten-Profiling:
-   - Datentyp-Heuristik pro Spalte: `numeric` (float/int), `date` (ISO/ggf. `YYYY-MM-DD`), sonst `categorical/text`.
-   - Zähle: `rows_total`, `non_null`, `nulls`, `unique`.
-   - Für numerische Spalten: `min`, `max`, `mean`, `median`, `std`, `p25`, `p75`.
-   - Für kategorische Spalten: Top-10 Häufigkeiten (Wert, Anzahl, Anteil).
-3. Beispiele:
-   - Zeige 5 Beispielzeilen (als Markdown-Tabelle, gekürzt auf 120 Zeichen pro Zelle).
-4. Schreibe Ergebnisse:
-   - Erzeuge einen Markdown-Bericht unter `$WORK_DIR/analysis/heart_report.md`.
-   - Lege zusätzlich eine kompakte JSON-Zusammenfassung unter `$WORK_DIR/analysis/heart_summary.json` ab.
-
-## AUSGABEFORMAT (Markdown-Bericht)
-- Titel, Dateipfad, erkannter Delimiter, Anzahl Zeilen/Spalten
-- Tabelle „Spaltenprofil“ mit: `name`, `inferred_type`, `non_null`, `nulls`, `unique`, `min`, `p25`, `median`, `p75`, `max`, `example_values`
-- Für kategorische Spalten eine Sektion mit Top-10 Häufigkeiten
-- Eine kleine Stichprobe (5 Zeilen)
+1. CSV mit der Python-Standardbibliothek `csv` einlesen (optional: Delimiter per Sniffer erkennen).
+2. Erste Zeile als Header verwenden; falls kein Header vorhanden ist, Spaltennamen `col_1..N` generieren.
+3. Alle Zeilen als einfache Markdown-Tabelle ausgeben (Header + Trennzeile + Datenzeilen).
+4. Markdown-Datei nach `capstone/documents/report.md` schreiben.
 
 ## REGELN
-- Nutze ausschließlich die vorhandenen Tools:
-  - `python` für die Berechnung (mit `csv`/Standardlib, keine externen Pakete)
-  - `file_read` optional für Preview, `file_write` für die Ergebnisse
-- Pfade relativ zur aktuellen Repository-Root behandeln; `$WORK_DIR` ist das vom CLI übergebene Arbeitsverzeichnis.
-- Antworte kurz und strukturiert; keine langen Erklärungen, nur Ergebnisdateien erzeugen.
+- Nur vorhandene Tools verwenden: `python`, `file_read`, `file_write`.
+- Keine externen Bibliotheken (kein pandas).
+- Kurze, deterministische Ausführung ohne zusätzliche Analysen/Statistiken.
 
 ## ERFOLGSKRITERIEN
-- `$WORK_DIR/analysis/heart_report.md` existiert und enthält die geforderten Sektionen.
-- `$WORK_DIR/analysis/heart_summary.json` enthält Kennzahlen je Spalte.
-- Keine externen Abhängigkeiten wurden genutzt.
-```
-
-After each tool run, update the Todo List state. Use only the listed tools to discover, select, and apply the Markdown templates.
+- `capstone/documents/report.md` existiert und enthält eine Markdown-Tabelle mit Header und mindestens einer Datenzeile.
 """
 
     # Use a local work directory next to this file
@@ -896,7 +873,7 @@ After each tool run, update the Todo List state. Use only the listed tools to di
     # Minimal inputs for execute()
     session_id = f"debug-{uuid.uuid4()}"
     #user_message = "Create a new directory and add a README.txt file inside it containing a hello_world code example."
-    user_message = "Create a new python project with a fastapi service and call it payment-api."
+    user_message = "Führe die Mission aus"
 
     print(f"Starting Agent execute() with session_id={session_id}")
     try:

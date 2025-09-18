@@ -1,0 +1,125 @@
+@startuml
+title TaskForce – Component Diagram (Components & Interfaces)
+
+skinparam componentStyle rectangle
+skinparam rectangle {
+  RoundCorner 12
+}
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment left
+skinparam ArrowColor #777777
+skinparam component {
+  BackgroundColor<<core>> #ECF5FF
+  BackgroundColor<<tool>> #EFFAF0
+  BackgroundColor<<ext>>  #FFF7E6
+  BackgroundColor<<ui>>   #F4F4F4
+}
+
+' ==== UI / CLI ====
+package "CLI / UX" <<ui>> {
+  [TaskForce CLI] as CLI
+  [Event Stream Renderer] as Renderer
+}
+
+' ==== Core Agent ====
+package "Agent Core" <<core>> {
+  [Agent Orchestrator] as Orchestrator <<core>>
+  [TodoList Manager] as TodoListMgr <<core>>
+  [State Manager] as StateMgr <<core>>
+  [Tool Registry] as ToolRegistry <<core>>
+}
+
+' ==== LLM / Reasoning ====
+package "Reasoning / LLM" <<ext>> {
+  [LLM Client] as LLM <<ext>>
+}
+
+' ==== Tools (abstract) ====
+package "Tool System" {
+  interface "Tool API" as ITool
+  [Tool Adapter Base] as ToolBase <<tool>>
+  ToolBase -u-|> ITool
+}
+
+' ==== Concrete Tools ====
+package "Developer Tools" <<tool>> {
+  [FileReadTool] as FileRead <<tool>>
+  [FileWriteTool] as FileWrite <<tool>>
+  [GitTool (local)] as GitLocal <<tool>>
+  [GitHubTool (REST)] as GitHubAPI <<tool>>
+  [PythonTool] as PyTool <<tool>>
+  [PowerShellTool] as PsTool <<tool>>
+  [WebSearchTool] as WebSearch <<tool>>
+  [WebFetchTool] as WebFetch <<tool>>
+}
+
+FileRead -u-|> ITool
+FileWrite -u-|> ITool
+GitLocal  -u-|> ITool
+GitHubAPI -u-|> ITool
+PyTool    -u-|> ITool
+PsTool    -u-|> ITool
+WebSearch -u-|> ITool
+WebFetch  -u-|> ITool
+
+' ==== External Systems ====
+package "External Systems" <<ext>> {
+  [Filesystem] as FS <<ext>>
+  [Local Git] as GitCLI <<ext>>
+  [GitHub REST API] as GH <<ext>>
+  [Python Runtime (sandboxed)] as PyRT <<ext>>
+  [Shell / PowerShell] as Shell <<ext>>
+  [Web / Internet] as Web <<ext>>
+}
+
+' ==== Relationships: UI -> Core ====
+CLI --> Orchestrator : start mission / provide answers
+Renderer <-down- Orchestrator : event stream (THOUGHT, ACTION, TOOL_RESULT, ...)
+
+' ==== Core internals ====
+Orchestrator --> TodoListMgr : create/validate TodoList\n(Clarification → Plan)
+Orchestrator --> StateMgr : load/save session, answers, history
+Orchestrator --> ToolRegistry : lookup tool + schema
+Orchestrator --> LLM : Thought → Action selection\n(ReAct loop)
+
+' ==== Tools usage ====
+Orchestrator --> ITool : execute(toolName, params)\n(typed, schema-validated)
+ToolRegistry --> ITool : register/resolve()
+
+' ==== Tool ↔ External ====
+FileRead --> FS
+FileWrite --> FS
+
+GitLocal --> GitCLI
+GitHubAPI --> GH
+
+PyTool --> PyRT
+PsTool  --> Shell
+
+WebSearch --> Web
+WebFetch  --> Web
+
+' ==== State contents (note) ====
+note right of StateMgr
+  Persists:
+  - session_id, todolist_id
+  - answers (stable keys: tool.parameter)
+  - pending_question, last_observation
+  - message_history
+end note
+
+' ==== Determinism / Flow (notes) ====
+note bottom of TodoListMgr
+  Phase 1: Clarification Mining
+  Phase 2: Final Plan (no ASK_USER)
+  Hard-fail on ambiguity
+end note
+
+note bottom of Orchestrator
+  ReAct per step:
+  Thought → Action → Observation
+  Emits typed events
+end note
+
+@enduml
