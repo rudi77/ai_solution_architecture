@@ -78,11 +78,44 @@ from typing import Dict, List, Any, Optional
             # Execute user code
             exec(code, safe_namespace)
             
-            # Extract result
-            result_value = safe_namespace.get('result', None)
-            
+            # Extract result and sanitize outputs to ensure they are pickle/JSON safe
+            def _sanitize(value, depth: int = 0):
+                if depth > 4:
+                    return repr(value)
+                # Simple primitives
+                if value is None or isinstance(value, (bool, int, float, str)):
+                    return value
+                # Bytes → decode to utf-8 (fallback to repr)
+                if isinstance(value, (bytes, bytearray)):
+                    try:
+                        return bytes(value).decode('utf-8', errors='replace')
+                    except Exception:
+                        return repr(value)
+                # Paths → str
+                if isinstance(value, Path):
+                    return str(value)
+                # Collections
+                if isinstance(value, (list, tuple, set)):
+                    return [_sanitize(v, depth + 1) for v in value]
+                if isinstance(value, dict):
+                    return {
+                        str(_sanitize(k, depth + 1)): _sanitize(v, depth + 1)
+                        for k, v in value.items()
+                    }
+                # Try to leave as-is only if both JSON and pickle accept it; otherwise repr
+                try:
+                    import json as _json
+                    import pickle as _pickle
+                    _json.dumps(value)
+                    _pickle.dumps(value)
+                    return value
+                except Exception:
+                    return repr(value)
+
+            result_value = _sanitize(safe_namespace.get('result', None))
+
             # Get all user-defined variables
-            user_vars = {
+            raw_user_vars = {
                 k: v for k, v in safe_namespace.items()
                 if not k.startswith('_') 
                 and k not in ['os', 'sys', 'json', 're', 'pathlib', 'shutil',
@@ -90,12 +123,13 @@ from typing import Dict, List, Any, Optional
                              'base64', 'hashlib', 'tempfile', 'csv', 'Path',
                              'timedelta', 'Dict', 'List', 'Any', 'Optional', 'context']
             }
-            
+            user_vars = {k: _sanitize(v) for k, v in raw_user_vars.items()}
+
             return {
                 "success": True,
                 "result": result_value,
                 "variables": user_vars,
-                "context_updated": safe_namespace.get('context', {})
+                "context_updated": _sanitize(safe_namespace.get('context', {}))
             }
             
         except Exception as e:
