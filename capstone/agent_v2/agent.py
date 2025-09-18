@@ -365,6 +365,9 @@ class Agent:
             await self.state_manager.save_state(session_id, self.state)
 
 
+        yield AgentEvent(type=AgentEventType.COMPLETE, data={"todolist": todolist.to_json()})
+
+
     async def _create_or_get_todolist(self, session_id: str, state: Dict[str, Any]) -> Optional[TodoList]:
         """
         Creates a new todolist for the mission if no todolist exists yet or loads the existing todolist
