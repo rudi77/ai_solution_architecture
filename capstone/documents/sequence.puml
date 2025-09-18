@@ -1,0 +1,111 @@
+@startuml
+title TaskForce – Clarify → Plan → Execute (Sequence)
+
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #777777
+  LifeLineBorderColor #777777
+  ParticipantBorderColor #333333
+  ParticipantBackgroundColor #F7F7F7
+  BoxBorderColor #BBBBBB
+}
+
+actor User
+participant "TaskForce CLI" as CLI
+participant "Agent Orchestrator" as Orchestrator
+participant "State Manager" as StateMgr
+participant "TodoList Manager" as TodoMgr
+participant "LLM Client" as LLM
+participant "Tool Registry" as Registry
+participant "Tool (concrete)" as Tool
+participant "External System(s)" as Ext
+participant "Event Renderer" as Renderer
+
+== Start ==
+User -> CLI : Provide mission / resume session
+CLI -> Orchestrator : start(mission, session_id)
+
+group Load & Resume
+  Orchestrator -> StateMgr : load_state(session_id)
+  StateMgr --> Orchestrator : state (answers, history, todolist_id, ...)
+end
+
+alt No existing plan
+  == Phase 1: Clarification Mining ==
+  Orchestrator -> TodoMgr : extract_clarification_questions(mission, tools_desc)
+  TodoMgr --> Orchestrator : questions[]
+
+  alt questions found
+    Orchestrator -> Renderer : event(ASK_USER, questions) 
+    Orchestrator -> StateMgr : persist(pending_question)
+    CLI <- Renderer : prompt user
+    User -> CLI : provide answers
+    CLI -> Orchestrator : submit(answers)
+    Orchestrator -> StateMgr : merge_answers(answers)
+    Orchestrator -> TodoMgr : extract_clarification_questions(...) 
+    TodoMgr --> Orchestrator : questions[] (possibly empty)
+  end
+
+  == Phase 2: Plan Creation ==
+  Orchestrator -> TodoMgr : create_todolist(mission, tools_desc, answers)
+  TodoMgr --> Orchestrator : todolist (NO ASK_USER)
+  Orchestrator -> TodoMgr : validate(todolist)
+  TodoMgr --> Orchestrator : ok | error
+  alt validation error
+    Orchestrator -> Renderer : event(ERROR, reason="ambiguous plan")
+    Orchestrator -> StateMgr : persist(error)
+    return
+  end
+
+  Orchestrator -> StateMgr : persist(todolist_id)
+else Plan exists
+  Orchestrator -> Renderer : event(INFO, "Resuming existing plan")
+end
+
+== Execution Phase (Deterministic) ==
+loop for each step in todolist
+  ' ReAct: Thought
+  Orchestrator -> LLM : generate_thought(step, context)
+  LLM --> Orchestrator : thought{rationale, next_action, expected_outcome}
+  Orchestrator -> Renderer : event(THOUGHT, rationale, expected_outcome)
+
+  ' ReAct: Action decision
+  alt next_action == "tool_call"
+    Orchestrator -> Registry : resolve(tool_name)
+    Registry --> Orchestrator : tool_handle
+    Orchestrator -> Renderer : event(TOOL_STARTED, tool_name, params)
+    Orchestrator -> Tool : execute(params)
+    Tool -> Ext : call / I/O / network / fs ...
+    Ext --> Tool : result / data / status
+    Tool --> Orchestrator : observation(result)
+    Orchestrator -> Renderer : event(TOOL_RESULT, summary)
+    Orchestrator -> StateMgr : persist(last_observation, step_status=done)
+  else next_action == "ask_user"
+    Orchestrator -> Renderer : event(ASK_USER, question)
+    Orchestrator -> StateMgr : persist(pending_question)
+    CLI <- Renderer : prompt user
+    User -> CLI : answer
+    CLI -> Orchestrator : submit(answer)
+    Orchestrator -> StateMgr : merge_answers(answer)
+    ' optional: update plan if designed to do so
+  else next_action == "update_todolist"
+    Orchestrator -> TodoMgr : update(step, info)
+    TodoMgr --> Orchestrator : updated_plan
+    Orchestrator -> StateMgr : persist(todolist)
+  else next_action == "error_recovery"
+    Orchestrator -> Renderer : event(WARN, "Attempting recovery")
+    Orchestrator -> LLM : propose_recovery(context)
+    LLM --> Orchestrator : recovery_plan
+    Orchestrator -> StateMgr : persist(recovery_plan)
+  else next_action == "complete"
+    break
+  end
+end
+
+== Completion ==
+Orchestrator -> Renderer : event(COMPLETE, summary)
+Orchestrator -> StateMgr : persist(status=completed)
+Renderer -> CLI : final report
+CLI -> User : show results / artifacts
+
+@enduml
