@@ -132,6 +132,72 @@ class TodoList:
         """Serialize the TodoList to a JSON string."""
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
 
+    def to_markdown(self) -> str:
+        """
+        Converts a todolist to a markdown string.
+        """
+        def _status_str(s: Any) -> str:
+            # Normalize TaskStatus or string to lowercase text
+            if hasattr(s, "value"):
+                s = s.value  # Enum-like (e.g., TaskStatus)
+            return str(s or "").strip()
+
+        def _is_checked(status_text: str) -> bool:
+            st = status_text.lower()
+            # Treat these as completed
+            return st in {"done", "completed", "success", "succeeded"}
+
+        # Build markdown lines
+        lines: List[str] = []
+        title = f"Todo List — {self.todolist_id}"
+        lines.append(f"# {title}\n")
+
+        if (self.notes or "").strip():
+            lines.append("## Notes")
+            lines.append(self.notes.strip() + "\n")
+
+        # Items
+        lines.append("## Items")
+        if not self.items:
+            lines.append("_No items yet._\n")
+        else:
+            # Ensure stable ordering
+            items_sorted = sorted(self.items, key=lambda i: (i.position, i.description or ""))
+            for item in items_sorted:
+                status_text = _status_str(item.status)
+                checked = "x" if _is_checked(status_text) else " "
+                # Ordered list with GitHub-style checkbox
+                lines.append(f"{item.position}. [{checked}] **{item.description or ''}**")
+                # Tool and status line
+                tool = item.tool or ""
+                lines.append(f"   - **Tool:** `{tool}`")
+                lines.append(f"   - **Status:** `{status_text or 'unknown'}`")
+                # Parameters pretty-printed as JSON
+                try:
+                    params_json = json.dumps(item.parameters or {}, ensure_ascii=False, indent=2, sort_keys=True)
+                except Exception:
+                    # Fallback in case parameters aren't JSON-serializable
+                    params_json = str(item.parameters)
+                lines.append("   - **Parameters:**")
+                lines.append("     ```json")
+                # Indent each line of the JSON block so it nests nicely under the list item
+                for ln in (params_json.splitlines() or ["{}"]):
+                    lines.append(f"     {ln}")
+                lines.append("     ```\n")
+
+        # Open questions
+        lines.append("## Open questions")
+        if not self.open_questions:
+            lines.append("_None._")
+        else:
+            for q in self.open_questions:
+                lines.append(f"- {q}")
+
+        # Final newline
+        lines.append("")
+        return "\n".join(lines)
+
+
 class TodoListManager:
     def __init__(self, base_dir: str = "./checklists"):
         self.base_dir = base_dir
