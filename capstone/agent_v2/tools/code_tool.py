@@ -16,7 +16,16 @@ class PythonTool(Tool):
     
     @property
     def description(self) -> str:
-        return "Execute Python code for complex logic, data processing, and custom operations. Code should set 'result' variable."
+        return (
+            "Execute Python code for complex logic, data processing, and custom operations. "
+            "Your code must assign the final output to a variable named 'result'. "
+            "Pre-imported modules: os, sys, json, re, pathlib, shutil, subprocess, datetime, time, random, "
+            "base64, hashlib, tempfile, csv, pandas as pd, matplotlib.pyplot as plt, and typing types (Dict, List, Any, Optional); "
+            "from datetime: datetime, timedelta. "
+            "Builtins available include common utilities (print, len, range, enumerate, str, int, float, bool, list, dict, set, tuple, "
+            "sum, min, max, abs, round, sorted, reversed, zip, map, filter, next, any, all, isinstance, open, __import__, locals). "
+            "If you need input variables (e.g., 'data'), pass them in via the 'context' dict; its keys are exposed as top-level variables."
+        )
     
     async def execute(self, code: str, context: Dict[str, Any] = None, cwd: str = None, **kwargs) -> Dict[str, Any]:
         """
@@ -34,6 +43,7 @@ class PythonTool(Tool):
                 "sum": sum, "min": min, "max": max, "abs": abs,
                 "round": round, "sorted": sorted, "reversed": reversed,
                 "zip": zip, "map": map, "filter": filter,
+                "next": next,
                 "any": any, "all": all, "isinstance": isinstance,
                 "open": open,  # Use with caution
                 "__import__": __import__,
@@ -41,6 +51,12 @@ class PythonTool(Tool):
             },
             "context": context or {},
         }
+
+        # Expose context keys as top-level variables when safe
+        if context:
+            for key, value in context.items():
+                if isinstance(key, str) and key.isidentifier() and key not in safe_namespace:
+                    safe_namespace[key] = value
         
         # Import common libraries
         import_code = """
@@ -50,6 +66,8 @@ import base64, hashlib, tempfile, csv
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
+import pandas as pd
+import matplotlib.pyplot as plt
 """
         
         # Optionally change working directory
@@ -102,15 +120,11 @@ from typing import Dict, List, Any, Optional
                         str(_sanitize(k, depth + 1)): _sanitize(v, depth + 1)
                         for k, v in value.items()
                     }
-                # Try to leave as-is only if both JSON and pickle accept it; otherwise repr
+                # Fallback: ensure JSON-safe by stringifying unknown objects
                 try:
-                    import json as _json
-                    import pickle as _pickle
-                    _json.dumps(value)
-                    _pickle.dumps(value)
-                    return value
-                except Exception:
                     return repr(value)
+                except Exception:
+                    return f"<unserializable {type(value).__name__}>"
 
             result_value = _sanitize(safe_namespace.get('result', None))
 
@@ -120,7 +134,7 @@ from typing import Dict, List, Any, Optional
                 if not k.startswith('_') 
                 and k not in ['os', 'sys', 'json', 're', 'pathlib', 'shutil',
                              'subprocess', 'datetime', 'time', 'random',
-                             'base64', 'hashlib', 'tempfile', 'csv', 'Path',
+                             'base64', 'hashlib', 'tempfile', 'csv', 'Path', 'pd', 'plt',
                              'timedelta', 'Dict', 'List', 'Any', 'Optional', 'context']
             }
             user_vars = {k: _sanitize(v) for k, v in raw_user_vars.items()}
