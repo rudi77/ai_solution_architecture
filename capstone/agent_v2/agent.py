@@ -546,11 +546,21 @@ class Agent:
         # get the last 2 messages from the message history. this shall be sufficient for the LLM to plan the next action.
         messages = self.message_history.get_last_n_messages(2)
 
+        # Provide recent state/observation context to enable correct parameterization (e.g., GitHub repo URL)
+        state_context = {
+            "answers": self.state.get("answers", {}),
+            "last_observation": self.state.get("last_observation", {}),
+        }
+
         messages.append({"role": "user", "content": (
             "You are the Planning & Action Selector.\n"
             "Pick exactly one next action for the next_step below.\n"
             f"NEXT_STEP:\n{next_step.to_json()}\n\n"
-            "Prefer tools; ask_user only if info is missing.\n"
+            f"AVAILABLE_CONTEXT (use to fill concrete tool parameters):\n{json.dumps(state_context, ensure_ascii=False)}\n\n"
+            "Rules:\n"
+            "- Prefer tools; ask_user only if info is missing.\n"
+            "- Use the last_observation data when it contains outputs from prior steps (e.g., github.create_repo returns repo_full_name/html_url).\n"
+            "- For git.remote, supply a full https URL, e.g., https://github.com/<owner>/<repo>.git derived from prior step outputs if available.\n"
             "Return STRICT JSON only (no extra text) matching this schema:\n"
             f"{json.dumps(schema_hint, ensure_ascii=False)}\n\n"
         )})
