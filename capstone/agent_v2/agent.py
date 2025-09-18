@@ -297,101 +297,138 @@ class Agent:
         self.state = None
         self.message_history = MessageHistory(build_system_prompt(system_prompt, mission, self.tools_description))
 
+
     async def execute(self, user_message: str, session_id: str) -> AsyncIterator[AgentEvent]:
         """
-        Executes the agent with the given user message.
-        Before executing the agent, the agent will plan the tasks to complete the mission.
-        If the agent needs to ask the user for more information, the agent will ask the user for the information.
-        If the agent needs to use a tool, the agent will use the tool to complete the task.
-        If the agent needs to complete a task, the agent will complete the task.
-        If the agent needs to replan the tasks, the agent will replan the tasks.
-        If the agent needs to complete the mission, the agent will complete the mission.
-        
+        Executes the agent with the given user message using a Pre-Clarification pass:
+        1) Collect & resolve all missing required info (closed-form questions).
+        2) Create a final TodoList (no ASK_USER, no open_questions).
+        3) Run the ReAct loop to complete the tasks.
+
         Args:
-            user_message: The user message to execute the agent with.
-            session_id: The execution id for the agent. This is used to identify the actual plan, steps, and result, state of the agent
+            user_message: The user message to execute the agent.
+            session_id: The session id to execute the agent.
 
         Returns:
-            An asynchronous iterator of AgentEvent objects.
+            An async iterator of AgentEvent.
         """
-
-        # get the current state of the agent
+        # --- 0) Load state -------------------------------------------------------
         self.state = await self.state_manager.load_state(session_id)
 
-        # if we were are awaiting an answer, consume it right now
+        if self.mission is None:
+            self.mission = user_message
+
+        # If we were awaiting an answer, consume it immediately
         if self.state.get("pending_question"):
             answer = user_message.strip()
             pending_question = self.state.pop("pending_question")
-            # store the answer by key for later parameter filling
+            # store the answer by stable key
             answers = self.state.setdefault("answers", {})
             answers[pending_question["answer_key"]] = answer
             await self.state_manager.save_state(session_id, self.state)
             yield AgentEvent(type=AgentEventType.STATE_UPDATED, data={"answers": answers})
 
+            # Nach einer beantworteten Frage: user_message nicht als neues inhaltliches Prompt verwenden
+            # (wir bleiben im Clarification-Flow). Kein return hier: wir laufen weiter und prüfen,
+            # ob noch weitere Fragen offen sind / ob wir planen können.
 
+        # --- 1) Update message history & mission --------------------------------
         self.message_history.add_message(user_message, "user")
         self.state["message_history"] = self.message_history.messages
         self.state["last_user_message"] = user_message
         self.state["mission"] = self.mission
-
-        # save the state
+        answers = self.state.setdefault("answers", {})
         await self.state_manager.save_state(session_id, self.state)
 
-        # get the current todolist
-        todolist = await self._create_or_get_todolist(session_id, self.state)
+        # --- 2) Pre-Clarification Gate (nur wenn noch kein finaler Plan existiert) ---
+        todolist = None
+        if not self.state.get("todolist_id"):
+            # 2.a) Fragen extrahieren, falls noch nicht geschehen
+            if "clar_questions" not in self.state:
+                clar_qs = await self.todo_list_manager.extract_clarification_questions(
+                    mission=self.mission,
+                    tools_desc=self.tools_description
+                )
+                self.state["clar_questions"] = clar_qs or []
+                await self.state_manager.save_state(session_id, self.state)
 
-        # if the todolist has open questions, we need to ask the user for the answers
-        if todolist.open_questions:
-            # pick the first unanswered question
-            # Note: We use the question text itself as the key in state["answers"].
-            # - The membership check above relies on dict keys being the exact question strings.
-            # - We later store replies as answers[question_text] = user_answer.
-            # Therefore, set answer_key = unanswered_question to keep lookup and storage aligned
-            # without introducing separate IDs (assuming question strings are stable/unique).
-            unanswered_question = next((q for q in todolist.open_questions if q not in self.state.get("answers", {})), None)
-            if unanswered_question:
+            # 2.b) Unbeantwortete Frage suchen (per stable key)
+            unanswered = next(
+                (q for q in self.state["clar_questions"] if q.get("key") not in answers),
+                None
+            )
+            if unanswered:
+                # ask user now; pause execution until answered
                 self.state["pending_question"] = {
-                    "answer_key": unanswered_question,
-                    "question": unanswered_question
+                    "answer_key": unanswered["key"],
+                    "question": unanswered["question"]
                 }
                 await self.state_manager.save_state(session_id, self.state)
-                # Emit an interactive event so callers can prompt the user
-                yield AgentEvent(
-                    type=AgentEventType.ASK_USER,
-                    data={"question": unanswered_question}
-                )
-                return            
+                yield AgentEvent(type=AgentEventType.ASK_USER, data={"question": unanswered["question"]})
+                return
 
-        # now that we have the todolist, we can execute the todolist in a ReAct loop
+            # 2.c) Alle Fragen beantwortet -> finalen Plan erstellen (No-ASK mode)
+            todolist = await self.todo_list_manager.create_todolist(
+                mission=self.mission,
+                tools_desc=self.tools_description,
+                answers=answers
+            )
+
+            # 2.d) Harte Guards: keine open_questions, keine ASK_USER-Platzhalter
+            if getattr(todolist, "open_questions", None):
+                raise ValueError("Final plan contains open_questions, expected none in No-ASK mode.")
+
+            for item in todolist.items:
+                if getattr(item, "parameters", None):
+                    for v in item.parameters.values():
+                        if isinstance(v, str) and v.strip().upper() == "ASK_USER":
+                            raise ValueError("Final plan contains ASK_USER placeholder, expected none.")
+
+            # 2.e) Plan persistieren
+            self.state["todolist_id"] = todolist.todolist_id
+            await self.state_manager.save_state(session_id, self.state)
+            self.todo_list_manager.update_todolist(todolist)  # persist current version if needed
+
+        else:
+            # Es existiert bereits ein Plan (Resume-Fall)
+            # Lade ihn (oder nutze deinen bisherigen Helper)
+            if hasattr(self.todo_list_manager, "load_todolist_by_id"):
+                todolist = await self.todo_list_manager.load_todolist_by_id(self.state["todolist_id"])
+            else:
+                todolist = await self._create_or_get_todolist(session_id, self.state)
+
+        # --- 3) ReAct Loop über die finale TodoList ------------------------------
         for next_step in todolist.items:
-            # Fill ASK_USER placeholders from state["answers"]
+            # Hydratation: Parameter ggf. aus answers einsetzen
             self._hydrate_parameters_from_answers(next_step)
-            # 1. generate a thought
+
+            # 1) Thought
             thought = await self._generate_thought(next_step)
             yield AgentEvent(type=AgentEventType.THOUGHT, data={"for_step": next_step.position, "thought": asdict(thought)})
-            
 
-            # 2. decide the next action            
+            # 2) Action
             action = await self._decide_next_action(thought, next_step)
             yield AgentEvent(type=AgentEventType.ACTION, data={"for_step": next_step.position, "action": action.type.value})
 
-            # 3. execute the action
+            # 3) Execute
             observation = await self._execute_action(action)
-            # 4. update the state with the observation
+
+            # 4) State aktualisieren
             self.state["last_observation"] = observation
-            # 5. update the state of the next step
-            if observation.get("success"):
-                next_step.status = TaskStatus.COMPLETED
-            else:
-                next_step.status = TaskStatus.FAILED
-            # 6. save the state
+            next_step.status = TaskStatus.COMPLETED if observation.get("success") else TaskStatus.FAILED
+
+            # 5) Persist
             await self.state_manager.save_state(session_id, self.state)
-            # 7. update the todolist
             self.todo_list_manager.update_todolist(todolist)
 
+            # Optional: Early stop bei Fehler + Re-Plan-Hook
+            # if not observation.get("success") and self.allow_replan_on_failure:
+            #     break / trigger replan...
 
+        # --- 4) Abschluss ---------------------------------------------------------
         yield AgentEvent(type=AgentEventType.COMPLETE, data={"todolist": todolist.to_markdown()})
         return
+
 
 
     async def _create_or_get_todolist(self, session_id: str, state: Dict[str, Any]) -> Optional[TodoList]:
@@ -693,22 +730,18 @@ def main():
             current_input = user_message
             done = False
             while True:
-                asked = False
                 async for ev in agent.execute(user_message=current_input, session_id=session_id):
                     if ev.type.name == AgentEventType.ASK_USER.name:
                         print("QUESTION:", ev.data.get("question"))
                         current_input = input("> ").strip()
-                        asked = True
-                        break
+                    elif ev.type.name == AgentEventType.STATE_UPDATED.name:
+                        print("STATE UPDATED:", ev.data)
                     elif ev.type.name == AgentEventType.COMPLETE.name:
-                        print("Agent completed.")
+                        print("COMPLETED:")
                         print(ev.data.get("todolist"))
                         done = True
                         # Do NOT break here; let the async generator finish naturally
                         # to avoid cancellation at the yield suspension point.
-                if not asked:
-                    # No new question and not complete -> exit
-                    break
                 if done:
                     # Completed; exit outer loop after the async generator finishes
                     break
