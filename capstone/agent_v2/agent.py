@@ -575,7 +575,7 @@ class Agent:
         }
 
         # get the last 2 messages from the message history. this shall be sufficient for the LLM to plan the next action.
-        messages = self.message_history.get_last_n_messages(-1)
+        messages = self.message_history.get_last_n_messages(4)
 
         # Provide recent state/observation context to enable correct parameterization (e.g., GitHub repo URL)
         state_context = {
@@ -834,96 +834,47 @@ def main():
     #     "Create the directory with the specified name and add a README.txt file inside it containing the provided content."
     #     "Ask the user for the name of the directory to create and the content to put inside a README.txt file. "
     # )
-    mission = """
-# MISSION — Repo Creation & Template-Based Scaffolding (Existing Tools Only)
+    mission = r"""
+# MISSION — Einfache CSV-Analyse (ohne zusätzliche Abhängigkeiten)
 
-## SCOPE
-- Create a new project repository locally with Git and on GitHub.
-- Discover, select, and apply a Markdown-based template from `./templates/` for code scaffolding.
-- Use only existing tools: `powershell`, `git`, `github`, `file_read`, `file_write`, `python`, `web_search`, `web_fetch`.
+## ZIEL
+- Analysiere die CSV-Datei unter `"C:\Users\rudi\source\ai_solution_architecture\assignments\assignment3\data\heart.csv"` und erstelle einen kompakten Bericht.
+- Verwende ausschließlich vorhandene Tools: `python`, `file_read`, `file_write`.
+- Keine externen Bibliotheken (kein pandas); nutze das Python-Standardmodul `csv` und Grundfunktionen.
 
-## TEMPLATE SOURCES
-- Templates are Markdown guidelines in `./templates/` describing project structure for different languages/frameworks.
-- Example files include: `python-fastapi-hexagonal.md`, `python-flask-mvc.md`, `csharp-webapi-clean.md`, plus `template-index.md`.
+## AUFGABEN
+1. Lade die Datei und erkenne Robustheit:
+   - Erkenne Trennzeichen (`,`, `;`, `\t`) heuristisch aus den ersten Zeilen.
+   - Lies Header; wenn keiner vorhanden, generiere `col_1..N`.
+   - Behandle fehlende Werte (leere Strings, `NA`, `N/A`, `null`).
+2. Erstelle Spalten-Profiling:
+   - Datentyp-Heuristik pro Spalte: `numeric` (float/int), `date` (ISO/ggf. `YYYY-MM-DD`), sonst `categorical/text`.
+   - Zähle: `rows_total`, `non_null`, `nulls`, `unique`.
+   - Für numerische Spalten: `min`, `max`, `mean`, `median`, `std`, `p25`, `p75`.
+   - Für kategorische Spalten: Top-10 Häufigkeiten (Wert, Anzahl, Anteil).
+3. Beispiele:
+   - Zeige 5 Beispielzeilen (als Markdown-Tabelle, gekürzt auf 120 Zeichen pro Zelle).
+4. Schreibe Ergebnisse:
+   - Erzeuge einen Markdown-Bericht unter `$WORK_DIR/analysis/heart_report.md`.
+   - Lege zusätzlich eine kompakte JSON-Zusammenfassung unter `$WORK_DIR/analysis/heart_summary.json` ab.
 
-## CORE RESPONSIBILITIES
-1. Validate or infer a valid kebab-case project name.
-2. Initialize a local Git repository (branch `main`).
-3. Create a GitHub repository and set it as `origin`.
-4. Discover available templates (Markdown) under `./templates/`.
-5. Select the best matching template based on the user description; if ambiguous, ASK_USER to choose.
-6. Parse the chosen Markdown template to derive folders/files to create and any starter contents.
-7. Apply the template by creating directories and files; write contents from code fences or examples when present.
-8. Stage, commit, and push to `origin/main`.
-9. Provide clear outputs, selected template, and next steps.
+## AUSGABEFORMAT (Markdown-Bericht)
+- Titel, Dateipfad, erkannter Delimiter, Anzahl Zeilen/Spalten
+- Tabelle „Spaltenprofil“ mit: `name`, `inferred_type`, `non_null`, `nulls`, `unique`, `min`, `p25`, `median`, `p75`, `max`, `example_values`
+- Für kategorische Spalten eine Sektion mit Top-10 Häufigkeiten
+- Eine kleine Stichprobe (5 Zeilen)
 
-## DECISION FRAMEWORK
-- Keep a Todo List updated after each tool execution.
-- If project name is missing/invalid → ASK_USER for a kebab-case name.
-- Use `powershell` for filesystem discovery/creation/moves, `file_read` to read Markdown templates, `python` for parsing/selection logic, and `file_write` for file contents.
-- Use `git` for init/add/commit/push and `github` for remote creation.
-- Do not reference non-existent tools; achieve everything with the listed tools.
+## REGELN
+- Nutze ausschließlich die vorhandenen Tools:
+  - `python` für die Berechnung (mit `csv`/Standardlib, keine externen Pakete)
+  - `file_read` optional für Preview, `file_write` für die Ergebnisse
+- Pfade relativ zur aktuellen Repository-Root behandeln; `$WORK_DIR` ist das vom CLI übergebene Arbeitsverzeichnis.
+- Antworte kurz und strukturiert; keine langen Erklärungen, nur Ergebnisdateien erzeugen.
 
-## EXECUTION RULES
-- Local repo init: `git` with `operation=init`, `repo_path=<project-dir>`, `branch=main`.
-- Remote create: `github` with `action=create_repo`, `name=<project-name>`; capture and persist `repo_full_name` and `repo_html_url`.
-- Remote URL: Build strictly from `repo_full_name` → `https://github.com/{repo_full_name}.git` (do not guess owner).
-- Remote set:
-  - `git` with `operation=remote`, `action=add`, `name=origin`, `url=https://github.com/{repo_full_name}.git`, `repo_path=<project-dir>`.
-  - If adding fails because origin exists → retry with `action=set_url` (same `repo_path`).
-  - Verify with `git` `operation=remote`, `action=list`, `repo_path=<project-dir>` (expect the correct URL).
-- Always pass `repo_path` for all `git` operations.
-- Discover templates:
-  - `powershell`: `Get-ChildItem -File ./templates/*.md | Select-Object -ExpandProperty FullName` to list files.
-  - `file_read`: read each Markdown; gather title, keywords, and summary.
-  - `python`: score against user description (language, framework, keywords). If multiple close matches, return options.
-- Select template:
-  - Single clear match → proceed.
-  - Multiple matches → ASK_USER to choose.
-  - No match → list available templates and ASK_USER.
-- Apply template:
-  - `python`: parse Markdown for structure sections (directories/files) and code fences for starter content.
-  - `powershell`: create directories (`New-Item -ItemType Directory`) where needed.
-  - `file_write`: write files with parsed or minimal placeholder content.
-- Stage/commit/push:
-  - `git` with `operation=add`, `files=["."]`, `repo_path=<project-dir>` →
-    `operation=commit`, `message=<msg>`, `repo_path=<project-dir>` →
-    `operation=push`, `remote=origin`, `branch=main`, `repo_path=<project-dir>` (sets upstream).
-
-## WORKFLOW SEQUENCE
-1. Validate project name (kebab-case).
-2. Initialize local repository in `<project-name>`.
-3. Create GitHub repo and set `origin` (derive URL from `repo_full_name`).
-3a. Verify remote with `git remote -v`.
-4. Discover templates; select best match (ASK_USER if needed).
-5. Apply selected template to create structure and files.
-6. `git add` → `git commit` → `git push`.
-
-## ERROR HANDLING
-- Provide clear errors for Git/GitHub/FS issues with suggested fixes.
-- If `git remote add` fails due to existing origin, switch to `git remote set-url` and re-verify.
-- If push fails due to auth, instruct to ensure Git credentials (PAT for HTTPS or SSH keys) are configured; surface the stderr.
-- If template parsing fails, still create repo with minimal scaffolding and report.
-
-## SUCCESS CRITERIA
-- Local+remote repos configured; branch `main` exists.
-- Selected template applied with directories/files created.
-- Initial commit pushed to `origin/main`.
-
-## OUTPUT FORMAT
-```
-✓ Repository '<project-name>' created
-  Local: <path>
-  Remote: <url>
-  Initial Commit: <hash>
-
-✓ Template '<template-name>' applied
-  Files Created: N
-  Key Paths: [...]
-
-Next Steps:
-1. cd <path>
-2. Run project-specific commands (if applicable)
+## ERFOLGSKRITERIEN
+- `$WORK_DIR/analysis/heart_report.md` existiert und enthält die geforderten Sektionen.
+- `$WORK_DIR/analysis/heart_summary.json` enthält Kennzahlen je Spalte.
+- Keine externen Abhängigkeiten wurden genutzt.
 ```
 
 After each tool run, update the Todo List state. Use only the listed tools to discover, select, and apply the Markdown templates.
