@@ -5,7 +5,7 @@ from enum import Enum
 import json
 from pathlib import Path
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 from attr import dataclass
 import litellm
 
@@ -278,7 +278,7 @@ class Agent:
         self.state = None
         self.message_history = MessageHistory(build_system_prompt(system_prompt, mission, self.tools_description))
 
-    async def execute(self, user_message: str, session_id: str) -> Dict[str, Any]:
+    async def execute(self, user_message: str, session_id: str) -> AsyncIterator[AgentEvent]:
         """
         Executes the agent with the given user message.
         Before executing the agent, the agent will plan the tasks to complete the mission.
@@ -291,15 +291,26 @@ class Agent:
         Args:
             user_message: The user message to execute the agent with.
             session_id: The execution id for the agent. This is used to identify the actual plan, steps, and result, state of the agent
+
+        Returns:
+            An asynchronous iterator of AgentEvent objects.
         """
 
         # get the current state of the agent
         self.state = await self.state_manager.load_state(session_id)
 
-        # add the user message to the message history
-        self.message_history.add_message(user_message, "user")
+        # if we were writing on an answer, consume it right now
+        if self.state.get("preding_question"):
+            answer = user_message.strip()
+            pending_question = self.state.pop("pending_question")
+            # store the answer by key for later parameter filling
+            answers = self.state.setdefault("answers", {})
+            answers[pending_question["answer_key"]] = answer
+            await self.state_manager.save_state(session_id, self.state)
+            yield AgentEvent(type=AgentEventType.STATE_UPDATED, data={"answers": answers})
 
-        # update message history in state
+
+        self.message_history.add_message(user_message, "user")
         self.state["message_history"] = self.message_history.messages
         self.state["last_user_message"] = user_message
         self.state["mission"] = self.mission
