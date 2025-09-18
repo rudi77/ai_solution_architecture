@@ -423,6 +423,8 @@ class Agent:
             # add a new message to the message history
             self.message_history.add_message(f"New todolist created: {todolist.to_json()}", "assistant")
 
+            print(f"New todolist created:\n\n{todolist.to_markdown()}")
+
             return todolist
         else:
             todolist = await self.todo_list_manager.load_todolist(todolist_id)                
@@ -682,7 +684,8 @@ def main():
 
     # Minimal inputs for execute()
     session_id = f"debug-{uuid.uuid4()}"
-    user_message = "Create a new directory and add a README.txt file inside it containing a hello_world code example."
+    #user_message = "Create a new directory and add a README.txt file inside it containing a hello_world code example."
+    user_message = "Create a file"
 
     print(f"Starting Agent execute() with session_id={session_id}")
     try:
