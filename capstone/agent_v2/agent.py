@@ -410,8 +410,8 @@ class Agent:
         # --- 3) ReAct Loop über die finale TodoList ------------------------------
         for next_step in todolist.items:
             # Hydratation: Parameter ggf. aus answers einsetzen
-            self._hydrate_parameters_from_answers(next_step)
-            self.logger.info("step_begin", session_id=session_id, position=next_step.position, tool=next_step.tool)
+            # self._hydrate_parameters_from_answers(next_step)
+            # self.logger.info("step_begin", session_id=session_id, position=next_step.position, tool=next_step.tool)
 
             # 1) Thought
             thought = await self._generate_thought(next_step)
@@ -488,7 +488,17 @@ class Agent:
         """
         Gets the description of the tools available.
         """
-        return "\n".join([ f"- {tool.name}: {tool.description}" for tool in self.tools])
+        lines = []
+        for tool in self.tools:
+            try:
+                schema_json = json.dumps(tool.parameters_schema, ensure_ascii=False, indent=2)
+            except Exception:
+                schema_json = "{}"
+            lines.append(
+                f"- {tool.name}: {tool.description}\n"
+                f"  parameters_schema:\n{schema_json}"
+            )
+        return "\n".join(lines)
 
 
     def _get_tools_schema(self) -> List[Dict[str, Any]]:
@@ -732,7 +742,70 @@ def main():
     #     "Create the directory with the specified name and add a README.txt file inside it containing the provided content."
     #     "Ask the user for the name of the directory to create and the content to put inside a README.txt file. "
     # )
-    mission = None
+    mission = """
+# MISSION — Repo Creation & Basic Scaffolding (Existing Tools Only)
+
+## SCOPE
+- Create a new project repository locally with Git and optionally on GitHub.
+- Scaffold a minimal project structure/files based on the user description.
+- Use only existing tools: `powershell`, `git`, `github`, `file_read`, `file_write`, `python`, `web_search`, `web_fetch`.
+
+## CORE RESPONSIBILITIES
+1. Validate or infer a valid kebab-case project name.
+2. Create a local Git repository (branch `main`).
+3. Optionally create a GitHub repository and set it as `origin`.
+4. Create minimal project files/folders (README, .gitignore, src folder, etc.) per user’s description.
+5. Stage, commit, and optionally push.
+6. Provide clear outputs and next steps.
+
+## DECISION FRAMEWORK
+- Always keep a Todo List; update it after every tool execution.
+- If project name is missing/invalid → ASK_USER for kebab-case name.
+- Prefer `powershell` for filesystem discovery/creation and `file_write` for file content.
+- Use `git` for VCS operations and `github` for remote creation.
+- Do not reference non-existent tools (no template discovery/selection/apply tools).
+
+## EXECUTION RULES
+- Local repo init: `git` with `operation=init`, `repo_path=<project-dir>`, `branch=main`.
+- Remote create (optional): `github` with `action=create_repo`, `name=<project-name>`.
+- Remote set: `git` with `operation=remote`, `action=add|set_url`, `name=origin`, `url=https://github.com/<owner>/<repo>.git`.
+- Files/folders:
+  - Use `powershell` to `New-Item -ItemType Directory`, move/copy files, list templates on disk if needed.
+  - Use `file_write` to write content for `README.md`, `.gitignore`, and starter source files.
+- Stage/commit: `git` with `operation=add`, `files=["."]` then `operation=commit`, `message`.
+- Push (optional): `git` with `operation=push`, `remote=origin`, `branch=main`.
+
+## WORKFLOW SEQUENCE
+1. Validate project name (kebab-case).
+2. Initialize local repository in `<project-name>`.
+3. Optionally create GitHub repo and set `origin`.
+4. Create minimal structure and files using `powershell` + `file_write`.
+5. `git add` → `git commit` → optionally `git push`.
+
+## ERROR HANDLING
+- Clear messages for Git/GitHub/FS errors with suggested next steps.
+
+## SUCCESS CRITERIA
+- Local Git repo exists (branch `main`), optional GitHub remote configured.
+- Minimal project structure created and committed.
+- Optional push completed if remote set.
+
+## OUTPUT FORMAT
+```
+✓ Repository '<project-name>' created
+  Local: <path>
+  Remote: <url-or-none>
+  Initial Commit: <hash-or-n/a>
+
+✓ Scaffolding created (files listed)
+
+Next Steps:
+1. cd <path>
+2. Run project-specific commands (if applicable)
+```
+
+After each tool run, update the Todo List state. Prefer clarity and reliability. Use only the listed tools.
+"""
 
     # Use a local work directory next to this file
     work_dir = str((Path(__file__).parent / ".debug_work").resolve())
@@ -750,7 +823,7 @@ def main():
     # Minimal inputs for execute()
     session_id = f"debug-{uuid.uuid4()}"
     #user_message = "Create a new directory and add a README.txt file inside it containing a hello_world code example."
-    user_message = "Create a new git repo lokal and push it to github. The repo should be public and it should contain a README.txt."
+    user_message = "Create a new python project with a fastapi service and call it payment-api."
 
     print(f"Starting Agent execute() with session_id={session_id}")
     try:
