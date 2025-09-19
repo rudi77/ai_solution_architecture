@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-TaskForce is my experimental agent framework, developed as part of my AI engineering capstone project. With it, I set out to explore one of the hardest problems in agent design: how to make agents transparent, deterministic, and reliable.
+TaskForce is my experimental agent framework, developed as part of my AI Solutions Architecture capstone project. With it, I set out to explore one of the hardest problems in agent design: how to make agents transparent, deterministic, and reliable.
 
 Unlike many “demo agents” or chatbot wrappers, TaskForce focuses on disciplined clarification gathering, deterministic planning, and faithful execution with real developer tools. It’s not production-ready, but it demonstrates that with the right patterns, we can close some of the gap between toy examples and agents that developers can trust.
 
@@ -12,7 +12,7 @@ Unlike many “demo agents” or chatbot wrappers, TaskForce focuses on discipli
 
 ### 1.1 Project Context
 
-This project was created as the final assignment for my AI engineering course. I chose the “AI-Driven Code Assistant” track, but instead of building another chatbot interface, I decided to tackle the deeper architectural challenges: *What would it take to build an agent that can plan, clarify, and execute tasks in a way that is reliable and observable?*
+This project was created as the final assignment for my AI Solutions Architecture course. I chose the “AI-Driven Code Assistant” track, but instead of building another chatbot interface, I decided to tackle the deeper architectural challenges: *What would it take to build an agent that can plan, clarify, and execute tasks in a way that is reliable and observable?*
 
 ### 1.2 Personal Motivation
 
@@ -51,6 +51,10 @@ This design sacrifices some flexibility but ensures predictability and reliabili
 ---
 
 ### 2.2 Core Components
+
+The following diagram shows all main components and how they are related to each other
+
+![](./images/component/component.png)
 
 #### Agent Orchestrator (`agent.py`)
 
@@ -153,6 +157,11 @@ stateDiagram-v2
 ```
 
 This ensures that **no execution starts until all clarifications are resolved**.
+
+
+This sequence diagram shows a typical TaskForce-Run: Clarify -> Plan -> Execute (ReAct Loop), EventStreaming and State-Persistence
+
+![](./images/sequence/sequence.png)
 
 ---
 
