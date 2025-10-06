@@ -49,9 +49,16 @@ def parse_task_status(value: Any) -> TaskStatus:
 class TodoItem:
     position: int
     description: str
-    tool: str
-    parameters: Dict[str, Any]
+    acceptance_criteria: str  # NEW: "File exists at path X" instead of "use file_write"
+    dependencies: List[int] = field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
+    
+    # Runtime fields (filled during execution)
+    chosen_tool: Optional[str] = None
+    tool_input: Optional[Dict[str, Any]] = None
+    execution_result: Optional[Dict[str, Any]] = None
+    attempts: int = 0
+    max_attempts: int = 3
 
     def to_json(self) -> str:
         """Serialize the TodoItem to a JSON string."""
@@ -62,9 +69,14 @@ class TodoItem:
         return {
             "position": self.position,
             "description": self.description,
-            "tool": self.tool,
-            "parameters": self.parameters,
+            "acceptance_criteria": self.acceptance_criteria,
+            "dependencies": self.dependencies,
             "status": self.status.value if isinstance(self.status, TaskStatus) else str(self.status),
+            "chosen_tool": self.chosen_tool,
+            "tool_input": self.tool_input,
+            "execution_result": self.execution_result,
+            "attempts": self.attempts,
+            "max_attempts": self.max_attempts,
         }
 
 @dataclass
@@ -97,9 +109,14 @@ class TodoList:
             item = TodoItem(
                 position=position,
                 description=str(raw.get("description", "")).strip(),
-                tool=str(raw.get("tool", "")).strip(),
-                parameters=raw.get("parameters") or {},
+                acceptance_criteria=str(raw.get("acceptance_criteria", "")).strip(),
+                dependencies=raw.get("dependencies") or [],
                 status=parse_task_status(raw.get("status")),
+                chosen_tool=raw.get("chosen_tool"),
+                tool_input=raw.get("tool_input"),
+                execution_result=raw.get("execution_result"),
+                attempts=int(raw.get("attempts", 0)),
+                max_attempts=int(raw.get("max_attempts", 3)),
             )
             items.append(item)
 
@@ -116,9 +133,14 @@ class TodoList:
             return {
                 "position": item.position,
                 "description": item.description,
-                "tool": item.tool,
-                "parameters": item.parameters,
+                "acceptance_criteria": item.acceptance_criteria,
+                "dependencies": item.dependencies,
                 "status": item.status.value if isinstance(item.status, TaskStatus) else str(item.status),
+                "chosen_tool": item.chosen_tool,
+                "tool_input": item.tool_input,
+                "execution_result": item.execution_result,
+                "attempts": item.attempts,
+                "max_attempts": item.max_attempts,
             }
 
         return {
@@ -168,22 +190,29 @@ class TodoList:
                 checked = "x" if _is_checked(status_text) else " "
                 # Ordered list with GitHub-style checkbox
                 lines.append(f"{item.position}. [{checked}] **{item.description or ''}**")
-                # Tool and status line
-                tool = item.tool or ""
-                lines.append(f"   - **Tool:** `{tool}`")
                 lines.append(f"   - **Status:** `{status_text or 'unknown'}`")
-                # Parameters pretty-printed as JSON
-                try:
-                    params_json = json.dumps(item.parameters or {}, ensure_ascii=False, indent=2, sort_keys=True)
-                except Exception:
-                    # Fallback in case parameters aren't JSON-serializable
-                    params_json = str(item.parameters)
-                lines.append("   - **Parameters:**")
-                lines.append("     ```json")
-                # Indent each line of the JSON block so it nests nicely under the list item
-                for ln in (params_json.splitlines() or ["{}"]):
-                    lines.append(f"     {ln}")
-                lines.append("     ```\n")
+                lines.append(f"   - **Acceptance Criteria:** {item.acceptance_criteria or 'N/A'}")
+                
+                # Dependencies
+                if item.dependencies:
+                    lines.append(f"   - **Dependencies:** {', '.join(str(d) for d in item.dependencies)}")
+                
+                # Runtime info (if available)
+                if item.chosen_tool:
+                    lines.append(f"   - **Chosen Tool:** `{item.chosen_tool}`")
+                if item.tool_input:
+                    try:
+                        input_json = json.dumps(item.tool_input, ensure_ascii=False, indent=2, sort_keys=True)
+                    except Exception:
+                        input_json = str(item.tool_input)
+                    lines.append("   - **Tool Input:**")
+                    lines.append("     ```json")
+                    for ln in (input_json.splitlines() or ["{}"]):
+                        lines.append(f"     {ln}")
+                    lines.append("     ```")
+                if item.attempts > 0:
+                    lines.append(f"   - **Attempts:** {item.attempts}/{item.max_attempts}")
+                lines.append("")  # Empty line between items
 
         # Open questions
         lines.append("## Open questions")
@@ -438,88 +467,61 @@ class TodoListManager:
 
     def create_final_todolist_prompts(self, mission: str, tools_desc: str, answers: Any) -> Tuple[str, str]:
         """
-        Creates a strict prompt for the final TodoList (No-ASK mode).
+        Creates a prompt for outcome-oriented TodoList planning.
         Returns (user_prompt, system_prompt).
         """
 
-        structure_block = """
+        structure = """
+{
+  "items": [
     {
-    "items": [
-        {
-        "id": "t1",
-        "description": "Short, precise task description (1–2 sentences)",
-        "tool": "tool_name_or_none",
-        "parameters": {},
-        "depends_on": [],
-        "status": "PENDING"
-        }
-    ],
-    "open_questions": [],
-    "notes": ""
+      "position": 1,
+      "description": "What needs to be done (outcome-oriented)",
+      "acceptance_criteria": "How to verify it's done (observable condition)",
+      "dependencies": [],
+      "status": "PENDING"
     }
-        """.strip()
+  ],
+  "open_questions": [],
+  "notes": ""
+}
+"""
+        
+        system_prompt = f"""You are a planning agent. Create a minimal, goal-oriented plan.
 
-        system_prompt = f"""
-    You are a planning agent. Your sole task is to convert the mission into a
-    strict, executable TODO list. At this point, all required clarifications
-    have already been collected — there must be **no questions left**.
+Mission:
+{mission}
 
-    Context:
+User Answers:
+{json.dumps(answers, indent=2)}
 
-    - Mission:
-    {mission}
+Available Tools (for reference, DO NOT specify in plan):
+{tools_desc}
 
-    - Clarification Answers (already provided, use them directly):
-    {answers}
+RULES:
+1. Each item describes WHAT to achieve, NOT HOW (no tool names, no parameters)
+2. acceptance_criteria: Observable condition (e.g., "File X exists with content Y")
+3. dependencies: List of step positions that must complete first
+4. Keep plan minimal (prefer 3-7 steps over 20)
+5. open_questions MUST be empty (all clarifications resolved)
+6. description: Clear, actionable outcome (1-2 sentences)
+7. acceptance_criteria: Specific, verifiable condition
 
-    - Available tools (names, descriptions, parameter schemas):
-    {tools_desc}
+EXAMPLES:
+Good:
+- description: "Create a markdown report from CSV data"
+  acceptance_criteria: "File report.md exists and contains a valid markdown table with all CSV rows"
 
-    ---
+Bad:
+- description: "Use python tool to read CSV"
+  acceptance_criteria: "Python code executes successfully"
 
-    ## Instructions
-
-    1) OUTPUT FORMAT
-    - Return a valid JSON object ONLY — no commentary, no code fences.
-    - Match exactly the structure under "Expected JSON structure".
-
-    2) PLAN REQUIREMENTS
-    - Produce a minimal, complete, step-by-step plan to fulfill the mission.
-    - Each step MUST be atomic (Single Responsibility).
-    - Prefer fewer, well-scoped steps over many fuzzy steps.
-
-    3) STEP FIELDS (MUST-HAVES)
-    - id: short unique id like "t1", "t2", ...
-    - description: 1–2 sentences, outcome-oriented.
-    - tool: exact tool name from the provided list, or "none" if no tool is needed.
-    - parameters: object with ONLY the required keys for the chosen tool (match the parameters_schema).
-    - depends_on: array of step ids that must be completed first (empty if none).
-    - status: always "PENDING" initially.
-
-    4) PARAMETERS
-    - Use the given Clarification Answers to fill in all required parameter values.
-    - **Do not use "ASK_USER"**. Every parameter must be concrete.
-    - Do not invent values — use only provided answers or explicit mission context.
-
-    5) DEPENDENCIES
-    - Add dependencies to enforce correct execution order.
-    - No circular dependencies. All references must exist.
-
-    6) QUALITY CHECKS BEFORE RETURNING
-    - JSON is syntactically valid.
-    - All tools exist (or "none").
-    - parameters strictly conform to the tool’s parameters_schema (no extra keys).
-    - All depends_on ids exist; no circular graphs.
-    - **open_questions must always be empty**.
-
-    ---
-
-    ## Expected JSON structure
-    {structure_block}
-        """.strip()
-
-        user_prompt = "Generate the final structured TODO list for the given mission (no questions, no ASK_USER placeholders)."
-
+Return JSON matching:
+{structure}
+"""
+        
+        user_prompt = "Generate the plan"
+        
         return user_prompt, system_prompt
 
 

@@ -32,8 +32,60 @@ class PythonTool(Tool):
         Execute Python code in controlled namespace.
         Code has access to standard libraries and must set 'result' variable.
         """
+        import contextlib
         
-        # Create safe namespace
+        # 1. CWD mit Context Manager
+        @contextlib.contextmanager
+        def safe_chdir(path):
+            original = os.getcwd()
+            try:
+                if path:
+                    os.chdir(path)
+                yield
+            finally:
+                try:
+                    os.chdir(original)
+                except (OSError, FileNotFoundError):
+                    pass
+        
+        # Validate and prepare cwd
+        cwd_path = None
+        if cwd is not None:
+            if not isinstance(cwd, str):
+                return {"success": False, "error": "cwd must be a string path"}
+            sanitized = cwd.strip()
+            if (sanitized.startswith('"') and sanitized.endswith('"')) or (sanitized.startswith("'") and sanitized.endswith("'")):
+                sanitized = sanitized[1:-1]
+            sanitized = os.path.expandvars(os.path.expanduser(sanitized))
+            if os.name == "nt":
+                sanitized = sanitized.replace("/", "\\")
+            p = Path(sanitized)
+            if not p.exists() or not p.is_dir():
+                return {"success": False, "error": f"cwd does not exist or is not a directory: {sanitized}"}
+            cwd_path = str(p)
+        
+        # 2. Separate Import-Behandlung
+        import_code = """
+import os, sys, json, re, pathlib, shutil
+import subprocess, datetime, time, random
+import base64, hashlib, tempfile, csv
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional
+"""
+        
+        # Try to import pandas and matplotlib (optional)
+        optional_imports = """
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+"""
+        
         safe_namespace = {
             "__builtins__": {
                 # Basic functions
@@ -51,50 +103,37 @@ class PythonTool(Tool):
             },
             "context": context or {},
         }
-
+        
         # Expose context keys as top-level variables when safe
         if context:
             for key, value in context.items():
                 if isinstance(key, str) and key.isidentifier() and key not in safe_namespace:
                     safe_namespace[key] = value
         
-        # Import common libraries
-        import_code = """
-import os, sys, json, re, pathlib, shutil
-import subprocess, datetime, time, random
-import base64, hashlib, tempfile, csv
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
-import pandas as pd
-import matplotlib.pyplot as plt
-"""
-        
-        # Optionally change working directory
-        original_cwd = os.getcwd()
-        cwd_path = None
-        if cwd is not None:
-            if not isinstance(cwd, str):
-                return {"success": False, "error": "cwd must be a string path"}
-            sanitized = cwd.strip()
-            if (sanitized.startswith('"') and sanitized.endswith('"')) or (sanitized.startswith("'") and sanitized.endswith("'")):
-                sanitized = sanitized[1:-1]
-            sanitized = os.path.expandvars(os.path.expanduser(sanitized))
-            if os.name == "nt":
-                sanitized = sanitized.replace("/", "\\")
-            p = Path(sanitized)
-            if not p.exists() or not p.is_dir():
-                return {"success": False, "error": f"cwd does not exist or is not a directory: {sanitized}"}
-            cwd_path = str(p)
-
         try:
-            if cwd_path:
-                os.chdir(cwd_path)
-            # Execute imports
+            # Imports zuerst (mit spezifischem Error)
             exec(import_code, safe_namespace)
+            exec(optional_imports, safe_namespace)
+        except ImportError as e:
+            return {
+                "success": False,
+                "error": f"Missing library: {e.name}",
+                "hint": f"Install with: pip install {e.name}",
+                "type": "ImportError"
+            }
+        
+        try:
+            with safe_chdir(cwd_path):
+                exec(code, safe_namespace)
             
-            # Execute user code
-            exec(code, safe_namespace)
+            # 3. Result-Check
+            if 'result' not in safe_namespace:
+                return {
+                    "success": False,
+                    "error": "Code must assign output to 'result' variable",
+                    "hint": "Add: result = your_output",
+                    "variables": list(safe_namespace.keys())
+                }
             
             # Extract result and sanitize outputs to ensure they are pickle/JSON safe
             def _sanitize(value, depth: int = 0):
@@ -152,11 +191,5 @@ import matplotlib.pyplot as plt
                 "success": False,
                 "error": str(e),
                 "type": type(e).__name__,
-                "traceback": traceback.format_exc(),
-                "cwd": cwd_path or original_cwd,
+                "traceback": traceback.format_exc()
             }
-        finally:
-            try:
-                os.chdir(original_cwd)
-            except Exception:
-                pass
