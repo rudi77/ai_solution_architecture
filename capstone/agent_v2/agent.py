@@ -544,21 +544,47 @@ class Agent:
 
     def _build_thought_context(self, step: TodoItem, todolist: TodoList) -> Dict[str, Any]:
         """Baut Context für Thought-Generation."""
-        # Ergebnisse vorheriger Steps
+        # Ergebnisse vorheriger Steps (inkl. Fehler für Retry-Kontext)
         previous_results = [
             {
                 "step": s.position,
                 "description": s.description,
                 "tool": s.chosen_tool,
-                "result": s.execution_result
+                "result": s.execution_result,
+                "status": s.status.value
             }
             for s in todolist.items 
-            if s.status == TaskStatus.COMPLETED and s.execution_result
+            if s.execution_result and s.position < step.position
         ]
+        
+        # Extrahiere Fehler vom aktuellen Step (für Retry)
+        current_error = None
+        if step.execution_result and not step.execution_result.get("success"):
+            current_error = {
+                "error": step.execution_result.get("error"),
+                "type": step.execution_result.get("type"),
+                "hints": step.execution_result.get("hints", []),
+                "attempt": step.attempts,
+                "max_attempts": step.max_attempts
+            }
+        
+        # Sammle verfügbare Context-Daten von vorherigen Python Steps
+        available_context = {}
+        for s in todolist.items:
+            if (s.status == TaskStatus.COMPLETED and 
+                s.chosen_tool == "python" and 
+                s.execution_result and 
+                s.execution_result.get("context_updated")):
+                # Merge context from previous steps
+                ctx = s.execution_result.get("context_updated", {})
+                if isinstance(ctx, dict):
+                    available_context.update(ctx)
         
         return {
             "current_step": step,
+            "current_error": current_error,
             "previous_results": previous_results[-5:],  # Last 5
+            "available_context": available_context,  # NEW: Context from previous Python steps
             "available_tools": self.tools_description,
             "user_answers": self.state.get("answers", {}),
             "mission": self.mission,
@@ -595,16 +621,53 @@ class Agent:
         # Get the last 4 message pairs from history
         messages = self.message_history.get_last_n_messages(4)
 
+        # Build error context if this is a retry
+        error_context = ""
+        if context.get("current_error"):
+            error = context["current_error"]
+            error_context = f"""
+PREVIOUS ATTEMPT FAILED (Attempt {error['attempt']}/{error['max_attempts']}):
+Error Type: {error.get('type', 'Unknown')}
+Error Message: {error.get('error', 'Unknown error')}
+"""
+            if error.get('hints'):
+                error_context += f"\nHints to fix:\n"
+                for hint in error['hints']:
+                    error_context += f"  - {hint}\n"
+            error_context += "\nPlease analyze the error and provide a corrected solution.\n"
+
+        # Build context note for Python tool
+        context_note = ""
+        available_ctx = context.get("available_context", {})
+        if available_ctx:
+            context_note = f"""
+AVAILABLE CONTEXT FROM PREVIOUS STEPS:
+{json.dumps(available_ctx, ensure_ascii=False, indent=2)}
+
+IMPORTANT: If you need data from previous Python steps, either:
+1. Pass the context via 'context' parameter (recommended for simple data)
+2. Re-read the data from the source file (CSV, JSON, etc.)
+
+NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous steps do NOT persist!
+"""
+
         messages.append({"role": "user", "content": (
             "You are the ReAct Execution Agent.\n"
             "Analyze the current step and choose the best action.\n\n"
             f"CURRENT_STEP:\n{json.dumps(asdict(current_step), ensure_ascii=False, indent=2)}\n\n"
+            f"{error_context}"
+            f"{context_note}"
             f"MISSION:\n{context.get('mission', '')}\n\n"
             f"PREVIOUS_RESULTS:\n{json.dumps(context.get('previous_results', []), ensure_ascii=False, indent=2)}\n\n"
             f"USER_ANSWERS:\n{json.dumps(context.get('user_answers', {}), ensure_ascii=False, indent=2)}\n\n"
             f"AVAILABLE_TOOLS:\n{context.get('available_tools', '')}\n\n"
             "Rules:\n"
             "- Choose the appropriate tool to fulfill the step's acceptance criteria.\n"
+            "- If this is a retry after an error, FIX the previous error using the hints provided.\n"
+            "- For Python code errors: Read the error message and hints carefully, then correct the code.\n"
+            "- **CRITICAL**: Each Python tool call is ISOLATED - variables don't persist between calls!\n"
+            "  → Always re-read data or pass via context parameter.\n"
+            "  → Don't assume 'df' or other variables from previous steps exist.\n"
             "- If information is missing, use ask_user action.\n"
             "- If the step is already fulfilled, use complete action.\n"
             "- If the plan needs adjustment, use replan action.\n"

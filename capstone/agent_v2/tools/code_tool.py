@@ -86,6 +86,23 @@ except ImportError:
     plt = None
 """
         
+        # Normalize context parameter to dict
+        context_dict = {}
+        if context:
+            if isinstance(context, dict):
+                context_dict = context
+            elif isinstance(context, str):
+                # Try to parse as JSON if it's a string
+                try:
+                    import json
+                    context_dict = json.loads(context)
+                except (json.JSONDecodeError, TypeError):
+                    # If parsing fails, ignore or wrap in a dict
+                    pass
+            else:
+                # For other types, ignore
+                pass
+        
         safe_namespace = {
             "__builtins__": {
                 # Basic functions
@@ -101,12 +118,12 @@ except ImportError:
                 "__import__": __import__,
                 "locals": locals,
             },
-            "context": context or {},
+            "context": context_dict,
         }
         
         # Expose context keys as top-level variables when safe
-        if context:
-            for key, value in context.items():
+        if context_dict:
+            for key, value in context_dict.items():
                 if isinstance(key, str) and key.isidentifier() and key not in safe_namespace:
                     safe_namespace[key] = value
         
@@ -182,14 +199,51 @@ except ImportError:
                 "success": True,
                 "result": result_value,
                 "variables": user_vars,
-                "context_updated": _sanitize(safe_namespace.get('context', {}))
+                "context_updated": _sanitize(context_dict)
             }
             
         except Exception as e:
             import traceback
+            
+            # Provide helpful hints for common errors
+            hints = []
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            if error_type == "NameError" and "not defined" in error_msg:
+                var_name = error_msg.split("'")[1] if "'" in error_msg else "unknown"
+                hints.append(f"Variable '{var_name}' is not defined.")
+                hints.append(f"REMEMBER: Each Python call has an ISOLATED namespace!")
+                hints.append(f"  1. If '{var_name}' is from a previous step, you must:")
+                hints.append(f"     → Re-read the source data (CSV, JSON, etc.), OR")
+                hints.append(f"     → Request it via 'context' parameter")
+                hints.append(f"  2. If '{var_name}' should be created here, define it in your code")
+                hints.append(f"  3. Check the file path and make sure the data source exists")
+                
+            elif error_type == "KeyError":
+                hints.append("KeyError: Check if the key exists in the dictionary")
+                hints.append("Use .get() method or check with 'if key in dict'")
+                
+            elif error_type == "FileNotFoundError":
+                hints.append("File not found. Check:")
+                hints.append("  1. The file path is correct")
+                hints.append("  2. The file exists in the current directory")
+                hints.append("  3. Use absolute path or set 'cwd' parameter")
+                
+            elif error_type == "ImportError":
+                hints.append("Import failed. The library may not be installed.")
+                hints.append("Try using pd, plt, or other pre-imported libraries")
+                
+            elif error_type == "AttributeError":
+                hints.append("AttributeError: Check if you're calling the right method/attribute")
+                hints.append("Make sure the object is of the expected type")
+                hints.append("Use type() or isinstance() to verify object types")
+            
             return {
                 "success": False,
-                "error": str(e),
-                "type": type(e).__name__,
-                "traceback": traceback.format_exc()
+                "error": error_msg,
+                "type": error_type,
+                "traceback": traceback.format_exc(),
+                "hints": hints,
+                "code_snippet": code[:200] + "..." if len(code) > 200 else code
             }
