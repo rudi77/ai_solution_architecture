@@ -82,6 +82,77 @@ class Tool(ABC):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         pass
     
+    async def execute_safe(self, **kwargs) -> Dict[str, Any]:
+        """
+        Robust wrapper um execute() mit:
+        - Validation
+        - Retry-Logik
+        - Error Handling
+        - Timeout
+        """
+        import asyncio
+        import traceback
+        
+        max_retries = 3
+        timeout_seconds = 60
+        
+        for attempt in range(max_retries):
+            try:
+                # 1. Parameter validieren
+                valid, error = self.validate_params(**kwargs)
+                if not valid:
+                    return {
+                        "success": False,
+                        "error": f"Invalid parameters: {error}",
+                        "tool": self.name
+                    }
+                
+                # 2. Execute mit Timeout
+                result = await asyncio.wait_for(
+                    self.execute(**kwargs),
+                    timeout=timeout_seconds
+                )
+                
+                # 3. Result validieren
+                if not isinstance(result, dict):
+                    return {
+                        "success": False,
+                        "error": f"Tool returned invalid type: {type(result)}",
+                        "tool": self.name
+                    }
+                
+                if "success" not in result:
+                    result["success"] = False  # Default to False
+                
+                result["tool"] = self.name
+                result["attempt"] = attempt + 1
+                
+                return result
+                
+            except asyncio.TimeoutError:
+                if attempt == max_retries - 1:
+                    return {
+                        "success": False,
+                        "error": f"Tool timed out after {timeout_seconds}s",
+                        "tool": self.name,
+                        "retries": attempt + 1
+                    }
+                await asyncio.sleep(2 ** attempt)
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "traceback": traceback.format_exc(),
+                        "tool": self.name,
+                        "retries": attempt + 1
+                    }
+                await asyncio.sleep(2 ** attempt)
+        
+        return {"success": False, "error": "Should not reach here"}
+    
     def validate_params(self, **kwargs) -> Tuple[bool, Optional[str]]:
         """Validate parameters before execution"""
         sig = inspect.signature(self.execute)
