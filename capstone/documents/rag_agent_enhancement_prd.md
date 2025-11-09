@@ -605,6 +605,60 @@ azure-core>=1.29.0
 
 ---
 
+### Story 1.2.1: Early RAG Agent Integration & CLI Testing
+
+**As a** developer building the RAG enhancement,
+**I want** to create a working RAG agent with the SemanticSearchTool and test it via CLI,
+**so that** I can validate the integration pattern works before building additional tools (Stories 1.3-1.5).
+
+#### Acceptance Criteria
+
+**AC1.2.1.1:** Basic RAG System Prompt
+- A minimal `RAG_SYSTEM_PROMPT` exists in `prompts/rag_system_prompt.py`
+- Prompt includes: tool description, basic usage, response format with citations
+- Simplified query classification (CONTENT_SEARCH only for now)
+
+**AC1.2.1.2:** RAG Agent Factory Method
+- `Agent.create_rag_agent(session_id, user_context)` static method created
+- Method instantiates SemanticSearchTool with user_context
+- Method creates Agent with RAG_SYSTEM_PROMPT (overriding generic prompt)
+- Returns fully configured RAG agent instance
+
+**AC1.2.1.3:** CLI Command for RAG Testing
+- New CLI command `rag-chat` in `cli/commands/rag.py`
+- Command accepts --user-id, --org-id, --scope options
+- Creates RAG agent and starts interactive chat loop
+- Displays agent events (THOUGHT, ACTION, TOOL_RESULT, COMPLETE)
+
+**AC1.2.1.4:** Environment Validation
+- CLI validates Azure environment variables before agent creation
+- Clear error message if AZURE_SEARCH_ENDPOINT or AZURE_SEARCH_API_KEY missing
+
+**AC1.2.1.5:** Basic Integration Test
+- Test `create_rag_agent()` successfully creates agent
+- Verify `rag_semantic_search` tool registered
+- Mock test: Agent executes simple query using tool
+
+#### Integration Verification
+
+- **IV1.2.1.1:** CLI command starts successfully with valid Azure credentials
+- **IV1.2.1.2:** Agent can execute rag_semantic_search and receive results
+- **IV1.2.1.3:** No regressions in existing agent tests
+- **IV1.2.1.4:** End-to-end flow validated: CLI → Agent → Tool → Azure Search
+
+#### Purpose
+
+This early integration story validates that Story 1.2's SemanticSearchTool works with the Agent before building Stories 1.3-1.5. It de-risks the remaining epic by:
+- Proving tool registration pattern works
+- Testing Agent-Tool interaction
+- Providing early feedback on system prompt design
+- Creating CLI command for manual testing and demos
+
+**Estimate:** 4-6 hours
+**Priority:** High (Integration Validation)
+
+---
+
 ### Story 1.3: Document Metadata Tools (List and Get)
 
 **As a** RAG-enabled agent,
@@ -648,9 +702,11 @@ azure-core>=1.29.0
 **I want** a comprehensive RAG-specific system prompt,
 **so that** the agent intelligently classifies queries and generates optimal plans for knowledge retrieval tasks.
 
+**Note:** Story 1.2.1 creates a **minimal** version of the RAG prompt for early testing. This story **enhances** it to the full production version with all query types and planning patterns.
+
 #### Acceptance Criteria
 
-**AC1.4.1:** A new file `prompts/rag_system_prompt.py` exists containing `RAG_SYSTEM_PROMPT` string that includes:
+**AC1.4.1:** The existing `prompts/rag_system_prompt.py` (created in Story 1.2.1) is **enhanced** with `RAG_SYSTEM_PROMPT` string that includes:
 - **Query Classification Section**: Instructions to classify queries as LISTING, CONTENT_SEARCH, DOCUMENT_SUMMARY, METADATA_SEARCH, COMPARISON
 - **Planning Patterns Section**: Examples of typical TodoList structures for each query type
 - **Clarification Guidelines**: When to ask for user input (ambiguous document references, missing filters)
