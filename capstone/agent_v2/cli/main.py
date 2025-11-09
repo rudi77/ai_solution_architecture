@@ -13,6 +13,10 @@ import typer
 from rich.console import Console
 from rich.traceback import install
 import structlog
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Fix Windows Unicode support
 if os.name == 'nt':  # Windows
@@ -31,6 +35,7 @@ from .commands.providers import app as providers_app
 from .commands.sessions import app as sessions_app
 from .commands.config import app as config_app
 from .commands.dev import app as dev_app
+from .commands.rag import app as rag_app
 from .plugin_manager import PluginManager
 from .config.settings import CLISettings
 
@@ -95,6 +100,7 @@ def initialize_cli():
     app.add_typer(sessions_app, name="sessions", help="Manage execution sessions")
     app.add_typer(config_app, name="config", help="Manage configuration")
     app.add_typer(dev_app, name="dev", help="Developer and debug tools")
+    app.add_typer(rag_app, name="rag", help="RAG knowledge retrieval commands")
 
     # Add dev commands to dev CLI
     dev_cli.add_typer(dev_app, name="", help="Developer tools")
