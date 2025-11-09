@@ -58,14 +58,17 @@ class AzureSearchBase:
         Build OData filter for row-level security based on user context.
 
         Args:
-            user_context: Dict with user_id, department, org_id keys
+            user_context: Dict with user_id, org_id, scope keys
 
         Returns:
-            OData filter string for access_control_list field
+            OData filter string for direct field filtering
 
         Examples:
-            >>> build_security_filter({"user_id": "u123", "department": "eng"})
-            "access_control_list/any(acl: acl eq 'u123' or acl eq 'eng')"
+            >>> build_security_filter({"user_id": "ms-user", "org_id": "MS-corp"})
+            "user_id eq 'ms-user' and org_id eq 'MS-corp'"
+
+            >>> build_security_filter({"user_id": "ms-user", "org_id": "MS-corp", "scope": "shared"})
+            "user_id eq 'ms-user' and org_id eq 'MS-corp' and scope eq 'shared'"
 
             >>> build_security_filter(None)
             ""
@@ -78,20 +81,19 @@ class AzureSearchBase:
 
         filters = []
 
-        # Extract and sanitize values
-        for key in ["user_id", "department", "org_id"]:
+        # Extract and sanitize values for direct field filtering
+        for key in ["user_id", "org_id", "scope"]:
             value = user_context.get(key)
             if value:
                 # Sanitize input to prevent OData injection
                 sanitized = self._sanitize_filter_value(value)
-                filters.append(f"acl eq '{sanitized}'")
+                filters.append(f"{key} eq '{sanitized}'")
 
         if not filters:
             return ""
 
-        # Combine with OR logic inside any() predicate
-        combined = " or ".join(filters)
-        return f"access_control_list/any(acl: {combined})"
+        # Combine with AND logic for exact match filtering
+        return " and ".join(filters)
 
     def _sanitize_filter_value(self, value: str) -> str:
         """
