@@ -66,17 +66,16 @@ class TestAzureSearchBase:
             base = AzureSearchBase()
             user_context = {
                 "user_id": "user123",
-                "department": "engineering",
-                "org_id": "org456"
+                "org_id": "org456",
+                "scope": "shared"
             }
 
             filter_str = base.build_security_filter(user_context)
 
-            assert "access_control_list/any(acl:" in filter_str
-            assert "acl eq 'user123'" in filter_str
-            assert "acl eq 'engineering'" in filter_str
-            assert "acl eq 'org456'" in filter_str
-            assert " or " in filter_str
+            assert "user_id eq 'user123'" in filter_str
+            assert "org_id eq 'org456'" in filter_str
+            assert "scope eq 'shared'" in filter_str
+            assert " and " in filter_str
 
     def test_security_filter_with_partial_context(self):
         """Test security filter with only some fields present."""
@@ -89,8 +88,9 @@ class TestAzureSearchBase:
 
             filter_str = base.build_security_filter(user_context)
 
-            assert "acl eq 'user123'" in filter_str
-            assert "engineering" not in filter_str
+            assert "user_id eq 'user123'" in filter_str
+            assert "org_id" not in filter_str
+            assert "scope" not in filter_str
 
     def test_security_filter_with_none_context(self):
         """Test that None user_context returns empty filter."""
@@ -154,7 +154,7 @@ class TestAzureSearchBase:
 
             # Single quote should be doubled for OData escaping
             assert "O''Brien" in filter_str
-            assert "acl eq 'O''Brien'" in filter_str
+            assert "user_id eq 'O''Brien'" in filter_str
 
     def test_security_filter_rejects_sql_comment_injection(self):
         """Test that SQL comment injection attempts are rejected."""
@@ -163,7 +163,7 @@ class TestAzureSearchBase:
             "AZURE_SEARCH_API_KEY": "test-key"
         }):
             base = AzureSearchBase()
-            user_context = {"department": "eng--admin"}
+            user_context = {"org_id": "org--admin"}
 
             with pytest.raises(ValueError) as exc_info:
                 base.build_security_filter(user_context)
