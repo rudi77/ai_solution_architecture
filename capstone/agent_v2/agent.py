@@ -360,8 +360,16 @@ class Agent:
             self.logger.info("answer_received", session_id=session_id, answer_key=answer_key)
         
         # 4. Plan erstellen (falls noch nicht vorhanden)
+        todolist_existed = self.state.get("todolist_id") is not None
         todolist = await self._get_or_create_plan(session_id)
-        
+
+        # Emit todolist created event if it was just created
+        if not todolist_existed:
+            yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                           data={"todolist_created": True,
+                                 "todolist": todolist.to_markdown(),
+                                 "items": len(todolist.items)})
+
         # 5. ReAct Loop
         async for event in self._react_loop(session_id, todolist):
             yield event
@@ -397,12 +405,12 @@ class Agent:
                 tools_desc=self.tools_description,
                 answers=answers
         )
-        
+
         self.state["todolist_id"] = todolist.todolist_id
         await self.state_manager.save_state(session_id, self.state)
-        self.logger.info("plan_created", session_id=session_id, 
+        self.logger.info("plan_created", session_id=session_id,
                         todolist_id=todolist.todolist_id, items=len(todolist.items))
-        
+
         return todolist
 
 
@@ -470,18 +478,29 @@ class Agent:
                     # Acceptance Criteria prüfen
                     if await self._check_acceptance(current_step, observation):
                         current_step.status = TaskStatus.COMPLETED
-                        self.logger.info("step_completed", session_id=session_id, 
+                        self.logger.info("step_completed", session_id=session_id,
                                        step=current_step.position)
+                        # Emit step completed event
+                        yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                                       data={"step_completed": current_step.position,
+                                             "description": current_step.description,
+                                             "status": current_step.status.value})
                     else:
                         current_step.status = TaskStatus.FAILED
-                        self.logger.warning("acceptance_failed", session_id=session_id, 
+                        self.logger.warning("acceptance_failed", session_id=session_id,
                                           step=current_step.position)
+                        yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                                       data={"step_failed": current_step.position,
+                                             "reason": "acceptance_criteria_not_met"})
                 else:
                     current_step.status = TaskStatus.FAILED
-                    self.logger.warning("step_failed", session_id=session_id, 
-                                      step=current_step.position, 
+                    self.logger.warning("step_failed", session_id=session_id,
+                                      step=current_step.position,
                                       error=observation.get("error"))
-                
+                    yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                                   data={"step_failed": current_step.position,
+                                         "error": observation.get("error")})
+
                 yield AgentEvent(type=AgentEventType.TOOL_RESULT, data=observation)
             
             elif thought.action.type == ActionType.REPLAN:
@@ -491,10 +510,15 @@ class Agent:
                                 data={"plan_updated": True})
             
             elif thought.action.type == ActionType.DONE:
-                # Frühzeitiger Abschluss
-                self.logger.info("early_completion", session_id=session_id, 
+                # Frühzeitiger Abschluss mit finaler Antwort
+                self.logger.info("early_completion", session_id=session_id,
                                step=current_step.position)
                 current_step.status = TaskStatus.COMPLETED
+
+                # Emit final answer before breaking
+                final_answer = thought.action.summary if hasattr(thought.action, 'summary') else "Task completed"
+                yield AgentEvent(type=AgentEventType.COMPLETE,
+                                data={"message": final_answer, "summary": final_answer})
                 break
             
             # 4. State + Plan persistieren

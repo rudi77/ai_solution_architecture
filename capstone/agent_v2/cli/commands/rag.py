@@ -29,9 +29,27 @@ def validate_azure_config():
 def rag_chat(
     user_id: str = typer.Option("test_user", help="User ID for security filtering"),
     org_id: str = typer.Option("test_org", help="Organization ID"),
-    scope: str = typer.Option("shared", help="Content scope")
+    scope: str = typer.Option("shared", help="Content scope"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed agent thoughts and actions"),
+    show_todos: bool = typer.Option(False, "--show-todos", "-t", help="Display todo list updates in real-time"),
+    show_state: bool = typer.Option(False, "--show-state", "-s", help="Display state updates"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug mode (all events)")
 ):
-    """Start interactive RAG chat session with semantic search."""
+    """Start interactive RAG chat session with semantic search.
+
+    Examples:
+        # Basic usage
+        agent rag chat
+
+        # With verbose output
+        agent rag chat --verbose
+
+        # Show todo list updates
+        agent rag chat --show-todos
+
+        # Full debug mode
+        agent rag chat --debug
+    """
 
     # Validate Azure configuration
     if not validate_azure_config():
@@ -58,6 +76,12 @@ def rag_chat(
 
         console.print("[green]✅ RAG Agent started. Type 'exit' to quit.[/green]")
         console.print(f"[dim]📋 User context: {user_context}[/dim]")
+        if debug:
+            console.print("[yellow]🐛 Debug mode: All events will be displayed[/yellow]")
+        elif verbose:
+            console.print("[dim]💬 Verbose mode: Showing detailed thoughts and actions[/dim]")
+        if show_todos:
+            console.print("[dim]📝 Todo tracking: Enabled[/dim]")
         console.print("-" * 60)
 
         while True:
@@ -76,57 +100,134 @@ def rag_chat(
                     try:
                         # AgentEvent has .type (AgentEventType enum) and .data (dict)
                         if not hasattr(event, 'type') or not hasattr(event, 'data'):
-                            console.print(f"[dim]ℹ️  Unknown event: {event}[/dim]")
+                            if debug:
+                                console.print(f"[dim]ℹ️  Unknown event: {event}[/dim]")
                             continue
 
                         event_type = event.type.value if hasattr(event.type, 'value') else str(event.type)
                         event_data = event.data
 
-                        # Extract thought details if present
-                        if event_type == "thought" and isinstance(event_data.get('thought'), dict):
-                            thought = event_data['thought']
-                            rationale = thought.get('rationale', '')
-                            action = thought.get('action', {})
-                            tool_name = action.get('tool', '') if isinstance(action, dict) else ''
+                        # === THOUGHT EVENT ===
+                        if event_type == "thought":
+                            if isinstance(event_data.get('thought'), dict):
+                                thought = event_data['thought']
+                                step_num = event_data.get('step', '?')
+                                rationale = thought.get('rationale', '')
+                                action = thought.get('action', {})
+                                action_type = action.get('type')
+                                tool_name = action.get('tool', '') if isinstance(action, dict) else ''
+                                expected = thought.get('expected_outcome', '')
+                                confidence = thought.get('confidence', 0)
 
-                            console.print(f"[blue]🤔 Step {event_data.get('step', '?')}:[/blue] {rationale}")
-                            if tool_name:
-                                console.print(f"[dim]   → Calling: {tool_name}[/dim]")
+                                # Always show step number and rationale (basic mode)
+                                console.print(f"\n[blue]🤔 Step {step_num}:[/blue] {rationale}")
 
-                        elif event_type == "action":
-                            console.print(f"[cyan]🔧 Action:[/cyan] {event_data.get('tool', '')} - {event_data.get('input', '')}")
+                                # Verbose: show action details
+                                if verbose or debug:
+                                    if tool_name:
+                                        console.print(f"[dim]   → Action: Call {tool_name}[/dim]")
+                                        if debug:
+                                            tool_input = action.get('tool_input', {})
+                                            console.print(f"[dim]   → Input: {tool_input}[/dim]")
+                                    elif action_type:
+                                        console.print(f"[dim]   → Action: {action_type}[/dim]")
 
+                                    if expected:
+                                        console.print(f"[dim]   → Expected: {expected}[/dim]")
+                                    if confidence and debug:
+                                        console.print(f"[dim]   → Confidence: {confidence}[/dim]")
+
+                        # === TOOL RESULT EVENT ===
                         elif event_type == "tool_result":
-                            # Show success/failure and truncate results
                             success = event_data.get('success', False)
                             results = event_data.get('results', [])
                             status = "✓" if success else "✗"
                             count = len(results) if isinstance(results, list) else 0
+
+                            # Basic mode: just show count
                             console.print(f"[magenta]📊 Result:[/magenta] {status} Found {count} results")
 
+                            # Verbose: show first result preview
+                            if verbose and results and count > 0:
+                                first = results[0]
+                                content = first.get('content_text', '')[:100]
+                                source = first.get('text_document_id', 'unknown')
+                                console.print(f"[dim]   → Preview: {content}... (from {source})[/dim]")
+
+                            # Debug: show all result IDs
+                            if debug and results:
+                                ids = [r.get('content_id', '?')[:20] for r in results[:5]]
+                                console.print(f"[dim]   → IDs: {', '.join(ids)}...[/dim]")
+
+                        # === STATE UPDATED EVENT (TodoList changes) ===
+                        elif event_type == "state_updated":
+                            if event_data.get('todolist_created'):
+                                if show_todos:
+                                    console.print(f"\n[yellow]📝 Todo List Created ({event_data.get('items', 0)} items):[/yellow]")
+                                    console.print(event_data.get('todolist', ''))
+                                elif verbose or debug:
+                                    console.print(f"[yellow]📝 Todo list created with {event_data.get('items', 0)} items[/yellow]")
+
+                            elif event_data.get('step_completed'):
+                                step_num = event_data['step_completed']
+                                description = event_data.get('description', '')
+                                if show_todos:
+                                    console.print(f"[green]✓ Step {step_num} completed:[/green] {description}")
+                                elif verbose or debug:
+                                    console.print(f"[green]✓ Step {step_num} done[/green]")
+
+                            elif event_data.get('step_failed'):
+                                step_num = event_data['step_failed']
+                                reason = event_data.get('reason') or event_data.get('error', 'unknown')
+                                if show_todos or verbose:
+                                    console.print(f"[red]✗ Step {step_num} failed:[/red] {reason}")
+
+                            elif event_data.get('plan_updated'):
+                                if show_todos or debug:
+                                    console.print(f"[yellow]📝 Todo list updated[/yellow]")
+
+                            elif debug:
+                                console.print(f"[dim]📌 State updated: {event_data}[/dim]")
+
+                        # === ASK USER EVENT ===
                         elif event_type == "ask_user":
-                            console.print(f"[yellow]❓ Question:[/yellow] {event_data.get('message', event_data)}")
+                            console.print(f"\n[yellow]❓ Question:[/yellow] {event_data.get('message', event_data)}")
 
+                        # === COMPLETE EVENT ===
                         elif event_type == "complete":
-                            # Extract final answer from todolist if present
+                            # Check for final answer/summary
+                            message = event_data.get('message') or event_data.get('summary')
                             todolist = event_data.get('todolist', '')
-                            if todolist and isinstance(todolist, str):
-                                # Skip the todolist dump, agent finished
-                                console.print(f"\n[green]✅ Task completed![/green]")
-                            else:
-                                console.print(f"\n[green]✅ Agent:[/green] {event_data.get('message', event_data)}")
 
+                            if message:
+                                # Final answer from ActionType.DONE
+                                console.print(f"\n[green]✅ Agent:[/green]\n{message}")
+                            elif todolist and isinstance(todolist, str) and show_todos:
+                                # Show final todolist if requested
+                                console.print(f"\n[green]✅ Task completed![/green]")
+                                console.print("\n[dim]Final Todo List:[/dim]")
+                                console.print(todolist)
+                            else:
+                                console.print(f"\n[green]✅ Task completed![/green]")
+
+                        # === ERROR EVENT ===
                         elif event_type == "error":
                             console.print(f"[red]❌ Error:[/red] {event_data.get('message', event_data)}")
 
+                        # === TOOL STARTED ===
+                        elif event_type == "tool_started":
+                            if verbose or debug:
+                                tool = event_data.get('tool', 'unknown')
+                                console.print(f"[cyan]🔧 Executing:[/cyan] {tool}")
+
+                        # === OTHER EVENTS ===
                         else:
-                            # Skip verbose state updates
-                            if event_type not in ["state_updated", "tool_started"]:
-                                console.print(f"[dim]ℹ️  {event_type}[/dim]")
+                            if debug:
+                                console.print(f"[dim]ℹ️  {event_type}: {event_data}[/dim]")
 
                     except Exception as e:
-                        # Silently skip malformed events
-                        console.print(f"[dim][Event parsing error: {e}][/dim]")
+                        if debug:
+                            console.print(f"[red][Event parsing error: {e}][/red]")
                         continue
 
             except KeyboardInterrupt:
