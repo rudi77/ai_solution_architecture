@@ -15,8 +15,10 @@ from rich.traceback import install
 import structlog
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file in agent_v2 directory
+agent_v2_dir = Path(__file__).parent.parent
+dotenv_path = agent_v2_dir / ".env"
+load_dotenv(dotenv_path=dotenv_path)
 
 # Fix Windows Unicode support
 if os.name == 'nt':  # Windows
