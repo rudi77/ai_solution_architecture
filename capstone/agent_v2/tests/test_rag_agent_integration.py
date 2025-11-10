@@ -28,12 +28,13 @@ async def test_create_rag_agent():
     assert agent.name == "RAG Knowledge Assistant"
     assert agent.description == "Agent with semantic search capabilities for enterprise documents"
 
-    # Verify RAG tools registered (semantic search + list documents + get document)
+    # Verify RAG tools registered (semantic search + list documents + get document + llm_generate)
     tool_names = [tool.name for tool in agent.tools]
     assert "rag_semantic_search" in tool_names
     assert "rag_list_documents" in tool_names
     assert "rag_get_document" in tool_names
-    assert len(agent.tools) == 3  # 3 RAG tools
+    assert "llm_generate" in tool_names
+    assert len(agent.tools) == 4  # 3 RAG tools + 1 LLM tool
 
     # Verify RAG prompt loaded
     assert agent.system_prompt is not None
@@ -102,11 +103,15 @@ async def test_rag_agent_with_none_user_context():
     )
 
     assert agent is not None
-    assert len(agent.tools) == 3  # 3 RAG tools
+    assert len(agent.tools) == 4  # 3 RAG tools + 1 LLM tool
 
     # Get the semantic search tool and verify user_context is None
     rag_tool = next(tool for tool in agent.tools if tool.name == "rag_semantic_search")
     assert rag_tool.user_context is None or rag_tool.user_context == {}
+    
+    # Verify LLM tool is present
+    llm_tool = next(tool for tool in agent.tools if tool.name == "llm_generate")
+    assert llm_tool is not None
 
 
 @pytest.mark.asyncio
@@ -153,9 +158,10 @@ async def test_rag_agent_tool_execution_mock():
     )
 
     # Verify tools are accessible
-    assert len(agent.tools) == 3  # 3 RAG tools
+    assert len(agent.tools) == 4  # 3 RAG tools + 1 LLM tool
     tool_names = [tool.name for tool in agent.tools]
     assert "rag_semantic_search" in tool_names
+    assert "llm_generate" in tool_names
 
     # Verify semantic search tool has required methods
     tool = next(tool for tool in agent.tools if tool.name == "rag_semantic_search")

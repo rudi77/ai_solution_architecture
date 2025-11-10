@@ -18,6 +18,7 @@ from capstone.agent_v2.tool import Tool
 from capstone.agent_v2.tools.code_tool import PythonTool
 from capstone.agent_v2.tools.file_tool import FileReadTool, FileWriteTool
 from capstone.agent_v2.tools.git_tool import GitHubTool, GitTool
+from capstone.agent_v2.tools.llm_tool import LLMTool
 from capstone.agent_v2.tools.shell_tool import PowerShellTool
 from capstone.agent_v2.tools.web_tool import WebFetchTool, WebSearchTool
 
@@ -894,6 +895,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
             FileReadTool(),
             FileWriteTool(),
             PowerShellTool(),
+            LLMTool(llm=llm),
         ]
 
         system_prompt = GENERIC_SYSTEM_PROMPT if system_prompt is None else system_prompt
@@ -944,11 +946,16 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         from capstone.agent_v2.tools.rag_get_document_tool import GetDocumentTool
         from capstone.agent_v2.prompts.rag_system_prompt import RAG_SYSTEM_PROMPT
 
+        # Use default LLM if not provided
+        if llm is None:
+            llm = litellm
+
         # Create RAG tools with user context
         rag_tools = [
             SemanticSearchTool(user_context=user_context),
             ListDocumentsTool(user_context=user_context),
-            GetDocumentTool(user_context=user_context)
+            GetDocumentTool(user_context=user_context),
+            LLMTool(llm=llm)
         ]
 
         # Set default work directory
@@ -967,10 +974,6 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         state_dir = work_dir_path / "states"
         state_dir.mkdir(exist_ok=True)
         state_manager = StateManager(state_dir=state_dir)
-
-        # Use default LLM if not provided
-        if llm is None:
-            llm = litellm
 
         # Create agent with RAG prompt and tools
         return Agent(
