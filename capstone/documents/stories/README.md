@@ -13,10 +13,12 @@ This directory contains detailed implementation documents for all user stories i
 | **1.3** | Document Metadata Tools (List and Get) | Medium | 4-6 hours | ✅ **Done** | 1.1, 1.2 |
 | **1.3.1** | Generic LLM Tool for Response Generation | High | 3-4 hours | ✅ **Ready** | None |
 | **1.4** | RAG System Prompt for Query Classification and Planning | High | 6-8 hours | ✅ **Ready** | 1.3.1 |
-| **1.5** | Multimodal Synthesis via PythonTool | Medium | 4-5 hours | Pending | 1.2, 1.4 |
-| **1.6** | RAG Agent Factory Method and End-to-End Integration | High | 6-8 hours | Pending | All (1.1-1.5) |
+| **1.5** | Multimodal Synthesis via PythonTool | Medium | 4-5 hours | ✅ **Ready** | 1.2, 1.4 |
+| **1.6** | RAG Agent Factory Method and End-to-End Integration | High | 6-8 hours | ✅ **Ready** | All (1.1-1.5) |
 
 **Total Estimate:** 33-45 hours (~1 week for solo developer, ~4-5 days for pair)
+
+**Stories with Complete Documents:** 6 of 7 (86% complete) ✅
 
 ---
 
@@ -278,54 +280,70 @@ TodoList:
 
 ---
 
-### 📋 Story 1.5: Multimodal Synthesis via PythonTool
-**File:** `story-1-5-multimodal-synthesis.md` (to be created)
+### ✅ Story 1.5: Multimodal Synthesis via PythonTool
+**File:** [`story-1.5-multimodal-synthesis.md`](./story-1.5-multimodal-synthesis.md)
 
 **What it delivers:**
-- Updates to RAG system prompt (from 1.4) with synthesis template
-- Reference synthesis script documentation
+- **NO NEW TOOL** - leverages existing PythonTool
+- Reference synthesis script in `docs/rag_synthesis_example.py`
+- Synthesis guidance in RAG_SYSTEM_PROMPT (Story 1.4)
 - Integration test demonstrating search → synthesize workflow
-- Validation of markdown output
+- Two synthesis approaches: **llm_generate** (recommended) or **python_tool** (for complex formatting)
 
 **Key Files:**
-- `capstone/agent_v2/docs/rag_synthesis_example.py` (reference script)
+- `capstone/agent_v2/docs/rag_synthesis_example.py` (reference implementation)
 - `capstone/agent_v2/tests/integration/test_rag_synthesis.py`
+- RAG_SYSTEM_PROMPT already includes synthesis patterns (Story 1.4)
 
-**Synthesis Flow:**
-1. Agent executes `rag_semantic_search` → Gets content blocks
-2. Agent plans synthesis step using `PythonTool`
-3. Agent generates Python code dynamically to format markdown
-4. Final output: Markdown with embedded images + citations
+**Synthesis Approaches:**
 
-**Example Synthesis Code (Agent-generated):**
+**Option A: llm_generate (Recommended)**
 ```python
-def synthesize_response(blocks, query):
-    markdown = f"# Answer to: {query}\n\n"
-    for block in blocks:
-        if block['block_type'] == 'text':
-            markdown += f"{block['content']}\n\n"
-            markdown += f"*(Source: {block['filename']}, S. {block['page_number']})*\n\n"
-        elif block['block_type'] == 'image':
-            markdown += f"![{block['image_caption']}]({block['image_url']})\n\n"
-            markdown += f"*(Source: {block['filename']}, S. {block['page_number']})*\n\n"
-    return markdown
+TodoList:
+1. Search content (rag_semantic_search)
+2. Synthesize response (llm_generate)
+   - Input: {
+       "prompt": "Synthesize search results into comprehensive answer",
+       "context": {"search_results": [...]}
+     }
+   - Output: Markdown with text + images + citations
 ```
+
+**Option B: python_tool (For Complex Formatting)**
+```python
+TodoList:
+1. Search content (rag_semantic_search)
+2. Generate synthesis code dynamically
+3. Execute synthesis (python_tool)
+   - Code: <agent-generated Python>
+   - Context: {"content_blocks": [...]}
+   - Output: Formatted markdown
+```
+
+**Why No New Tool?**
+- PythonTool already supports code execution with context
+- llm_generate handles most synthesis needs
+- Agent chooses appropriate approach based on complexity
+
+**Status:** ✅ Story document created, ready for implementation
 
 ---
 
-### 📋 Story 1.6: RAG Agent Factory Method and End-to-End Integration
-**File:** `story-1-6-rag-agent-factory-and-integration.md` (to be created)
+### ✅ Story 1.6: RAG Agent Factory Method and End-to-End Integration
+**File:** [`story-1.6-rag-agent-factory-and-integration.md`](./story-1.6-rag-agent-factory-and-integration.md)
 
 **What it delivers:**
-- `Agent.create_rag_agent()` static method
-- Full end-to-end integration test
+- `Agent.create_rag_agent()` static factory method
+- One-line RAG agent creation with sensible defaults
+- Automatic Azure configuration validation (fail-fast)
+- Complete end-to-end integration tests for all query types
 - README documentation with usage examples
-- Performance and security verification
 
 **Key Files:**
 - `capstone/agent_v2/agent.py` (add `create_rag_agent()` method)
 - `capstone/agent_v2/README.md` (updated with RAG usage)
-- `capstone/agent_v2/tests/integration/test_rag_end_to_end.py`
+- `capstone/agent_v2/tests/test_rag_agent_factory.py` (unit tests)
+- `capstone/agent_v2/tests/integration/test_rag_end_to_end.py` (integration tests)
 
 **Factory Method Signature:**
 ```python
@@ -336,38 +354,56 @@ def create_rag_agent(
     mission: str,
     work_dir: str,
     llm,
-    user_context: Optional[Dict] = None
+    user_context: Optional[Dict[str, Any]] = None,
+    include_standard_tools: bool = True,
+    azure_config: Optional[Dict[str, str]] = None
 ) -> "Agent":
     """
-    Create a RAG-enabled agent with Azure AI Search tools and RAG system prompt.
-
-    Example:
-        agent = Agent.create_rag_agent(
-            name="Knowledge Assistant",
-            description="Multimodal RAG agent",
-            mission="Explain how the safety valve works",
-            work_dir="./rag_sessions",
-            llm=None,
-            user_context={"user_id": "user123", "department": "engineering"}
-        )
+    Create RAG-enabled agent with all necessary tools and prompt.
+    
+    Automatically:
+    - Validates Azure Search configuration
+    - Instantiates all RAG tools (semantic search, document tools, LLM)
+    - Sets RAG_SYSTEM_PROMPT
+    - Configures user context for security
+    - Optionally includes standard tools (Web, File, Git, Python)
     """
 ```
 
+**One-Line Agent Creation:**
+```python
+agent = Agent.create_rag_agent(
+    name="Knowledge Assistant",
+    description="Multimodal RAG agent for technical docs",
+    mission="Answer user questions about documentation",
+    work_dir="./rag_sessions",
+    llm=my_llm,
+    user_context={"user_id": "user123", "org_id": "acme", "scope": "shared"}
+)
+# Agent ready with all RAG capabilities!
+```
+
 **End-to-End Test Scenarios:**
-1. **CONTENT_SEARCH:** "Explain the XYZ process"
-   - Agent classifies query
-   - Plans: search → synthesize
-   - Executes tools
-   - Returns markdown with images + citations
+1. **LISTING:** "Welche Dokumente gibt es?"
+   - TodoList: [rag_list_documents, llm_generate]
+   - Result: Natural language list of documents
 
-2. **DOCUMENT_SUMMARY:** "Summarize the Q3 financial report"
-   - Agent asks which report (if multiple)
-   - Gets document summary
-   - Returns formatted response
+2. **CONTENT_SEARCH:** "How does the safety valve work?"
+   - TodoList: [rag_semantic_search, llm_generate]
+   - Result: Comprehensive answer with diagrams + citations
 
-3. **LISTING:** "What manuals are available?"
-   - Lists documents filtered by type
-   - Returns formatted list
+3. **DOCUMENT_SUMMARY:** "Summarize the installation manual"
+   - TodoList: [rag_list_documents, rag_get_document, llm_generate]
+   - Result: Document summary
+
+4. **Error Handling:** Missing Azure config, invalid params, etc.
+
+**Backward Compatibility:**
+- Agent.create_agent() unchanged (if exists)
+- Non-RAG agents unaffected
+- Both factory methods coexist
+
+**Status:** ✅ Story document created, ready for implementation
 
 ---
 
@@ -529,13 +565,12 @@ pip install black isort mypy pytest-asyncio pytest-mock
 
 ```
 capstone/agent_v2/
-├── agent.py                           # Modified: Added create_rag_agent()
-├── requirements.txt                    # Modified: Added Azure SDK
-├── prompts/                           # NEW
+├── agent.py                           # Modified: Added create_rag_agent() (Story 1.6)
+├── requirements.txt                    # Modified: Added Azure SDK (Story 1.1)
+├── prompts/                           # NEW (Story 1.4)
 │   ├── __init__.py
-│   ├── generic_system_prompt.py
-│   ├── rag_system_prompt.py
-│   └── README.md
+│   ├── rag_system_prompt.py          # Complete RAG intelligence
+│   └── README.md                      # Prompt documentation
 ├── tools/
 │   ├── azure_search_base.py           # NEW (Story 1.1)
 │   ├── rag_semantic_search_tool.py    # NEW (Story 1.2)
@@ -544,16 +579,19 @@ capstone/agent_v2/
 │   ├── llm_tool.py                    # NEW (Story 1.3.1)
 │   └── [existing tools unchanged]
 ├── docs/
-│   └── rag_synthesis_example.py       # NEW (Story 1.5)
+│   └── rag_synthesis_example.py       # NEW (Story 1.5) - Reference implementation
 └── tests/
     ├── test_azure_search_base.py      # NEW (Story 1.1)
     ├── test_rag_semantic_search_tool.py  # NEW (Story 1.2)
     ├── test_rag_document_tools.py     # NEW (Story 1.3)
     ├── test_llm_tool.py               # NEW (Story 1.3.1)
+    ├── test_rag_system_prompt.py      # NEW (Story 1.4)
+    ├── test_rag_agent_factory.py      # NEW (Story 1.6)
     └── integration/
         ├── test_azure_search_integration.py  # NEW (Story 1.1)
         ├── test_rag_document_tools_integration.py  # NEW (Story 1.3)
         ├── test_llm_tool_integration.py   # NEW (Story 1.3.1)
+        ├── test_rag_prompt_integration.py  # NEW (Story 1.4)
         ├── test_rag_synthesis.py         # NEW (Story 1.5)
         └── test_rag_end_to_end.py        # NEW (Story 1.6)
 ```
