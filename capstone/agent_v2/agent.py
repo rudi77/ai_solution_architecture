@@ -940,11 +940,15 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
             ...     print(event)
         """
         from capstone.agent_v2.tools.rag_semantic_search_tool import SemanticSearchTool
+        from capstone.agent_v2.tools.rag_list_documents_tool import ListDocumentsTool
+        from capstone.agent_v2.tools.rag_get_document_tool import GetDocumentTool
         from capstone.agent_v2.prompts.rag_system_prompt import RAG_SYSTEM_PROMPT
 
         # Create RAG tools with user context
         rag_tools = [
-            SemanticSearchTool(user_context=user_context)
+            SemanticSearchTool(user_context=user_context),
+            ListDocumentsTool(user_context=user_context),
+            GetDocumentTool(user_context=user_context)
         ]
 
         # Set default work directory

@@ -35,10 +35,19 @@ class TestAzureSearchBase:
 
     def test_valid_config_succeeds(self):
         """Test that valid configuration initializes successfully."""
-        with patch.dict(os.environ, {
+        # Clear any existing index env vars and set required ones
+        env_vars = {
             "AZURE_SEARCH_ENDPOINT": "https://test.search.windows.net",
             "AZURE_SEARCH_API_KEY": "test-key"
-        }):
+        }
+        # Remove index-specific vars to test defaults
+        env_to_clear = ["AZURE_SEARCH_CONTENT_INDEX", "AZURE_SEARCH_DOCUMENTS_INDEX"]
+        
+        with patch.dict(os.environ, env_vars, clear=False):
+            # Remove the index environment variables if they exist
+            for var in env_to_clear:
+                os.environ.pop(var, None)
+            
             base = AzureSearchBase()
             assert base.endpoint == "https://test.search.windows.net"
             assert base.api_key == "test-key"

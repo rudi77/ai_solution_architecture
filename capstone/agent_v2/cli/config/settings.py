@@ -45,6 +45,11 @@ class CLISettings(BaseSettings):
     log_level: str = Field(default="INFO", description="Logging level")
     log_file: Optional[str] = Field(default=None, description="Log file path")
 
+    # Azure Search RAG settings
+    azure_search_endpoint: Optional[str] = Field(default=None, description="Azure Search endpoint URL")
+    azure_search_api_key: Optional[str] = Field(default=None, description="Azure Search API key")
+    azure_search_content_index: Optional[str] = Field(default=None, description="Azure Search content index name")
+
     model_config = {
         "env_file": ".env",
         "env_prefix": "AGENT_",
