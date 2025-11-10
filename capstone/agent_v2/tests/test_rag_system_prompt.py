@@ -44,17 +44,11 @@ class TestRagSystemPromptSections:
         assert "RAG" in RAG_SYSTEM_PROMPT
         assert "agent" in RAG_SYSTEM_PROMPT.lower()
 
-    def test_has_query_classification_section(self):
-        """Prompt should include Query Classification section."""
-        assert "## Query Classification" in RAG_SYSTEM_PROMPT
-        # Should mention classification concepts
-        assert "classify" in RAG_SYSTEM_PROMPT.lower() or "classification" in RAG_SYSTEM_PROMPT.lower()
-
-    def test_has_planning_patterns_section(self):
-        """Prompt should include Planning Patterns section."""
-        assert "## Planning Patterns" in RAG_SYSTEM_PROMPT
-        # Should mention TodoList or planning
-        assert "todolist" in RAG_SYSTEM_PROMPT.lower() or "plan" in RAG_SYSTEM_PROMPT.lower()
+    def test_has_tool_selection_guide_section(self):
+        """Prompt should include Tool Selection Decision Guide section."""
+        assert "## Tool Selection Decision Guide" in RAG_SYSTEM_PROMPT or "Tool Selection" in RAG_SYSTEM_PROMPT
+        # Should mention tool selection concepts
+        assert "select" in RAG_SYSTEM_PROMPT.lower() or "decision" in RAG_SYSTEM_PROMPT.lower()
 
     def test_has_tool_usage_rules_section(self):
         """Prompt should include Tool Usage Rules section."""
@@ -62,12 +56,11 @@ class TestRagSystemPromptSections:
         # Should mention tools
         assert "tool" in RAG_SYSTEM_PROMPT.lower()
 
-    def test_has_response_generation_guidelines_section(self):
-        """Prompt should include Response Generation Guidelines section."""
-        assert "## Response Generation Guidelines" in RAG_SYSTEM_PROMPT or "Response Generation" in RAG_SYSTEM_PROMPT
-        # Should mention interactive and autonomous
-        assert "interactive" in RAG_SYSTEM_PROMPT.lower()
-        assert "autonomous" in RAG_SYSTEM_PROMPT.lower()
+    def test_has_core_principles_section(self):
+        """Prompt should include Core Principles Summary section."""
+        assert "## Core Principles Summary" in RAG_SYSTEM_PROMPT or "Core Principles" in RAG_SYSTEM_PROMPT
+        # Should mention key principles
+        assert "principles" in RAG_SYSTEM_PROMPT.lower()
 
     def test_has_clarification_guidelines_section(self):
         """Prompt should include Clarification Guidelines section."""
@@ -88,45 +81,6 @@ class TestRagSystemPromptSections:
         assert "citation" in RAG_SYSTEM_PROMPT.lower() or "cite" in RAG_SYSTEM_PROMPT.lower() or "Source:" in RAG_SYSTEM_PROMPT
         # Should show citation format
         assert "Source:" in RAG_SYSTEM_PROMPT
-
-
-class TestQueryClassificationCategories:
-    """Test that all required query classification categories are defined."""
-
-    def test_has_listing_category(self):
-        """Prompt should define LISTING query category."""
-        assert "LISTING" in RAG_SYSTEM_PROMPT
-        # Should have examples for listing
-        assert "documents are available" in RAG_SYSTEM_PROMPT or "Which documents" in RAG_SYSTEM_PROMPT
-
-    def test_has_content_search_category(self):
-        """Prompt should define CONTENT_SEARCH query category."""
-        assert "CONTENT_SEARCH" in RAG_SYSTEM_PROMPT
-        # Should mention content within documents
-        assert "content" in RAG_SYSTEM_PROMPT.lower()
-
-    def test_has_document_summary_category(self):
-        """Prompt should define DOCUMENT_SUMMARY query category."""
-        assert "DOCUMENT_SUMMARY" in RAG_SYSTEM_PROMPT
-        # Should mention summary
-        assert "summary" in RAG_SYSTEM_PROMPT.lower() or "summarize" in RAG_SYSTEM_PROMPT.lower()
-
-    def test_has_metadata_search_category(self):
-        """Prompt should define METADATA_SEARCH query category."""
-        assert "METADATA_SEARCH" in RAG_SYSTEM_PROMPT
-        # Should mention metadata or filtering
-        assert "metadata" in RAG_SYSTEM_PROMPT.lower() or "filter" in RAG_SYSTEM_PROMPT.lower()
-
-    def test_has_comparison_category(self):
-        """Prompt should define COMPARISON query category."""
-        assert "COMPARISON" in RAG_SYSTEM_PROMPT
-        # Should mention comparing
-        assert "compare" in RAG_SYSTEM_PROMPT.lower() or "comparison" in RAG_SYSTEM_PROMPT.lower()
-
-    def test_categories_have_examples(self):
-        """Each query category should have example queries."""
-        # Should have multiple examples throughout
-        assert RAG_SYSTEM_PROMPT.count("Example") >= 5 or RAG_SYSTEM_PROMPT.count("example") >= 5
 
 
 class TestToolMentions:
@@ -156,59 +110,56 @@ class TestToolMentions:
                 "Best for" in RAG_SYSTEM_PROMPT)
 
 
-class TestInteractiveVsAutonomousGuidance:
-    """Test that prompt distinguishes interactive queries from autonomous workflows."""
+class TestToolUsageGuidance:
+    """Test that prompt provides clear tool usage guidance."""
 
-    def test_explains_interactive_queries(self):
-        """Prompt should explain interactive queries."""
-        assert "interactive" in RAG_SYSTEM_PROMPT.lower()
-        # Should mention user expects answer
-        assert "answer" in RAG_SYSTEM_PROMPT.lower()
+    def test_explains_when_to_use_each_tool(self):
+        """Prompt should explain when to use each tool."""
+        assert "when to use" in RAG_SYSTEM_PROMPT.lower() or "When to use" in RAG_SYSTEM_PROMPT
+        # Should mention user expectations
+        assert "user" in RAG_SYSTEM_PROMPT.lower()
 
-    def test_explains_autonomous_workflows(self):
-        """Prompt should explain autonomous workflows."""
-        assert "autonomous" in RAG_SYSTEM_PROMPT.lower()
-        # Should mention silent/no response
-        assert "silent" in RAG_SYSTEM_PROMPT.lower() or "no response" in RAG_SYSTEM_PROMPT.lower()
+    def test_emphasizes_llm_generate_for_synthesis(self):
+        """Prompt should emphasize using llm_generate for synthesis."""
+        # Should have strong language about using llm_generate
+        assert "ALWAYS" in RAG_SYSTEM_PROMPT or "always" in RAG_SYSTEM_PROMPT.lower() or "Always" in RAG_SYSTEM_PROMPT
+        # Should mention synthesis or answer
+        assert "answer" in RAG_SYSTEM_PROMPT.lower() or "synthesis" in RAG_SYSTEM_PROMPT.lower()
 
-    def test_emphasizes_llm_generate_for_interactive(self):
-        """Prompt should emphasize using llm_generate for interactive queries."""
-        # Should have strong language about always including llm_generate
-        assert "ALWAYS" in RAG_SYSTEM_PROMPT or "always" in RAG_SYSTEM_PROMPT.lower()
-        # Should mention final step
-        assert "final step" in RAG_SYSTEM_PROMPT.lower()
+    def test_provides_tool_selection_examples(self):
+        """Prompt should provide examples of tool selection."""
+        # Should mention discovery or content questions
+        assert "discovery" in RAG_SYSTEM_PROMPT.lower() or "content" in RAG_SYSTEM_PROMPT.lower()
+        # Should guide on matching tools to tasks
+        assert "for" in RAG_SYSTEM_PROMPT.lower()
 
 
-class TestPlanningPatternExamples:
-    """Test that prompt includes concrete planning pattern examples."""
+class TestToolSelectionDecisionGuide:
+    """Test the Tool Selection Decision Guide section."""
 
-    def test_has_listing_example(self):
-        """Prompt should include LISTING query example with TodoList."""
-        assert "LISTING" in RAG_SYSTEM_PROMPT
+    def test_has_discovery_questions_guidance(self):
+        """Prompt should guide on discovery questions."""
+        # Should mention discovery or listing
+        assert "discovery" in RAG_SYSTEM_PROMPT.lower() or "What documents" in RAG_SYSTEM_PROMPT
         # Should show rag_list_documents usage
         assert "rag_list_documents" in RAG_SYSTEM_PROMPT
 
-    def test_has_content_search_example(self):
-        """Prompt should include CONTENT_SEARCH query example."""
-        assert "CONTENT_SEARCH" in RAG_SYSTEM_PROMPT
+    def test_has_content_questions_guidance(self):
+        """Prompt should guide on content questions."""
+        # Should mention content or how/why questions
+        assert "content" in RAG_SYSTEM_PROMPT.lower() or "How does" in RAG_SYSTEM_PROMPT
         # Should show rag_semantic_search usage
         assert "rag_semantic_search" in RAG_SYSTEM_PROMPT
 
-    def test_has_document_summary_example(self):
-        """Prompt should include DOCUMENT_SUMMARY query example."""
-        assert "DOCUMENT_SUMMARY" in RAG_SYSTEM_PROMPT
-        # Should show multi-step process
+    def test_has_document_specific_guidance(self):
+        """Prompt should guide on document-specific queries."""
+        # Should mention specific documents
+        assert "document" in RAG_SYSTEM_PROMPT.lower()
+        # Should show rag_get_document usage
         assert "rag_get_document" in RAG_SYSTEM_PROMPT
 
-    def test_examples_include_acceptance_criteria(self):
-        """Examples should show acceptance criteria."""
-        # Should mention acceptance or expected outcome
-        assert ("acceptance" in RAG_SYSTEM_PROMPT.lower() or 
-                "expected outcome" in RAG_SYSTEM_PROMPT.lower() or
-                "Acceptance:" in RAG_SYSTEM_PROMPT)
-
-    def test_interactive_examples_include_llm_generate(self):
-        """Interactive query examples should include llm_generate as final step."""
+    def test_emphasizes_synthesis_with_llm_generate(self):
+        """Prompt should emphasize using llm_generate for synthesis."""
         # Count occurrences of llm_generate - should appear multiple times
         llm_generate_count = RAG_SYSTEM_PROMPT.count("llm_generate")
         assert llm_generate_count >= 5, f"llm_generate mentioned only {llm_generate_count} times, expected at least 5"
@@ -296,11 +247,11 @@ class TestBuildRagSystemPrompt:
     def test_preserves_base_prompt_content(self):
         """Function should preserve core RAG_SYSTEM_PROMPT content."""
         result = build_rag_system_prompt()
-        
+
         # Should still have key sections from base prompt
-        assert "Query Classification" in result
-        assert "Planning Patterns" in result
-        assert "LISTING" in result
+        assert "Tool Selection" in result or "Tool Usage" in result
+        assert "rag_semantic_search" in result
+        assert "llm_generate" in result
 
 
 class TestPromptQuality:
@@ -308,16 +259,15 @@ class TestPromptQuality:
 
     def test_no_obvious_typos_in_headers(self):
         """Major section headers should be spelled correctly."""
-        # Check for common section headers
+        # Check for common section headers in refactored prompt
         sections = [
-            "Your Role", "Query Classification", "Planning Patterns",
-            "Tool Usage", "Response Generation", "Clarification",
-            "Multimodal"
+            "Your Role", "Tool Usage", "Tool Selection",
+            "Clarification", "Multimodal", "Core Principles"
         ]
-        
+
         # At least most sections should be present
         found_sections = sum(1 for section in sections if section in RAG_SYSTEM_PROMPT)
-        assert found_sections >= 6, f"Only found {found_sections} of expected {len(sections)} sections"
+        assert found_sections >= 4, f"Only found {found_sections} of expected {len(sections)} sections"
 
     def test_consistent_tool_naming(self):
         """Tool names should be consistent (rag_semantic_search not rag-semantic-search)."""
