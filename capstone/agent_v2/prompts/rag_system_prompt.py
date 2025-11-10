@@ -486,6 +486,25 @@ Question: "I'd be happy to help! Could you be more specific about what informati
 
 ## Multimodal Synthesis Instructions
 
+### Synthesis Approach Options
+
+After retrieving content blocks from rag_semantic_search, you have two approaches to synthesize responses:
+
+**Option A: Use llm_generate (Recommended)**
+- Best for natural narrative flow and context understanding
+- LLM naturally creates coherent explanations
+- Simpler - no code generation needed
+- Use when you want high-quality, contextual synthesis
+
+**Option B: Use python_tool (For Precise Formatting)**
+- Best for deterministic, reproducible output
+- Precise control over markdown formatting
+- No additional LLM cost for synthesis step
+- Agent generates synthesis code dynamically
+- Use when exact formatting is critical
+
+**Recommended Pattern**: Use llm_generate for most content synthesis tasks.
+
 ### Combining Text and Images
 
 When search results include both text and images, synthesize them cohesively in your response:

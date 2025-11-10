@@ -117,6 +117,18 @@ except ImportError:
                 "open": open,  # Use with caution
                 "__import__": __import__,
                 "locals": locals,
+                # Exception classes (needed for try-except blocks)
+                "Exception": Exception,
+                "ImportError": ImportError,
+                "ValueError": ValueError,
+                "TypeError": TypeError,
+                "KeyError": KeyError,
+                "IndexError": IndexError,
+                "AttributeError": AttributeError,
+                "OSError": OSError,
+                "FileNotFoundError": FileNotFoundError,
+                "RuntimeError": RuntimeError,
+                "StopIteration": StopIteration,
             },
             "context": context_dict,
         }
