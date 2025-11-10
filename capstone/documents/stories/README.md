@@ -10,12 +10,13 @@ This directory contains detailed implementation documents for all user stories i
 |-------|-------|----------|----------|--------|--------------|
 | **1.1** | Azure AI Search SDK Integration and Base Tool Infrastructure | High | 4-6 hours | ✅ **Ready** | None |
 | **1.2** | Semantic Search Tool for Content Blocks | High | 6-8 hours | Pending | 1.1 |
-| **1.3** | Document Metadata Tools (List and Get) | Medium | 4-6 hours | Pending | 1.1, 1.2 |
-| **1.4** | RAG System Prompt for Query Classification and Planning | High | 6-8 hours | Pending | None |
+| **1.3** | Document Metadata Tools (List and Get) | Medium | 4-6 hours | ✅ **Done** | 1.1, 1.2 |
+| **1.3.1** | Generic LLM Tool for Response Generation | High | 3-4 hours | ✅ **Ready** | None |
+| **1.4** | RAG System Prompt for Query Classification and Planning | High | 6-8 hours | Pending | 1.3.1 |
 | **1.5** | Multimodal Synthesis via PythonTool | Medium | 4-5 hours | Pending | 1.2, 1.4 |
 | **1.6** | RAG Agent Factory Method and End-to-End Integration | High | 6-8 hours | Pending | All (1.1-1.5) |
 
-**Total Estimate:** 30-41 hours (~1 week for solo developer, ~3-4 days for pair)
+**Total Estimate:** 33-45 hours (~1 week for solo developer, ~4-5 days for pair)
 
 ---
 
@@ -124,37 +125,81 @@ tool.execute(
 
 ---
 
-### 📋 Story 1.3: Document Metadata Tools (List and Get)
-**File:** `story-1-3-document-metadata-tools.md` (to be created)
+### ✅ Story 1.3: Document Metadata Tools (List and Get)
+**File:** [`story-1.3-document-metadata-tools.md`](./story-1.3-document-metadata-tools.md)
 
 **What it delivers:**
 - `ListDocumentsTool` - List documents with filters and sorting
 - `GetDocumentTool` - Retrieve single document with summary
-- Both tools query `documents-metadata` index
+- Both tools query `content-blocks` index (using faceting/aggregation)
 - Security filtering applied automatically
+- Fallback mechanism when faceting not available
 
 **Key Files:**
 - `capstone/agent_v2/tools/rag_list_documents_tool.py`
 - `capstone/agent_v2/tools/rag_get_document_tool.py`
-- `capstone/agent_v2/tests/test_rag_list_documents_tool.py`
-- `capstone/agent_v2/tests/test_rag_get_document_tool.py`
+- `capstone/agent_v2/tests/test_rag_document_tools.py`
+- `capstone/agent_v2/tests/integration/test_rag_document_tools_integration.py`
 
 **Tool Interfaces:**
 ```python
 # List documents
 list_tool.execute(
     filters={"document_type": "Manual"},
-    sort_by="upload_date",
     limit=20,
     user_context={...}
 )
 
 # Get specific document
 get_tool.execute(
-    doc_id="doc-12345",
+    document_id="doc-12345",
     user_context={...}
 )
 ```
+
+**Status:** ✅ Implemented, tested, QA approved
+
+---
+
+### ✅ Story 1.3.1: Generic LLM Tool for Response Generation
+**File:** [`story-1.3.1-generic-llm-tool.md`](./story-1.3.1-generic-llm-tool.md)
+
+**What it delivers:**
+- `LLMTool` - Generic tool for LLM text generation
+- Enables agents to formulate natural language responses as tool actions
+- Supports context injection (pass structured data for synthesis)
+- Works for all agents (RAG, Git, File, etc.) - not RAG-specific
+- Privacy-safe logging (metadata only, no full prompts/responses)
+
+**Key Files:**
+- `capstone/agent_v2/tools/llm_tool.py`
+- `capstone/agent_v2/tests/test_llm_tool.py`
+- `capstone/agent_v2/tests/integration/test_llm_tool_integration.py`
+
+**Tool Interface:**
+```python
+# Formulate response to user
+llm_tool.execute(
+    prompt="Based on the retrieved documents, answer: 'Which documents are available?'",
+    context={
+        "documents": [
+            {"title": "doc1.pdf", "chunks": 214},
+            {"title": "doc2.pdf", "chunks": 15}
+        ]
+    },
+    max_tokens=500,
+    temperature=0.7
+)
+# Returns: {"success": True, "generated_text": "...", "tokens_used": 234}
+```
+
+**Why This Tool?**
+- Solves the "agent retrieves data but doesn't respond to user" problem
+- Makes text generation an explicit, visible workflow step
+- Enables both interactive (chat) and autonomous (workflow) modes
+- Reusable for summaries, translations, formatting, etc.
+
+**Status:** ✅ Story document created, ready for implementation
 
 ---
 
@@ -463,16 +508,19 @@ capstone/agent_v2/
 │   ├── rag_semantic_search_tool.py    # NEW (Story 1.2)
 │   ├── rag_list_documents_tool.py     # NEW (Story 1.3)
 │   ├── rag_get_document_tool.py       # NEW (Story 1.3)
+│   ├── llm_tool.py                    # NEW (Story 1.3.1)
 │   └── [existing tools unchanged]
 ├── docs/
 │   └── rag_synthesis_example.py       # NEW (Story 1.5)
 └── tests/
     ├── test_azure_search_base.py      # NEW (Story 1.1)
     ├── test_rag_semantic_search_tool.py  # NEW (Story 1.2)
-    ├── test_rag_list_documents_tool.py   # NEW (Story 1.3)
-    ├── test_rag_get_document_tool.py     # NEW (Story 1.3)
+    ├── test_rag_document_tools.py     # NEW (Story 1.3)
+    ├── test_llm_tool.py               # NEW (Story 1.3.1)
     └── integration/
         ├── test_azure_search_integration.py  # NEW (Story 1.1)
+        ├── test_rag_document_tools_integration.py  # NEW (Story 1.3)
+        ├── test_llm_tool_integration.py   # NEW (Story 1.3.1)
         ├── test_rag_synthesis.py         # NEW (Story 1.5)
         └── test_rag_end_to_end.py        # NEW (Story 1.6)
 ```
