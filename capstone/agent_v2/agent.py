@@ -1,6 +1,7 @@
 # An Agent class
 
 from dataclasses import field, asdict, dataclass
+import os
 from enum import Enum
 import json
 from pathlib import Path
@@ -102,7 +103,7 @@ Provide a 2-3 paragraph summary of key decisions, results, and context."""
         
         try:
             response = await litellm.acompletion(
-                model="gpt-4.1-mini",
+                model="gpt-4.1",
                 messages=[{"role": "user", "content": summary_prompt}],
                 temperature=0
             )
@@ -701,7 +702,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
 
         self.logger.info("llm_call_thought_start", step=current_step.position)
         response = await litellm.acompletion(
-            model="gpt-4.1-mini",
+            model="gpt-4.1",
             messages=messages,
             response_format={"type": "json_object"},
             temperature=0.2,
