@@ -10,10 +10,11 @@ from capstone.agent_v2.tools.azure_search_base import AzureSearchBase
 
 class GetDocumentTool(Tool):
     """
-    Retrieve detailed metadata for a specific document from content-blocks index.
-    
-    This tool fetches all chunks for a document and aggregates metadata including
-    page count, content types, and chunk information.
+    Retrieve detailed metadata for a specific document from
+    content-blocks index.
+
+    This tool fetches all chunks for a document and aggregates metadata
+    including page count, content types, and chunk information.
     """
 
     def __init__(self, user_context: Optional[Dict[str, Any]] = None):
@@ -37,10 +38,12 @@ class GetDocumentTool(Tool):
     def description(self) -> str:
         """Tool description for the agent."""
         return (
-            "Retrieve detailed metadata for a specific document by document ID. "
-            "Returns complete document information including title, type, chunk count, "
-            "page count, content types (text/images), and access control metadata. "
-            "Use this after listing documents to get detailed information about a specific document."
+            "Retrieve detailed metadata for a specific document by "
+            "document title (filename). Returns complete document "
+            "information including title, type, chunk count, page count, "
+            "content types (text/images), and access control metadata. "
+            "Use this after listing documents to get detailed information "
+            "about a specific document."
         )
 
     @property
@@ -55,11 +58,18 @@ class GetDocumentTool(Tool):
             "properties": {
                 "document_id": {
                     "type": "string",
-                    "description": "The unique document identifier (UUID format)"
+                    "description": (
+                        "The document title/filename "
+                        "(e.g., '30603b8a-9f41-47f4-9fe0-f329104faed5_"
+                        "eGECKO-Personalzeitmanagement.pdf')"
+                    )
                 },
                 "user_context": {
                     "type": "object",
-                    "description": "User context for security filtering (org_id, user_id, scope)",
+                    "description": (
+                        "User context for security filtering "
+                        "(org_id, user_id, scope)"
+                    ),
                     "default": {}
                 }
             },
@@ -88,8 +98,10 @@ class GetDocumentTool(Tool):
         Execute document metadata retrieval from content-blocks index.
 
         Args:
-            document_id: The unique document identifier
-            user_context: Optional user context override for security filtering
+            document_id: The document title/filename
+                        (also accepts document_id for compatibility)
+            user_context: Optional user context override for security
+                         filtering
             **kwargs: Additional arguments (ignored)
 
         Returns:
@@ -113,7 +125,11 @@ class GetDocumentTool(Tool):
 
         Example:
             >>> tool = GetDocumentTool(user_context={"org_id": "MS-corp"})
-            >>> result = await tool.execute(document_id="30603b8a-9f41-47f4-9fe0-f329104faed5")
+            >>> result = await tool.execute(
+            ...     document_id="30603b8a-9f41-47f4-9fe0-"
+            ...                 "f329104faed5_eGECKO-"
+            ...                 "Personalzeitmanagement.pdf"
+            ... )
             >>> print(result["document"]["chunk_count"])
             15
         """
@@ -131,9 +147,19 @@ class GetDocumentTool(Tool):
             # Build security filter from user context
             security_filter = self.azure_base.build_security_filter(context)
 
-            # Build document filter
-            document_filter = f"document_id eq '{self.azure_base._sanitize_filter_value(document_id)}'"
-            
+            # Build document filter - search by document_title (filename)
+            # Users typically provide the document name/title, not the
+            # internal UUID
+            sanitized_title = self.azure_base._sanitize_filter_value(
+                document_id
+            )
+            document_filter = f"document_title eq '{sanitized_title}'"
+
+            self.logger.info(
+                "searching_by_document_title",
+                document_title=document_id
+            )
+
             # Combine with security filter
             combined_filter = document_filter
             if security_filter:
@@ -195,7 +221,8 @@ class GetDocumentTool(Tool):
 
                     # Extract max page number from locationMetadata
                     location_metadata = chunk.get("locationMetadata")
-                    if location_metadata and isinstance(location_metadata, dict):
+                    if (location_metadata and
+                            isinstance(location_metadata, dict)):
                         page_num = location_metadata.get("pageNumber")
                         if page_num and isinstance(page_num, (int, float)):
                             max_page = max(max_page, int(page_num))
@@ -205,7 +232,7 @@ class GetDocumentTool(Tool):
                     latency_ms = int((time.time() - start_time) * 1000)
                     self.logger.warning(
                         "get_document_not_found",
-                        document_id=document_id,
+                        document_title=document_id,
                         search_latency_ms=latency_ms
                     )
                     return {
@@ -261,7 +288,10 @@ class GetDocumentTool(Tool):
         Returns:
             Structured error dict matching agent's expected format
         """
-        from azure.core.exceptions import HttpResponseError, ServiceRequestError
+        from azure.core.exceptions import (
+            HttpResponseError,
+            ServiceRequestError
+        )
         import traceback
 
         latency_ms = int(elapsed_time * 1000)
@@ -274,10 +304,14 @@ class GetDocumentTool(Tool):
         if isinstance(exception, HttpResponseError):
             if exception.status_code == 401:
                 error_type = "AuthenticationError"
-                hints.append("Check AZURE_SEARCH_API_KEY environment variable")
+                hints.append(
+                    "Check AZURE_SEARCH_API_KEY environment variable"
+                )
             elif exception.status_code == 404:
                 error_type = "IndexNotFoundError"
-                hints.append(f"Verify index '{self.azure_base.content_index}' exists")
+                hints.append(
+                    f"Verify index '{self.azure_base.content_index}' exists"
+                )
             elif exception.status_code == 400:
                 error_type = "InvalidQueryError"
                 hints.append("Check document_id format")
@@ -285,11 +319,16 @@ class GetDocumentTool(Tool):
                 error_type = "AccessDeniedError"
                 hints.append("User does not have access to this document")
 
-            error_message = f"Azure Search HTTP {exception.status_code}: {exception.message}"
+            error_message = (
+                f"Azure Search HTTP {exception.status_code}: "
+                f"{exception.message}"
+            )
 
         elif isinstance(exception, ServiceRequestError):
             error_type = "NetworkError"
-            hints.append("Check network connectivity to Azure Search endpoint")
+            hints.append(
+                "Check network connectivity to Azure Search endpoint"
+            )
             hints.append(f"Endpoint: {self.azure_base.endpoint}")
 
         elif isinstance(exception, TimeoutError):
@@ -316,4 +355,3 @@ class GetDocumentTool(Tool):
             "type": error_type,
             "hints": hints
         }
-
