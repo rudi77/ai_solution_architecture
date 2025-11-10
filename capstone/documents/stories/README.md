@@ -12,7 +12,7 @@ This directory contains detailed implementation documents for all user stories i
 | **1.2** | Semantic Search Tool for Content Blocks | High | 6-8 hours | Pending | 1.1 |
 | **1.3** | Document Metadata Tools (List and Get) | Medium | 4-6 hours | ✅ **Done** | 1.1, 1.2 |
 | **1.3.1** | Generic LLM Tool for Response Generation | High | 3-4 hours | ✅ **Ready** | None |
-| **1.4** | RAG System Prompt for Query Classification and Planning | High | 6-8 hours | Pending | 1.3.1 |
+| **1.4** | RAG System Prompt for Query Classification and Planning | High | 6-8 hours | ✅ **Ready** | 1.3.1 |
 | **1.5** | Multimodal Synthesis via PythonTool | Medium | 4-5 hours | Pending | 1.2, 1.4 |
 | **1.6** | RAG Agent Factory Method and End-to-End Integration | High | 6-8 hours | Pending | All (1.1-1.5) |
 
@@ -203,45 +203,78 @@ llm_tool.execute(
 
 ---
 
-### 📋 Story 1.4: RAG System Prompt for Query Classification and Planning
-**File:** `story-1-4-rag-system-prompt.md` (to be created)
+### ✅ Story 1.4: RAG System Prompt for Query Classification and Planning
+**File:** [`story-1.4-rag-system-prompt.md`](./story-1.4-rag-system-prompt.md)
 
 **What it delivers:**
-- `prompts/rag_system_prompt.py` - Complete RAG intelligence
-- Query classification logic (LISTING, CONTENT_SEARCH, DOCUMENT_SUMMARY, etc.)
-- Planning patterns for each query type
-- Synthesis instructions with citation format
-- Clarification guidelines
+- `prompts/rag_system_prompt.py` - Complete RAG intelligence defining agent behavior
+- Query classification into 5 categories (LISTING, CONTENT_SEARCH, DOCUMENT_SUMMARY, METADATA_SEARCH, COMPARISON)
+- Planning patterns for each query type with complete TodoList examples
+- Tool usage rules (when to use rag_semantic_search, rag_list_documents, rag_get_document, llm_generate)
+- **Response generation guidelines** - when to use llm_generate for interactive queries vs silent completion for workflows
+- Clarification guidelines (when to ask users for more info)
+- Multimodal synthesis instructions with citation format
 
 **Key Files:**
 - `capstone/agent_v2/prompts/__init__.py`
-- `capstone/agent_v2/prompts/generic_system_prompt.py` (moved from agent.py)
 - `capstone/agent_v2/prompts/rag_system_prompt.py`
 - `capstone/agent_v2/prompts/README.md`
+- `capstone/agent_v2/tests/test_rag_system_prompt.py`
+- `capstone/agent_v2/tests/integration/test_rag_prompt_integration.py`
+
+**Critical Feature - Response Generation:**
+- **Interactive queries** (user asks question) → TodoList includes llm_generate as final step
+- **Autonomous workflows** (system task) → No response step, silent completion
+- Examples show both patterns clearly
 
 **Prompt Structure:**
 ```python
 RAG_SYSTEM_PROMPT = """
-You are a RAG (Retrieval-Augmented Generation) agent...
+# RAG Knowledge Assistant - System Instructions
+
+## Your Role
+You are a RAG agent specialized in multimodal knowledge retrieval...
 
 ## Query Classification
-Classify each query into one of these types:
-1. LISTING - "What documents are available?"
+1. LISTING - "Which documents are available?"
 2. CONTENT_SEARCH - "How does X work?"
 3. DOCUMENT_SUMMARY - "Summarize document Y"
-4. METADATA_SEARCH - "Show all PDFs from last week"
+4. METADATA_SEARCH - "Show PDFs from last week"
 5. COMPARISON - "Compare report A and B"
 
 ## Planning Patterns
-[Examples of TodoList structures for each type]
 
-## Synthesis Instructions
-- Use PythonTool for synthesis step
-- Embed images: ![caption](url)
-- Cite sources: (Source: filename.pdf, S. X)
+### LISTING (Interactive)
+TodoList:
+1. List documents (rag_list_documents)
+2. Respond to user (llm_generate with context) ← KEY!
+
+### CONTENT_SEARCH
+TodoList:
+1. Search content (rag_semantic_search)
+2. Synthesize (llm_generate with search results)
+
+### AUTONOMOUS WORKFLOW
+TodoList:
+1. Task 1
+2. Task 2
+(No response step - silent completion)
+
+## Tool Usage Rules
+- rag_semantic_search: Content within documents
+- rag_list_documents: What documents exist
+- rag_get_document: Specific document details
+- llm_generate: Formulate user responses (CRITICAL for interactive queries!)
+
+## Response Generation Guidelines
+✅ Interactive: Always use llm_generate as final step
+❌ Autonomous: No response step
+
 ...
 """
 ```
+
+**Status:** ✅ Story document created, ready for implementation
 
 ---
 
