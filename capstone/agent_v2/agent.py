@@ -534,7 +534,7 @@ class Agent:
                     self.logger.info("retry_step", session_id=session_id, 
                                     step=current_step.position, 
                                     attempt=current_step.attempts)
-        else:
+                else:
                     # Abbrechen oder Replan triggern
                     self.logger.error("step_exhausted", session_id=session_id, 
                                     step=current_step.position)

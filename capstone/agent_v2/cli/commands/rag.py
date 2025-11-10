@@ -140,23 +140,44 @@ def rag_chat(
                         # === TOOL RESULT EVENT ===
                         elif event_type == "tool_result":
                             success = event_data.get('success', False)
-                            results = event_data.get('results', [])
+                            # Support both 'results' (SemanticSearchTool) and 'documents' (ListDocumentsTool)
+                            results = event_data.get('results') or event_data.get('documents', [])
+                            # Also check for explicit 'count' field (ListDocumentsTool provides this)
+                            count = event_data.get('count') or (len(results) if isinstance(results, list) else 0)
                             status = "✓" if success else "✗"
-                            count = len(results) if isinstance(results, list) else 0
 
                             # Basic mode: just show count
-                            console.print(f"[magenta]📊 Result:[/magenta] {status} Found {count} results")
+                            result_type = "documents" if 'documents' in event_data else "results"
+                            console.print(f"[magenta]📊 Result:[/magenta] {status} Found {count} {result_type}")
 
-                            # Verbose: show first result preview
+                            # Verbose: show result previews
                             if verbose and results and count > 0:
                                 first = results[0]
-                                content = first.get('content_text', '')[:100]
-                                source = first.get('text_document_id', 'unknown')
-                                console.print(f"[dim]   → Preview: {content}... (from {source})[/dim]")
+                                # Handle both document listings and search results
+                                if 'document_title' in first:
+                                    # Document listing: show multiple documents
+                                    items_to_show = min(5, len(results))
+                                    for i, doc in enumerate(results[:items_to_show], 1):
+                                        title = doc.get('document_title', 'Unknown')
+                                        doc_type = doc.get('document_type', 'N/A')
+                                        chunk_count = doc.get('chunk_count', 0)
+                                        console.print(f"[dim]   {i}. {title} ({doc_type}, {chunk_count} chunks)[/dim]")
+                                    if count > items_to_show:
+                                        console.print(f"[dim]   ... and {count - items_to_show} more[/dim]")
+                                else:
+                                    # Search result: show first preview only
+                                    content = first.get('content_text', '')[:100]
+                                    source = first.get('text_document_id', 'unknown')
+                                    console.print(f"[dim]   → Preview: {content}... (from {source})[/dim]")
 
                             # Debug: show all result IDs
                             if debug and results:
-                                ids = [r.get('content_id', '?')[:20] for r in results[:5]]
+                                if results and 'document_id' in results[0]:
+                                    # Document IDs
+                                    ids = [r.get('document_id', '?')[:30] for r in results[:5]]
+                                else:
+                                    # Content IDs
+                                    ids = [r.get('content_id', '?')[:20] for r in results[:5]]
                                 console.print(f"[dim]   → IDs: {', '.join(ids)}...[/dim]")
 
                         # === STATE UPDATED EVENT (TodoList changes) ===

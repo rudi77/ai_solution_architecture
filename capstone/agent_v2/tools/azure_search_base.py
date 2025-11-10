@@ -57,18 +57,27 @@ class AzureSearchBase:
         """
         Build OData filter for row-level security based on user context.
 
+        Implements proper access control logic:
+        - Documents must belong to the organization (org_id match)
+        - Documents are accessible if:
+          - They belong to the user (user_id match), OR
+          - They are shared/public (scope eq 'shared' or 'public')
+
         Args:
             user_context: Dict with user_id, org_id, scope keys
 
         Returns:
-            OData filter string for direct field filtering
+            OData filter string for access control
 
         Examples:
             >>> build_security_filter({"user_id": "ms-user", "org_id": "MS-corp"})
-            "user_id eq 'ms-user' and org_id eq 'MS-corp'"
+            "org_id eq 'MS-corp' and user_id eq 'ms-user'"
 
             >>> build_security_filter({"user_id": "ms-user", "org_id": "MS-corp", "scope": "shared"})
-            "user_id eq 'ms-user' and org_id eq 'MS-corp' and scope eq 'shared'"
+            "org_id eq 'MS-corp' and (user_id eq 'ms-user' or scope eq 'shared')"
+
+            >>> build_security_filter({"org_id": "MS-corp"})
+            "org_id eq 'MS-corp'"
 
             >>> build_security_filter(None)
             ""
@@ -80,19 +89,36 @@ class AzureSearchBase:
             return ""  # No filter for testing scenarios
 
         filters = []
-
-        # Extract and sanitize values for direct field filtering
-        for key in ["user_id", "org_id", "scope"]:
-            value = user_context.get(key)
-            if value:
-                # Sanitize input to prevent OData injection
-                sanitized = self._sanitize_filter_value(value)
-                filters.append(f"{key} eq '{sanitized}'")
-
+        
+        # Organization filter (required if provided)
+        org_id = user_context.get("org_id")
+        if org_id:
+            sanitized_org = self._sanitize_filter_value(org_id)
+            filters.append(f"org_id eq '{sanitized_org}'")
+        
+        # User/Scope access filter (OR logic)
+        user_id = user_context.get("user_id")
+        scope = user_context.get("scope")
+        
+        access_filters = []
+        if user_id:
+            sanitized_user = self._sanitize_filter_value(user_id)
+            access_filters.append(f"user_id eq '{sanitized_user}'")
+        if scope:
+            sanitized_scope = self._sanitize_filter_value(scope)
+            access_filters.append(f"scope eq '{sanitized_scope}'")
+        
+        # Combine access filters with OR
+        if access_filters:
+            if len(access_filters) == 1:
+                filters.append(access_filters[0])
+            else:
+                filters.append(f"({' or '.join(access_filters)})")
+        
         if not filters:
             return ""
 
-        # Combine with AND logic for exact match filtering
+        # Combine all filters with AND
         return " and ".join(filters)
 
     def _sanitize_filter_value(self, value: str) -> str:

@@ -189,6 +189,75 @@ class TestListDocumentsTool:
         assert result["type"] == "IndexNotFoundError"
         assert "hints" in result
 
+    @pytest.mark.asyncio
+    async def test_fallback_when_faceting_not_supported(self, tool, mock_azure_base):
+        """Test fallback to manual deduplication when document_id is not facetable."""
+        from azure.core.exceptions import HttpResponseError
+        
+        mock_client = AsyncMock()
+        
+        # Track which search call we're on
+        search_call_count = [0]
+        
+        async def mock_search(*args, **kwargs):
+            search_call_count[0] += 1
+            
+            if search_call_count[0] == 1:
+                # First call with facets should fail
+                if kwargs.get("facets"):
+                    raise HttpResponseError(
+                        message="The field 'document_id' has not been marked as facetable in the schema."
+                    )
+            
+            # Second call (fallback) - return chunks for deduplication
+            if search_call_count[0] == 2:
+                async def mock_chunks():
+                    # Return multiple chunks from 2 documents
+                    for doc_id in ["doc-1", "doc-1", "doc-2", "doc-2", "doc-1"]:
+                        yield {"document_id": doc_id}
+                
+                result = AsyncMock()
+                result.__aiter__ = lambda self: mock_chunks()
+                return result
+            
+            # Subsequent calls for document details
+            doc_id = "doc-1" if "doc-1" in kwargs.get("filter", "") else "doc-2"
+            chunk_count = 3 if doc_id == "doc-1" else 2
+            
+            async def mock_detail_chunks():
+                for i in range(chunk_count):
+                    yield {
+                        "document_id": doc_id,
+                        "document_title": f"Test Doc {doc_id}",
+                        "document_type": "application/pdf",
+                        "org_id": "test-org",
+                        "user_id": "test-user",
+                        "scope": "shared"
+                    }
+            
+            result = AsyncMock()
+            result.__aiter__ = lambda self: mock_detail_chunks()
+            return result
+        
+        mock_client.search = mock_search
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        
+        mock_azure_base.get_search_client.return_value = mock_client
+        
+        # Execute - should use fallback
+        result = await tool.execute(limit=10)
+        
+        # Verify success with fallback approach
+        assert result["success"] is True
+        assert result["count"] == 2  # 2 unique documents
+        assert len(result["documents"]) == 2
+        
+        # Verify documents have correct structure
+        doc_ids = [doc["document_id"] for doc in result["documents"]]
+        assert "doc-1" in doc_ids
+        assert "doc-2" in doc_ids
+
 
 class TestGetDocumentTool:
     """Unit tests for GetDocumentTool."""
