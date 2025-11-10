@@ -81,10 +81,12 @@ class TestAzureSearchBase:
 
             filter_str = base.build_security_filter(user_context)
 
+            # Should use OR logic for user_id and scope
             assert "user_id eq 'user123'" in filter_str
             assert "org_id eq 'org456'" in filter_str
             assert "scope eq 'shared'" in filter_str
-            assert " and " in filter_str
+            assert " or " in filter_str  # User and scope should be OR'd
+            assert filter_str == "org_id eq 'org456' and (user_id eq 'user123' or scope eq 'shared')"
 
     def test_security_filter_with_partial_context(self):
         """Test security filter with only some fields present."""

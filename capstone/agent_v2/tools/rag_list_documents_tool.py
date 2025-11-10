@@ -12,8 +12,11 @@ class ListDocumentsTool(Tool):
     """
     List available documents from the content-blocks index.
     
-    This tool retrieves unique documents by aggregating content blocks using facets,
-    returning document metadata including chunk counts and access control fields.
+    This tool retrieves unique documents by aggregating content blocks. It attempts to use 
+    Azure Search facets for efficiency, but automatically falls back to manual deduplication 
+    if the document_id field is not marked as facetable in the index schema.
+    
+    Returns document metadata including chunk counts and access control fields.
     """
 
     def __init__(self, user_context: Optional[Dict[str, Any]] = None):
@@ -153,26 +156,79 @@ class ListDocumentsTool(Tool):
                 self.azure_base.content_index
             )
 
-            # Execute search with faceting to get unique document_ids
+            # Execute search to get unique document_ids
             async with client:
-                # First, get facets for unique document_ids
-                search_results = await client.search(
-                    search_text="*",  # Match all documents
-                    filter=combined_filter if combined_filter else None,
-                    facets=["document_id,count:1000"],  # Get up to 1000 unique doc IDs
-                    top=0  # We don't need results, just facets
-                )
-
-                # Extract unique document IDs from facets (async call)
-                facets = await search_results.get_facets()
                 document_ids = []
                 
-                if facets and "document_id" in facets:
-                    # Limit to requested number of documents
-                    document_ids = [
-                        facet["value"] 
-                        for facet in facets["document_id"][:limit]
-                    ]
+                # Try faceting approach first (most efficient)
+                try:
+                    search_results = await client.search(
+                        search_text="*",  # Match all documents
+                        filter=combined_filter if combined_filter else None,
+                        facets=["document_id,count:1000"],  # Get up to 1000 unique doc IDs
+                        top=0  # We don't need results, just facets
+                    )
+
+                    # Extract unique document IDs from facets (async call)
+                    facets = await search_results.get_facets()
+                    
+                    if facets and "document_id" in facets:
+                        # Limit to requested number of documents
+                        document_ids = [
+                            facet["value"] 
+                            for facet in facets["document_id"][:limit]
+                        ]
+                    
+                    self.logger.info(
+                        "faceting_success",
+                        unique_documents=len(document_ids),
+                        method="faceting"
+                    )
+
+                except Exception as facet_error:
+                    # Check if error is due to field not being facetable
+                    error_msg = str(facet_error).lower()
+                    if "not been marked as facetable" in error_msg or "fieldnotfacetable" in error_msg:
+                        self.logger.warning(
+                            "faceting_not_supported",
+                            message="document_id field not facetable, using fallback approach",
+                            original_error=str(facet_error)[:200]
+                        )
+                        
+                        # Fallback: Use regular search and manually deduplicate
+                        self.logger.info(
+                            "fallback_search_starting",
+                            filter=combined_filter,
+                            limit=limit
+                        )
+                        
+                        search_results = await client.search(
+                            search_text="*",
+                            filter=combined_filter if combined_filter else None,
+                            select=["document_id"],
+                            top=1000  # Get enough results to find unique documents
+                        )
+                        
+                        seen_ids = set()
+                        chunk_count = 0
+                        async for chunk in search_results:
+                            chunk_count += 1
+                            doc_id = chunk.get("document_id")
+                            if doc_id and doc_id not in seen_ids:
+                                seen_ids.add(doc_id)
+                                document_ids.append(doc_id)
+                                if len(document_ids) >= limit:
+                                    break
+                        
+                        self.logger.info(
+                            "fallback_success",
+                            unique_documents=len(document_ids),
+                            total_chunks_processed=chunk_count,
+                            method="manual_deduplication"
+                        )
+                    else:
+                        # Re-raise if it's a different error
+                        raise
 
                 # Now fetch one representative chunk per document to get metadata
                 documents = []
