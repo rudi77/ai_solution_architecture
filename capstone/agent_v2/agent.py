@@ -858,46 +858,46 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
 
     # create a static method to create an agent
     @staticmethod
-    def create_agent(name: str, description: str, system_prompt: str, mission: str, work_dir: str, llm) -> "Agent":
+    def create_agent(
+        name: str,
+        description: str,
+        system_prompt: Optional[str],
+        mission: Optional[str],
+        work_dir: str,
+        llm,
+        tools: Optional[List[Tool]] = None
+    ) -> "Agent":
         """
-        Creates an agent with the given name, description, system prompt, mission, and work directory.
-        The agent will be created with the following tools:
-        - WebSearchTool
-        - WebFetchTool
-        - PythonTool
-        - GitHubTool
-        - GitTool
-        - FileReadTool
-        - FileWriteTool
-        - PowerShellTool
-        The agent will be created with the following planner:
-        - TodoListManager
-        The agent will be created with the following state manager:
-        - StateManager
+        Creates an agent with the given parameters.
 
         Args:
             name: The name of the agent.
             description: The description of the agent.
-            system_prompt: The system prompt for the agent.
+            system_prompt: The system prompt for the agent (defaults to GENERIC_SYSTEM_PROMPT if None).
             mission: The mission for the agent.
             work_dir: The work directory for the agent.
-            llm: The llm for the agent.
+            llm: The LLM instance for the agent.
+            tools: List of Tool instances to equip the agent with. If None, uses default tool set
+                   (WebSearchTool, WebFetchTool, PythonTool, GitHubTool, GitTool, FileReadTool,
+                   FileWriteTool, PowerShellTool, LLMTool).
 
         Returns:
-            An agent with the given name, description, system prompt, mission, and work directory.
+            An Agent instance with the specified configuration.
         """
-        tools = [
-            WebSearchTool(),
-            WebFetchTool(),
-            PythonTool(),
-            GitHubTool(),
-            GitTool(),
-            FileReadTool(),
-            FileWriteTool(),
-            PowerShellTool(),
-            LLMTool(llm=llm),
-        ]
-
+        # Default to standard tool set if not provided (backward compatibility)
+        if tools is None:
+            tools = [
+                WebSearchTool(),
+                WebFetchTool(),
+                PythonTool(),
+                GitHubTool(),
+                GitTool(),
+                FileReadTool(),
+                FileWriteTool(),
+                PowerShellTool(),
+                LLMTool(llm=llm),
+            ]
+        
         system_prompt = GENERIC_SYSTEM_PROMPT if system_prompt is None else system_prompt
         work_dir = Path(work_dir)
         work_dir.mkdir(exist_ok=True)
