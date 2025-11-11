@@ -9,10 +9,10 @@ import sys
 from typing import Any, AsyncIterator, Dict, List, Optional
 import uuid
 # Removed: from attr import asdict, dataclass - using dataclasses instead
-import litellm
 import structlog
 
 from capstone.agent_v2.planning.todolist import TaskStatus, TodoItem, TodoList, TodoListManager
+from capstone.agent_v2.services.llm_service import LLMService
 from capstone.agent_v2.statemanager import StateManager
 from capstone.agent_v2.tool import Tool
 from capstone.agent_v2.tools.code_tool import PythonTool
@@ -74,10 +74,19 @@ class MessageHistory:
     MAX_MESSAGES = 50
     SUMMARY_THRESHOLD = 40
     
-    def __init__(self, system_prompt: str):
+    def __init__(self, system_prompt: str, llm_service: LLMService):
+        """
+        Initialize message history.
+        
+        Args:
+            system_prompt: The system prompt
+            llm_service: LLM service for compression operations
+        """
         # Store system prompt as the first message entry
         self.system_prompt = {"role": "system", "content": system_prompt}
         self.messages = [self.system_prompt]
+        self.llm_service = llm_service
+        self.logger = structlog.get_logger()
 
     def add_message(self, message: str, role: str) -> None:
         """
@@ -91,9 +100,7 @@ class MessageHistory:
         self.messages.append({"role": role, "content": message})
     
     async def compress_history_async(self) -> None:
-        """Summarize alte Messages mit LLM."""
-        import litellm
-        
+        """Summarize old messages using LLM service."""
         old_messages = self.messages[1:self.SUMMARY_THRESHOLD]  # Skip system
         
         summary_prompt = f"""Summarize this conversation history concisely:
@@ -103,13 +110,23 @@ class MessageHistory:
 Provide a 2-3 paragraph summary of key decisions, results, and context."""
         
         try:
-            response = await litellm.acompletion(
-                model="gpt-4.1",
+            # Use LLMService
+            result = await self.llm_service.complete(
                 messages=[{"role": "user", "content": summary_prompt}],
+                model="main",
                 temperature=0
             )
             
-            summary = response.choices[0].message.content
+            if not result.get("success"):
+                self.logger.error(
+                    "compression_failed",
+                    error=result.get("error")
+                )
+                # If compression fails, just keep the recent messages
+                self.messages = [self.system_prompt] + self.messages[-self.SUMMARY_THRESHOLD:]
+                return
+            
+            summary = result["content"]
             
             self.messages = [
                 self.system_prompt,
@@ -117,6 +134,7 @@ Provide a 2-3 paragraph summary of key decisions, results, and context."""
                 *self.messages[self.SUMMARY_THRESHOLD:]
             ]
         except Exception as e:
+            self.logger.error("compression_exception", error=str(e))
             # If compression fails, just keep the recent messages
             self.messages = [self.system_prompt] + self.messages[-self.SUMMARY_THRESHOLD:]
 
@@ -299,17 +317,21 @@ class Agent:
         tools: List[Tool],
         todo_list_manager: TodoListManager,
         state_manager: StateManager,
-        llm):
+        llm_service: LLMService,
+        llm=None):
         """
-        Initializes the Agent with the given name, description, system prompt, mission, tools, and planner.
+        Initializes the Agent with the given name, description, system prompt, mission, tools, and LLM service.
+        
         Args:
             name: The name of the agent.
             description: The description of the agent.
-            system_prompt: The system prompt for the agent. This the generic part of the agent's system prompt.
+            system_prompt: The system prompt for the agent. This is the generic part of the agent's system prompt.
             mission: The mission for the agent. This is a collection of tasks that the agent needs to complete.
             tools: The tools for the agent. This is a collection of tools that the agent can use to complete the tasks.
-            planner: The planner for the agent. This is the planner that the agent uses to plan the tasks.
+            todo_list_manager: The todo list manager for the agent. This is the manager that creates and updates todo lists.
             state_manager: The state manager for the agent. This is the state manager that the agent uses to save the state of the agent.
+            llm_service: LLM service for completions
+            llm: (Deprecated) Legacy LLM parameter for backward compatibility
         """
 
         self.name = name
@@ -321,8 +343,12 @@ class Agent:
         self.tools_schema = self._get_tools_schema()
         self.todo_list_manager = todo_list_manager
         self.state_manager = state_manager
+        self.llm_service = llm_service
         self.state = None
-        self.message_history = MessageHistory(build_system_prompt(system_prompt, mission, self.tools_description))
+        self.message_history = MessageHistory(
+            build_system_prompt(system_prompt, mission, self.tools_description),
+            llm_service
+        )
         self.logger = structlog.get_logger().bind(agent=name)
 
 
@@ -702,17 +728,31 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         )})
 
         self.logger.info("llm_call_thought_start", step=current_step.position)
-        response = await litellm.acompletion(
-            model="gpt-4.1",
+        
+        # Use LLMService
+        result = await self.llm_service.complete(
             messages=messages,
+            model="main",
             response_format={"type": "json_object"},
-            temperature=0.2,
+            temperature=0.2
         )
-
-        raw_content = response.choices[0].message.content
+        
+        if not result.get("success"):
+            self.logger.error(
+                "thought_generation_failed",
+                step=current_step.position,
+                error=result.get("error")
+            )
+            raise RuntimeError(f"LLM completion failed: {result.get('error')}")
+        
+        raw_content = result["content"]
         self.message_history.add_message(raw_content, "assistant")
 
-        self.logger.info("llm_call_thought_end", step=current_step.position)
+        self.logger.info(
+            "llm_call_thought_end",
+            step=current_step.position,
+            tokens=result.get("usage", {}).get("total_tokens", 0)
+        )
         
         try:
             return Thought.from_json(raw_content)
@@ -864,7 +904,8 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         system_prompt: Optional[str],
         mission: Optional[str],
         work_dir: str,
-        llm,
+        llm_service: LLMService,
+        llm=None,
         tools: Optional[List[Tool]] = None
     ) -> "Agent":
         """
@@ -876,7 +917,8 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
             system_prompt: The system prompt for the agent (defaults to GENERIC_SYSTEM_PROMPT if None).
             mission: The mission for the agent.
             work_dir: The work directory for the agent.
-            llm: The LLM instance for the agent.
+            llm_service: LLM service instance for the agent.
+            llm: (Deprecated) Legacy LLM parameter for backward compatibility with LLMTool.
             tools: List of Tool instances to equip the agent with. If None, uses default tool set
                    (WebSearchTool, WebFetchTool, PythonTool, GitHubTool, GitTool, FileReadTool,
                    FileWriteTool, PowerShellTool, LLMTool).
@@ -895,7 +937,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
                 FileReadTool(),
                 FileWriteTool(),
                 PowerShellTool(),
-                LLMTool(llm=llm),
+                LLMTool(llm=llm) if llm else LLMTool(llm=llm_service),
             ]
         
         system_prompt = GENERIC_SYSTEM_PROMPT if system_prompt is None else system_prompt
@@ -912,7 +954,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         state_dir.mkdir(exist_ok=True)
         state_manager = StateManager(state_dir=state_dir)
 
-        return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm)
+        return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm_service, llm)
 
 
 # ============================================

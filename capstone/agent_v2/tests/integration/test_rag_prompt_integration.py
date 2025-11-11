@@ -30,6 +30,8 @@ class TestRagPromptIntegration:
             (work_dir / "states").mkdir(exist_ok=True)
 
             # Create dependencies
+            from capstone.agent_v2.services.llm_service import LLMService
+            llm_service = LLMService()
             planner = TodoListManager(base_dir=work_dir / "todolists")
             state_manager = StateManager(state_dir=work_dir / "states")
 
@@ -42,6 +44,7 @@ class TestRagPromptIntegration:
                 tools=[],
                 todo_list_manager=planner,
                 state_manager=state_manager,
+                llm_service=llm_service,
                 llm=None
             )
 
@@ -66,6 +69,8 @@ class TestRagPromptIntegration:
             )
 
             # Create dependencies
+            from capstone.agent_v2.services.llm_service import LLMService
+            llm_service = LLMService()
             planner = TodoListManager(base_dir=work_dir / "todolists")
             state_manager = StateManager(state_dir=work_dir / "states")
 
@@ -78,6 +83,7 @@ class TestRagPromptIntegration:
                 tools=[],
                 todo_list_manager=planner,
                 state_manager=state_manager,
+                llm_service=llm_service,
                 llm=None
             )
 
@@ -254,6 +260,8 @@ class TestRagPromptBackwardCompatibility:
             (work_dir / "states").mkdir(exist_ok=True)
 
             # Create dependencies
+            from capstone.agent_v2.services.llm_service import LLMService
+            llm_service = LLMService()
             planner = TodoListManager(base_dir=work_dir / "todolists")
             state_manager = StateManager(state_dir=work_dir / "states")
 
@@ -266,6 +274,7 @@ class TestRagPromptBackwardCompatibility:
                 tools=[],
                 todo_list_manager=planner,
                 state_manager=state_manager,
+                llm_service=llm_service,
                 llm=None
             )
 
@@ -284,6 +293,8 @@ class TestRagPromptBackwardCompatibility:
             (work_dir / "states").mkdir(exist_ok=True)
 
             # Create dependencies
+            from capstone.agent_v2.services.llm_service import LLMService
+            llm_service = LLMService()
             planner = TodoListManager(base_dir=work_dir / "todolists")
             state_manager = StateManager(state_dir=work_dir / "states")
 
@@ -297,6 +308,7 @@ class TestRagPromptBackwardCompatibility:
                 tools=[],
                 todo_list_manager=planner,
                 state_manager=state_manager,
+                llm_service=llm_service,
                 llm=None
             )
 

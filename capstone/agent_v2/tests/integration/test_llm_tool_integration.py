@@ -80,6 +80,9 @@ class TestLLMToolIntegration:
             (work_dir / "states").mkdir(exist_ok=True)
             
             # Create agent with LLMTool
+            from capstone.agent_v2.services.llm_service import LLMService
+            llm_service = LLMService()
+            
             tools = [LLMTool(llm=litellm)]
             planner = TodoListManager(base_dir=work_dir / "todolists")
             state_manager = StateManager(state_dir=work_dir / "states")
@@ -92,6 +95,7 @@ class TestLLMToolIntegration:
                 tools=tools,
                 todo_list_manager=planner,
                 state_manager=state_manager,
+                llm_service=llm_service,
                 llm=litellm
             )
             
@@ -126,6 +130,9 @@ class TestLLMToolIntegration:
             (work_dir / "states").mkdir(exist_ok=True)
             
             # Create agent with LLMTool and other tools
+            from capstone.agent_v2.services.llm_service import LLMService
+            llm_service = LLMService()
+            
             tools = [
                 LLMTool(llm=litellm),
                 FileReadTool()
@@ -142,6 +149,7 @@ class TestLLMToolIntegration:
                 tools=tools,
                 todo_list_manager=planner,
                 state_manager=state_manager,
+                llm_service=llm_service,
                 llm=litellm
             )
             
