@@ -263,14 +263,14 @@ class Observation:
     requires_user: bool = False
 
 
-def build_system_prompt(system_prompt: str, mission: str, todo_list: Optional[str] = "") -> str:
+def build_system_prompt(system_prompt: str, mission: str, tools_description: str) -> str:
     """
-    Build the system prompt from base, mission, and todo list sections.
+    Build the system prompt from base, mission, and tools description.
 
     Args:
         system_prompt (str): The static base instructions (timeless context).
         mission (str): The agent's mission or current objective.
-        todo_list (str, optional): Current todo list, may be empty. Defaults to "".
+        tools_description (str): The description of the tools available.
 
     Returns:
         str: Final system prompt ready for use.
@@ -283,9 +283,9 @@ def build_system_prompt(system_prompt: str, mission: str, todo_list: Optional[st
 {mission.strip() if mission else ""}
 </Mission>
 
-<TODOList>
-{todo_list.strip() if todo_list else ""}
-</TODOList>"""
+<ToolsDescription>
+{tools_description.strip() if tools_description else ""}
+</ToolsDescription>"""
     return prompt
 
 
