@@ -3,6 +3,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest  # type: ignore
 
@@ -14,6 +15,7 @@ from capstone.agent_v2.planning.todolist import (
     TodoList,
     TodoListManager,
 )
+from capstone.agent_v2.services.llm_service import LLMService
 
 
 # -------------------------------
@@ -22,6 +24,14 @@ from capstone.agent_v2.planning.todolist import (
 class FakeLLMResponse:
     def __init__(self, content: str):
         self.choices = [SimpleNamespace(message=SimpleNamespace(content=content))]
+
+
+@pytest.fixture
+def mock_llm_service():
+    """Create mock LLMService for tests."""
+    service = MagicMock(spec=LLMService)
+    service.complete = AsyncMock()
+    return service
 
 
 def make_sample_todolist_dict(todolist_id: str = "test-id-123") -> dict[str, Any]:
@@ -89,8 +99,8 @@ def test_todolist_to_dict_and_to_json_roundtrip():
         TodoItem(
             position=1,
             description="step",
-            tool="tool",
-            parameters={"a": 1},
+            acceptance_criteria="Step is complete",
+            dependencies=[],
             status=TaskStatus.COMPLETED,
         )
     ]
@@ -118,20 +128,20 @@ def test_todolist_from_json_handles_bad_input():
 # -------------------------------
 # TodoListManager.get_todolist_path
 # -------------------------------
-def test_get_todolist_path(tmp_path: Path):
-    m = TodoListManager(base_dir=str(tmp_path))
+def test_get_todolist_path(tmp_path: Path, mock_llm_service):
+    m = TodoListManager(base_dir=str(tmp_path), llm_service=mock_llm_service)
     p = m.get_todolist_path("abc")
     assert p == tmp_path / "todolist_abc.json"
 
 
 # -------------------------------
-# TodoListManager.create_todolist_prompts
+# TodoListManager.create_final_todolist_prompts
 # -------------------------------
-def test_create_todolist_prompts_contains_expected_content():
-    m = TodoListManager(base_dir="irrelevant")
+def test_create_todolist_prompts_contains_expected_content(mock_llm_service):
+    m = TodoListManager(base_dir="irrelevant", llm_service=mock_llm_service)
     mission = "Build a thing"
     tools_desc = "- tool_x: does x"
-    user_prompt, system_prompt = m.create_todolist_prompts(mission, tools_desc)
+    user_prompt, system_prompt = m.create_final_todolist_prompts(mission, tools_desc, {})
 
     assert isinstance(user_prompt, str) and user_prompt
     assert isinstance(system_prompt, str) and mission in system_prompt
@@ -142,21 +152,27 @@ def test_create_todolist_prompts_contains_expected_content():
 # -------------------------------
 # TodoListManager.create_todolist (async)
 # -------------------------------
-def test_create_todolist_writes_file_and_returns_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    m = TodoListManager(base_dir=str(tmp_path))
+def test_create_todolist_writes_file_and_returns_object(tmp_path: Path, mock_llm_service):
+    m = TodoListManager(base_dir=str(tmp_path), llm_service=mock_llm_service)
 
     sample = make_sample_todolist_dict("create-id-1")
     fake_json = json.dumps(sample)
 
-    async def fake_acompletion(*args, **kwargs):
-        return FakeLLMResponse(fake_json)
-
-    import capstone.agent_v2.planning.todolist as tlmod
-    monkeypatch.setattr(tlmod.litellm, "acompletion", fake_acompletion)
+    # Mock LLMService response
+    mock_llm_service.complete.return_value = {
+        "success": True,
+        "content": fake_json,
+        "usage": {"total_tokens": 100}
+    }
 
     todolist = asyncio.run(m.create_todolist(mission="x", tools_desc="z"))
     assert isinstance(todolist, TodoList)
     assert todolist.todolist_id == "create-id-1"
+
+    # Verify LLMService was called
+    mock_llm_service.complete.assert_called_once()
+    call_args = mock_llm_service.complete.call_args
+    assert call_args.kwargs["model"] == "fast"  # Should use fast model for todolist
 
     # File should be written
     path = m.get_todolist_path("create-id-1")
@@ -168,12 +184,12 @@ def test_create_todolist_writes_file_and_returns_object(tmp_path: Path, monkeypa
 # -------------------------------
 # TodoListManager.update/load/get/delete (async)
 # -------------------------------
-def test_update_load_get_delete_flow(tmp_path: Path):
-    m = TodoListManager(base_dir=str(tmp_path))
+def test_update_load_get_delete_flow(tmp_path: Path, mock_llm_service):
+    m = TodoListManager(base_dir=str(tmp_path), llm_service=mock_llm_service)
     tid = "flow-123"
 
     items = [
-        TodoItem(position=1, description="d", tool="t", parameters={}, status=TaskStatus.PENDING)
+        TodoItem(position=1, description="d", acceptance_criteria="Done", dependencies=[], status=TaskStatus.PENDING)
     ]
     tlist = TodoList(items=items, open_questions=[], notes="n", todolist_id=tid)
 
@@ -199,14 +215,14 @@ def test_update_load_get_delete_flow(tmp_path: Path):
     assert not path.exists()
 
 
-def test_load_missing_raises(tmp_path: Path):
-    m = TodoListManager(base_dir=str(tmp_path))
+def test_load_missing_raises(tmp_path: Path, mock_llm_service):
+    m = TodoListManager(base_dir=str(tmp_path), llm_service=mock_llm_service)
     with pytest.raises(FileNotFoundError):
         asyncio.run(m.load_todolist("missing"))
 
 
-def test_delete_missing_raises(tmp_path: Path):
-    m = TodoListManager(base_dir=str(tmp_path))
+def test_delete_missing_raises(tmp_path: Path, mock_llm_service):
+    m = TodoListManager(base_dir=str(tmp_path), llm_service=mock_llm_service)
     with pytest.raises(FileNotFoundError):
         asyncio.run(m.delete_todolist("missing"))
 
