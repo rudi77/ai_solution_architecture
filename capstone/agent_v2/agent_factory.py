@@ -118,7 +118,7 @@ def create_standard_agent(
         FileReadTool(),
         FileWriteTool(),
         PowerShellTool(),
-        LLMTool(llm=llm),
+        LLMTool(llm_service=llm_service),
     ]
     
     return Agent.create_agent(
@@ -183,7 +183,7 @@ def create_rag_agent(
         SemanticSearchTool(user_context=user_context),
         ListDocumentsTool(user_context=user_context),
         GetDocumentTool(user_context=user_context),
-        LLMTool(llm=llm)
+        LLMTool(llm_service=llm_service)
     ]
     
     # Set default work directory
@@ -302,13 +302,14 @@ def _load_system_prompt(config: AgentConfig) -> Optional[str]:
     return None
 
 
-def _instantiate_tool(tool_config: ToolConfig, llm=None) -> Tool:
+def _instantiate_tool(tool_config: ToolConfig, llm=None, llm_service=None) -> Tool:
     """
     Instantiate a tool from its configuration.
     
     Args:
         tool_config: ToolConfig with type, module, and params
-        llm: LLM instance to pass to tools that need it
+        llm: (Deprecated) LLM instance to pass to tools that need it
+        llm_service: LLMService instance to pass to LLMTool
     
     Returns:
         Instantiated Tool instance
@@ -328,9 +329,16 @@ def _instantiate_tool(tool_config: ToolConfig, llm=None) -> Tool:
         # Handle special parameters
         params = tool_config.params.copy()
         
-        # If tool is LLMTool and llm is None in params, use provided llm
-        if tool_config.type == 'LLMTool' and params.get('llm') is None:
-            params['llm'] = llm
+        # If tool is LLMTool, handle parameter migration
+        if tool_config.type == 'LLMTool':
+            # Remove deprecated 'llm' parameter if present
+            params.pop('llm', None)
+            
+            # Add llm_service if not present
+            if params.get('llm_service') is None:
+                if llm_service is None:
+                    llm_service = get_default_llm_service()
+                params['llm_service'] = llm_service
         
         # Instantiate the tool
         tool_instance = tool_class(**params)
@@ -426,7 +434,7 @@ def create_agent_from_config(
             params=tool_params
         )
         
-        tool = _instantiate_tool(updated_tool_config, llm=llm)
+        tool = _instantiate_tool(updated_tool_config, llm=llm, llm_service=llm_service)
         tools.append(tool)
     
     # Get work_dir (override takes precedence)

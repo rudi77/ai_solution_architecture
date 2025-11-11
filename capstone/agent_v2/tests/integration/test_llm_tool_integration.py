@@ -4,7 +4,7 @@ import pytest
 import os
 from capstone.agent_v2.tools.llm_tool import LLMTool
 from capstone.agent_v2.agent import Agent
-import litellm
+from capstone.agent_v2.services.llm_service import LLMService
 
 
 @pytest.mark.integration
@@ -18,7 +18,8 @@ class TestLLMToolIntegration:
     @pytest.mark.asyncio
     async def test_real_llm_generation(self):
         """Test LLMTool with actual LLM instance."""
-        tool = LLMTool(llm=litellm)
+        llm_service = LLMService()
+        tool = LLMTool(llm_service=llm_service)
         
         result = await tool.execute(
             prompt="What is 2+2? Answer in one short sentence.",
@@ -40,7 +41,8 @@ class TestLLMToolIntegration:
     @pytest.mark.asyncio
     async def test_llm_with_context(self):
         """Test LLMTool with context data."""
-        tool = LLMTool(llm=litellm)
+        llm_service = LLMService()
+        tool = LLMTool(llm_service=llm_service)
         
         context = {
             "documents": [
@@ -83,7 +85,7 @@ class TestLLMToolIntegration:
             from capstone.agent_v2.services.llm_service import LLMService
             llm_service = LLMService()
             
-            tools = [LLMTool(llm=litellm)]
+            tools = [LLMTool(llm_service=llm_service)]
             planner = TodoListManager(base_dir=work_dir / "todolists")
             state_manager = StateManager(state_dir=work_dir / "states")
             
@@ -134,7 +136,7 @@ class TestLLMToolIntegration:
             llm_service = LLMService()
             
             tools = [
-                LLMTool(llm=litellm),
+                LLMTool(llm_service=llm_service),
                 FileReadTool()
             ]
             
@@ -161,7 +163,8 @@ class TestLLMToolIntegration:
     @pytest.mark.asyncio
     async def test_creative_vs_deterministic_generation(self):
         """Test that temperature parameter affects generation."""
-        tool = LLMTool(llm=litellm)
+        llm_service = LLMService()
+        tool = LLMTool(llm_service=llm_service)
         
         # Deterministic generation (temperature=0)
         result1 = await tool.execute(
@@ -180,7 +183,8 @@ class TestLLMToolIntegration:
     @pytest.mark.asyncio
     async def test_error_with_invalid_max_tokens(self):
         """Test error handling with unreasonable max_tokens."""
-        tool = LLMTool(llm=litellm)
+        llm_service = LLMService()
+        tool = LLMTool(llm_service=llm_service)
         
         # Try with excessively large max_tokens (may hit limits)
         result = await tool.execute(

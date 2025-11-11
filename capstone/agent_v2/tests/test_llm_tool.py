@@ -3,18 +3,21 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from capstone.agent_v2.tools.llm_tool import LLMTool
+from capstone.agent_v2.services.llm_service import LLMService
 
 
 @pytest.fixture
-def mock_llm():
-    """Mock LLM instance for testing."""
-    return MagicMock()
+def mock_llm_service():
+    """Create mock LLMService for testing."""
+    service = MagicMock(spec=LLMService)
+    service.generate = AsyncMock()
+    return service
 
 
 @pytest.fixture
-def llm_tool(mock_llm):
+def llm_tool(mock_llm_service):
     """Create LLMTool instance for testing."""
-    return LLMTool(llm=mock_llm)
+    return LLMTool(llm_service=mock_llm_service, model_alias="main")
 
 
 class TestLLMTool:
@@ -47,20 +50,22 @@ class TestLLMTool:
         assert schema["required"] == ["prompt"]
 
     @pytest.mark.asyncio
-    async def test_successful_generation_without_context(self, llm_tool):
+    async def test_successful_generation_without_context(self, llm_tool, mock_llm_service):
         """Test successful text generation without context."""
-        # Mock litellm.acompletion response
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Generated response text"
-        mock_response.usage = {
-            "total_tokens": 150,
-            "prompt_tokens": 50,
-            "completion_tokens": 100
+        # Mock service response
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Generated response text",
+            "content": "Generated response text",
+            "usage": {
+                "total_tokens": 150,
+                "prompt_tokens": 50,
+                "completion_tokens": 100
+            },
+            "latency_ms": 250
         }
-
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
-            result = await llm_tool.execute(prompt="What is AI?")
+        
+        result = await llm_tool.execute(prompt="What is AI?")
 
         # Verify success
         assert result["success"] is True
@@ -68,19 +73,16 @@ class TestLLMTool:
         assert result["tokens_used"] == 150
         assert result["prompt_tokens"] == 50
         assert result["completion_tokens"] == 100
+        
+        # Verify service was called correctly
+        mock_llm_service.generate.assert_called_once()
+        call_args = mock_llm_service.generate.call_args
+        assert call_args.kwargs["prompt"] == "What is AI?"
+        assert call_args.kwargs["model"] == "main"
 
     @pytest.mark.asyncio
-    async def test_successful_generation_with_context(self, llm_tool):
-        """Test successful text generation with context."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "There are 2 documents: doc1.pdf and doc2.pdf"
-        mock_response.usage = {
-            "total_tokens": 200,
-            "prompt_tokens": 120,
-            "completion_tokens": 80
-        }
-
+    async def test_successful_generation_with_context(self, llm_tool, mock_llm_service):
+        """Test text generation with context data."""
         context = {
             "documents": [
                 {"title": "doc1.pdf", "chunks": 214},
@@ -88,31 +90,28 @@ class TestLLMTool:
             ]
         }
 
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response) as mock_acompletion:
-            result = await llm_tool.execute(
-                prompt="List the documents",
-                context=context
-            )
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "There are 2 documents: doc1.pdf and doc2.pdf",
+            "usage": {"total_tokens": 200, "prompt_tokens": 120, "completion_tokens": 80}
+        }
+        
+        result = await llm_tool.execute(
+            prompt="List the documents",
+            context=context
+        )
 
         # Verify success
         assert result["success"] is True
         assert "doc1.pdf" in result["generated_text"] or "doc2.pdf" in result["generated_text"]
 
-        # Verify context was included in the prompt
-        call_args = mock_acompletion.call_args
-        prompt_sent = call_args.kwargs["messages"][0]["content"]
-        assert "Context Data:" in prompt_sent
-        assert "doc1.pdf" in prompt_sent
-        assert "doc2.pdf" in prompt_sent
+        # Verify context was passed to service
+        call_args = mock_llm_service.generate.call_args
+        assert call_args.kwargs["context"] == context
 
     @pytest.mark.asyncio
-    async def test_complex_context_structures(self, llm_tool):
+    async def test_complex_context_structures(self, llm_tool, mock_llm_service):
         """Test handling of complex nested context structures."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Summary of nested data"
-        mock_response.usage = {"total_tokens": 100, "prompt_tokens": 60, "completion_tokens": 40}
-
         # Complex nested context
         context = {
             "results": [
@@ -135,75 +134,90 @@ class TestLLMTool:
             ]
         }
 
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response) as mock_acompletion:
-            result = await llm_tool.execute(
-                prompt="Summarize the data",
-                context=context
-            )
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Summary of nested data",
+            "usage": {"total_tokens": 100, "prompt_tokens": 60, "completion_tokens": 40}
+        }
+        
+        result = await llm_tool.execute(
+            prompt="Summarize the data",
+            context=context
+        )
 
-        # Verify success and JSON serialization worked
+        # Verify success
         assert result["success"] is True
         
-        # Verify context was serialized as JSON
-        call_args = mock_acompletion.call_args
-        prompt_sent = call_args.kwargs["messages"][0]["content"]
-        assert '"results"' in prompt_sent
-        assert '"nested"' in prompt_sent
+        # Verify context was passed to service
+        call_args = mock_llm_service.generate.call_args
+        assert call_args.kwargs["context"] == context
 
     @pytest.mark.asyncio
-    async def test_parameter_handling(self, llm_tool):
+    async def test_parameter_handling(self, llm_tool, mock_llm_service):
         """Test that max_tokens and temperature parameters are passed correctly."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Test response"
-        mock_response.usage = {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20}
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Test response",
+            "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20}
+        }
 
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response) as mock_acompletion:
-            await llm_tool.execute(
-                prompt="Test prompt",
-                max_tokens=1000,
-                temperature=0.9
-            )
+        await llm_tool.execute(
+            prompt="Test prompt",
+            max_tokens=1000,
+            temperature=0.9
+        )
 
         # Verify parameters were passed
-        call_args = mock_acompletion.call_args
+        call_args = mock_llm_service.generate.call_args
         assert call_args.kwargs["max_tokens"] == 1000
         assert call_args.kwargs["temperature"] == 0.9
 
     @pytest.mark.asyncio
-    async def test_default_parameter_values(self, llm_tool):
+    async def test_default_parameter_values(self, llm_tool, mock_llm_service):
         """Test that default values are used when parameters not provided."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Test response"
-        mock_response.usage = {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20}
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Test response",
+            "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20}
+        }
 
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response) as mock_acompletion:
-            await llm_tool.execute(prompt="Test prompt")
+        await llm_tool.execute(prompt="Test prompt")
 
         # Verify default values were used
-        call_args = mock_acompletion.call_args
+        call_args = mock_llm_service.generate.call_args
         assert call_args.kwargs["max_tokens"] == 500  # Default
         assert call_args.kwargs["temperature"] == 0.7  # Default
 
     @pytest.mark.asyncio
-    async def test_llm_api_error_handling(self, llm_tool):
-        """Test handling of LLM API failures."""
-        with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=Exception("API Error: Rate limit exceeded")):
-            result = await llm_tool.execute(prompt="Test prompt")
+    async def test_llm_api_error_handling(self, llm_tool, mock_llm_service):
+        """Test handling of LLM service failures."""
+        # Mock service failure
+        mock_llm_service.generate.return_value = {
+            "success": False,
+            "error": "API Error: Rate limit exceeded",
+            "error_type": "RateLimitError"
+        }
+
+        result = await llm_tool.execute(prompt="Test prompt")
 
         # Verify error is handled gracefully
         assert result["success"] is False
         assert "API Error" in result["error"]
-        assert result["type"] == "Exception"
+        assert "RateLimitError" in result["type"]
         assert "hints" in result
         assert len(result["hints"]) > 0
 
     @pytest.mark.asyncio
-    async def test_token_limit_exceeded_error(self, llm_tool):
+    async def test_token_limit_exceeded_error(self, llm_tool, mock_llm_service):
         """Test handling of token limit exceeded errors."""
-        with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=Exception("Token limit exceeded")):
-            result = await llm_tool.execute(prompt="Very long prompt...")
+        # Mock service failure with token error
+        mock_llm_service.generate.return_value = {
+            "success": False,
+            "error": "Token limit exceeded",
+            "error_type": "TokenLimitError"
+        }
+
+        result = await llm_tool.execute(prompt="Very long prompt...")
 
         # Verify error and hints
         assert result["success"] is False
@@ -214,10 +228,12 @@ class TestLLMTool:
         assert "token" in hints_str or "reduce" in hints_str
 
     @pytest.mark.asyncio
-    async def test_network_timeout_error(self, llm_tool):
+    async def test_network_timeout_error(self, llm_tool, mock_llm_service):
         """Test handling of network timeout errors."""
-        with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=TimeoutError("Request timed out")):
-            result = await llm_tool.execute(prompt="Test prompt")
+        # Mock to raise timeout exception
+        mock_llm_service.generate.side_effect = TimeoutError("Request timed out")
+
+        result = await llm_tool.execute(prompt="Test prompt")
 
         # Verify error and hints
         assert result["success"] is False
@@ -228,10 +244,16 @@ class TestLLMTool:
         assert "retry" in hints_str or "network" in hints_str
 
     @pytest.mark.asyncio
-    async def test_authentication_error(self, llm_tool):
+    async def test_authentication_error(self, llm_tool, mock_llm_service):
         """Test handling of authentication errors."""
-        with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=Exception("Invalid API key")):
-            result = await llm_tool.execute(prompt="Test prompt")
+        # Mock service failure with auth error
+        mock_llm_service.generate.return_value = {
+            "success": False,
+            "error": "Invalid API key",
+            "error_type": "AuthenticationError"
+        }
+
+        result = await llm_tool.execute(prompt="Test prompt")
 
         # Verify error and hints
         assert result["success"] is False
@@ -242,28 +264,28 @@ class TestLLMTool:
         assert "api key" in hints_str or "credentials" in hints_str
 
     @pytest.mark.asyncio
-    async def test_logging_metadata_not_full_text(self, llm_tool):
+    async def test_logging_metadata_not_full_text(self, llm_tool, mock_llm_service):
         """Test that logging captures metadata but not full text (privacy)."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Generated response"
-        mock_response.usage = {"total_tokens": 100, "prompt_tokens": 60, "completion_tokens": 40}
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Generated response",
+            "usage": {"total_tokens": 100, "prompt_tokens": 60, "completion_tokens": 40}
+        }
 
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
-            with patch.object(llm_tool.logger, "info") as mock_log_info:
-                await llm_tool.execute(prompt="Secret prompt", context={"secret": "data"})
+        with patch.object(llm_tool.logger, "info") as mock_log_info:
+            await llm_tool.execute(prompt="Secret prompt", context={"secret": "data"})
 
-                # Verify logging was called
-                assert mock_log_info.called
-                
-                # Get all log calls
-                log_calls = [call[0] for call in mock_log_info.call_args_list]
-                
-                # Verify privacy: full text should NOT be in logs
-                for call_args in log_calls:
-                    if len(call_args) > 0:
-                        # First arg is the event name, check it's not the actual prompt
-                        assert call_args[0] != "Secret prompt"
+            # Verify logging was called
+            assert mock_log_info.called
+            
+            # Get all log calls
+            log_calls = [call[0] for call in mock_log_info.call_args_list]
+            
+            # Verify privacy: full text should NOT be in logs
+            for call_args in log_calls:
+                if len(call_args) > 0:
+                    # First arg is the event name, check it's not the actual prompt
+                    assert call_args[0] != "Secret prompt"
 
     @pytest.mark.asyncio
     async def test_tool_schema_validation(self, llm_tool):
@@ -285,68 +307,91 @@ class TestLLMTool:
         assert "prompt" in params["required"]
 
     @pytest.mark.asyncio
-    async def test_context_serialization_with_string(self, llm_tool):
+    async def test_context_serialization_with_string(self, llm_tool, mock_llm_service):
         """Test context serialization when context is already a string."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Response"
-        mock_response.usage = {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20}
-
         string_context = "This is plain text context"
 
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response) as mock_acompletion:
-            result = await llm_tool.execute(
-                prompt="Test",
-                context=string_context
-            )
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Response",
+            "usage": {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 20}
+        }
 
-        # Verify string context was used directly
-        call_args = mock_acompletion.call_args
-        prompt_sent = call_args.kwargs["messages"][0]["content"]
-        assert "This is plain text context" in prompt_sent
+        result = await llm_tool.execute(
+            prompt="Test",
+            context=string_context
+        )
+
+        # Verify string context was passed to service
+        call_args = mock_llm_service.generate.call_args
+        assert call_args.kwargs["context"] == string_context
 
     @pytest.mark.asyncio
-    async def test_large_context_warning(self, llm_tool):
-        """Test that large contexts trigger a warning log."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Response"
-        mock_response.usage = {"total_tokens": 500, "prompt_tokens": 400, "completion_tokens": 100}
-
+    async def test_large_context_handling(self, llm_tool, mock_llm_service):
+        """Test handling of large contexts passed to service."""
         # Create a large context (>2000 chars)
         large_context = {"data": "x" * 2500}
 
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
-            with patch.object(llm_tool.logger, "warning") as mock_log_warning:
-                await llm_tool.execute(prompt="Test", context=large_context)
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Response",
+            "usage": {"total_tokens": 500, "prompt_tokens": 400, "completion_tokens": 100}
+        }
 
-                # Verify warning was logged for large context
-                assert mock_log_warning.called
-                
-                # Check that the warning mentions large context
-                warning_calls = [str(call) for call in mock_log_warning.call_args_list]
-                assert any("large_context" in str(call).lower() for call in warning_calls)
+        result = await llm_tool.execute(prompt="Test", context=large_context)
+
+        # Verify large context was passed to service (service handles warnings)
+        assert result["success"] is True
+        call_args = mock_llm_service.generate.call_args
+        assert call_args.kwargs["context"] == large_context
 
     @pytest.mark.asyncio
-    async def test_usage_as_object_attribute(self, llm_tool):
-        """Test handling when usage is an object with attributes (not dict)."""
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = "Response"
-        
-        # Create usage as object with attributes
-        mock_usage = MagicMock()
-        mock_usage.total_tokens = 150
-        mock_usage.prompt_tokens = 100
-        mock_usage.completion_tokens = 50
-        mock_response.usage = mock_usage
+    async def test_usage_dict_extraction(self, llm_tool, mock_llm_service):
+        """Test correct extraction of usage stats from service response."""
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Response",
+            "usage": {
+                "total_tokens": 150,
+                "prompt_tokens": 100,
+                "completion_tokens": 50
+            }
+        }
 
-        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
-            result = await llm_tool.execute(prompt="Test")
+        result = await llm_tool.execute(prompt="Test")
 
         # Verify token counts extracted correctly
         assert result["success"] is True
         assert result["tokens_used"] == 150
         assert result["prompt_tokens"] == 100
         assert result["completion_tokens"] == 50
+
+    @pytest.mark.asyncio
+    async def test_uses_configured_model_alias(self, mock_llm_service):
+        """Test that tool uses configured model alias."""
+        tool = LLMTool(llm_service=mock_llm_service, model_alias="powerful")
+        
+        mock_llm_service.generate.return_value = {
+            "success": True,
+            "generated_text": "Response",
+            "usage": {"total_tokens": 10, "prompt_tokens": 5, "completion_tokens": 5}
+        }
+        
+        await tool.execute(prompt="Test")
+        
+        # Verify correct alias used
+        call_args = mock_llm_service.generate.call_args
+        assert call_args.kwargs["model"] == "powerful"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_handling(self, llm_tool, mock_llm_service):
+        """Test handling of unexpected exceptions."""
+        # Mock to raise exception
+        mock_llm_service.generate.side_effect = RuntimeError("Unexpected error")
+        
+        result = await llm_tool.execute(prompt="Test")
+        
+        assert result["success"] is False
+        assert result["type"] == "RuntimeError"
+        assert "Unexpected error" in result["error"]
 
