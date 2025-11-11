@@ -44,14 +44,13 @@ tools:
   - type: LLMTool
     module: capstone.agent_v2.tools.llm_tool
     params:
-      llm: null  # Will use default litellm
+      model_alias: "main"  # Use main model for RAG agent
 
-# LLM configuration (optional)
-# Currently using default litellm configuration
+# Optional LLM configuration
+# Allows overriding the default LLM config file and model
 llm_config:
-  provider: "litellm"
-  model: "gpt-4o-mini"
-  # api_key_env: "OPENAI_API_KEY"  # Environment variable name
+  config_file: "configs/llm_config.yaml"  # Optional: override default config file path
+  model_override: "main"  # Optional: override default model alias
 
 # Mission (optional - typically set at execution time)
 mission: null

@@ -13,7 +13,7 @@ import importlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import yaml
-import litellm
+import structlog
 
 from capstone.agent_v2.agent import Agent
 from capstone.agent_v2.services.llm_service import LLMService
@@ -26,17 +26,56 @@ from capstone.agent_v2.tools.shell_tool import PowerShellTool
 from capstone.agent_v2.tools.web_tool import WebFetchTool, WebSearchTool
 
 
-# Default LLMService instance (lazily initialized)
-_default_llm_service: Optional[LLMService] = None
-
-
-def get_default_llm_service() -> LLMService:
-    """Get or create the default LLMService instance."""
-    global _default_llm_service
-    if _default_llm_service is None:
-        # Use default config path
-        _default_llm_service = LLMService(config_path="configs/llm_config.yaml")
-    return _default_llm_service
+def create_llm_service(config_path: Optional[str] = None) -> LLMService:
+    """
+    Create LLMService instance with configuration.
+    
+    Args:
+        config_path: Path to LLM config YAML file.
+                     If None, uses default: "capstone/agent_v2/configs/llm_config.yaml"
+    
+    Returns:
+        Configured LLMService instance
+        
+    Raises:
+        FileNotFoundError: If config file not found
+        ValueError: If config is invalid
+        
+    Example:
+        >>> llm_service = create_llm_service()
+        >>> # Or with custom config:
+        >>> llm_service = create_llm_service("custom_llm_config.yaml")
+    """
+    if config_path is None:
+        # Default config path relative to this module
+        module_dir = Path(__file__).parent
+        config_path = module_dir / "configs" / "llm_config.yaml"
+    else:
+        config_path = Path(config_path)
+    
+    logger = structlog.get_logger()
+    logger.info(
+        "creating_llm_service",
+        config_path=str(config_path)
+    )
+    
+    try:
+        llm_service = LLMService(config_path=str(config_path))
+        return llm_service
+    except FileNotFoundError:
+        logger.error(
+            "llm_config_not_found",
+            config_path=str(config_path),
+            hint="Ensure llm_config.yaml exists in configs directory"
+        )
+        raise
+    except Exception as e:
+        logger.error(
+            "llm_service_creation_failed",
+            error=str(e),
+            config_path=str(config_path)
+        )
+        raise
 
 
 @dataclass
@@ -66,7 +105,7 @@ def create_standard_agent(
     system_prompt: Optional[str] = None,
     mission: Optional[str] = None,
     work_dir: str = "./agent_work",
-    llm = None,
+    llm_config_path: Optional[str] = None,
     llm_service: Optional[LLMService] = None
 ) -> Agent:
     """
@@ -89,7 +128,7 @@ def create_standard_agent(
         system_prompt: The system prompt for the agent (defaults to GENERIC_SYSTEM_PROMPT).
         mission: The mission for the agent.
         work_dir: The work directory for the agent (default: ./agent_work).
-        llm: (Deprecated) The LLM instance to use (default: litellm). Use llm_service instead.
+        llm_config_path: Path to LLM config (default: configs/llm_config.yaml)
         llm_service: LLMService instance (default: creates default service).
     
     Returns:
@@ -102,13 +141,11 @@ def create_standard_agent(
         ...     mission="Find information about Python async patterns"
         ... )
     """
-    if llm is None:
-        llm = litellm
-    
+    # Create LLMService if not provided
     if llm_service is None:
-        llm_service = get_default_llm_service()
+        llm_service = create_llm_service(config_path=llm_config_path)
     
-    # Create standard tool set
+    # Create standard tool set with LLMService
     tools = [
         WebSearchTool(),
         WebFetchTool(),
@@ -118,7 +155,7 @@ def create_standard_agent(
         FileReadTool(),
         FileWriteTool(),
         PowerShellTool(),
-        LLMTool(llm_service=llm_service),
+        LLMTool(llm_service=llm_service, model_alias="main"),
     ]
     
     return Agent.create_agent(
@@ -128,8 +165,7 @@ def create_standard_agent(
         mission=mission,
         tools=tools,
         work_dir=work_dir,
-        llm_service=llm_service,
-        llm=llm
+        llm_service=llm_service
     )
 
 
@@ -137,7 +173,7 @@ def create_rag_agent(
     session_id: str,
     user_context: Optional[Dict[str, Any]] = None,
     work_dir: Optional[str] = None,
-    llm = None,
+    llm_config_path: Optional[str] = None,
     llm_service: Optional[LLMService] = None
 ) -> Agent:
     """
@@ -153,7 +189,7 @@ def create_rag_agent(
         session_id: Unique session identifier for the agent.
         user_context: User context for security filtering (user_id, org_id, scope).
         work_dir: Working directory for state and todolists (default: ./rag_agent_work).
-        llm: (Deprecated) LLM instance to use (default: litellm). Use llm_service instead.
+        llm_config_path: Path to LLM config (default: configs/llm_config.yaml)
         llm_service: LLMService instance (default: creates default service).
     
     Returns:
@@ -172,18 +208,16 @@ def create_rag_agent(
     from capstone.agent_v2.tools.rag_get_document_tool import GetDocumentTool
     from capstone.agent_v2.prompts.rag_system_prompt import RAG_SYSTEM_PROMPT
     
-    if llm is None:
-        llm = litellm
-    
+    # Create LLMService if not provided
     if llm_service is None:
-        llm_service = get_default_llm_service()
+        llm_service = create_llm_service(config_path=llm_config_path)
     
-    # Create RAG tools with user context
+    # Create RAG tools with user context and LLMService
     rag_tools = [
         SemanticSearchTool(user_context=user_context),
         ListDocumentsTool(user_context=user_context),
         GetDocumentTool(user_context=user_context),
-        LLMTool(llm_service=llm_service)
+        LLMTool(llm_service=llm_service, model_alias="main")
     ]
     
     # Set default work directory
@@ -197,8 +231,7 @@ def create_rag_agent(
         mission=None,  # Mission will be set per execute() call
         tools=rag_tools,
         work_dir=work_dir,
-        llm_service=llm_service,
-        llm=llm
+        llm_service=llm_service
     )
 
 
@@ -302,13 +335,12 @@ def _load_system_prompt(config: AgentConfig) -> Optional[str]:
     return None
 
 
-def _instantiate_tool(tool_config: ToolConfig, llm=None, llm_service=None) -> Tool:
+def _instantiate_tool(tool_config: ToolConfig, llm_service: Optional[LLMService] = None) -> Tool:
     """
     Instantiate a tool from its configuration.
     
     Args:
         tool_config: ToolConfig with type, module, and params
-        llm: (Deprecated) LLM instance to pass to tools that need it
         llm_service: LLMService instance to pass to LLMTool
     
     Returns:
@@ -329,15 +361,15 @@ def _instantiate_tool(tool_config: ToolConfig, llm=None, llm_service=None) -> To
         # Handle special parameters
         params = tool_config.params.copy()
         
-        # If tool is LLMTool, handle parameter migration
+        # If tool is LLMTool, handle parameter injection
         if tool_config.type == 'LLMTool':
             # Remove deprecated 'llm' parameter if present
             params.pop('llm', None)
             
             # Add llm_service if not present
-            if params.get('llm_service') is None:
+            if 'llm_service' not in params:
                 if llm_service is None:
-                    llm_service = get_default_llm_service()
+                    llm_service = create_llm_service()
                 params['llm_service'] = llm_service
         
         # Instantiate the tool
@@ -353,32 +385,51 @@ def _instantiate_tool(tool_config: ToolConfig, llm=None, llm_service=None) -> To
         raise TypeError(f"Failed to instantiate {tool_config.type} with params {params}: {e}")
 
 
-def _configure_llm(llm_config: Optional[Dict[str, Any]]) -> Any:
+def _create_llm_from_config(llm_config: Optional[Dict[str, Any]]) -> LLMService:
     """
-    Configure LLM from configuration.
+    Create LLMService from agent config's llm_config section.
     
     Args:
-        llm_config: Dictionary with LLM configuration
+        llm_config: LLM configuration from agent YAML:
+            {
+                "config_file": "configs/llm_config.yaml",  # Optional override
+                "model_override": "powerful"  # Optional default model override
+            }
     
     Returns:
-        Configured LLM instance (currently returns litellm module)
+        Configured LLMService instance
     
-    Note:
-        Future enhancement: Could configure model, API keys, etc. based on llm_config.
+    Example config section in agent YAML:
+        llm_config:
+          config_file: "configs/llm_config.yaml"
+          model_override: "powerful"
     """
     if llm_config is None:
-        return litellm
+        llm_config = {}
     
-    # For now, just return litellm
-    # Future: Could configure model, API keys, etc.
-    # Example: litellm.model = llm_config.get('model', 'gpt-4o-mini')
+    # Get config file path (allow override)
+    config_file = llm_config.get("config_file")
     
-    return litellm
+    # Create service
+    llm_service = create_llm_service(config_path=config_file)
+    
+    # Apply model override if specified
+    model_override = llm_config.get("model_override")
+    if model_override:
+        # Override default model in service
+        llm_service.default_model = model_override
+        
+        logger = structlog.get_logger()
+        logger.info(
+            "llm_default_model_overridden",
+            new_default=model_override
+        )
+    
+    return llm_service
 
 
 def create_agent_from_config(
     config: AgentConfig,
-    llm=None,
     llm_service: Optional[LLMService] = None,
     **override_params
 ) -> Agent:
@@ -387,8 +438,7 @@ def create_agent_from_config(
     
     Args:
         config: AgentConfig instance with agent configuration.
-        llm: (Deprecated) Optional LLM instance (overrides config.llm_config). Use llm_service instead.
-        llm_service: LLMService instance (default: creates default service).
+        llm_service: LLMService instance (default: creates from config or default service).
         **override_params: Additional parameters to override config values
                           (e.g., user_context, work_dir).
     
@@ -402,12 +452,9 @@ def create_agent_from_config(
         ...     user_context={"user_id": "user123"}
         ... )
     """
-    # Configure LLM
-    if llm is None:
-        llm = _configure_llm(config.llm_config)
-    
+    # Create LLMService from config or use provided one
     if llm_service is None:
-        llm_service = get_default_llm_service()
+        llm_service = _create_llm_from_config(config.llm_config)
     
     # Load system prompt
     system_prompt = _load_system_prompt(config)
@@ -434,7 +481,7 @@ def create_agent_from_config(
             params=tool_params
         )
         
-        tool = _instantiate_tool(updated_tool_config, llm=llm, llm_service=llm_service)
+        tool = _instantiate_tool(updated_tool_config, llm_service=llm_service)
         tools.append(tool)
     
     # Get work_dir (override takes precedence)
@@ -448,14 +495,12 @@ def create_agent_from_config(
         mission=config.mission,
         tools=tools,
         work_dir=work_dir,
-        llm_service=llm_service,
-        llm=llm
+        llm_service=llm_service
     )
 
 
 def create_agent_from_yaml(
     config_path: str,
-    llm=None,
     llm_service: Optional[LLMService] = None,
     **override_params
 ) -> Agent:
@@ -467,8 +512,7 @@ def create_agent_from_yaml(
     
     Args:
         config_path: Path to YAML configuration file.
-        llm: (Deprecated) Optional LLM instance. Use llm_service instead.
-        llm_service: LLMService instance (default: creates default service).
+        llm_service: LLMService instance (default: creates from config or default service).
         **override_params: Parameters to override config values.
     
     Returns:
@@ -481,5 +525,5 @@ def create_agent_from_yaml(
         ... )
     """
     config = load_agent_config_from_yaml(config_path)
-    return create_agent_from_config(config, llm=llm, llm_service=llm_service, **override_params)
+    return create_agent_from_config(config, llm_service=llm_service, **override_params)
 
