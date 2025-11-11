@@ -1,0 +1,93 @@
+schema: 1
+story: 'LLM-SERVICE-005'
+story_title: 'Refactor TodoListManager to Use LLMService'
+gate: CONCERNS
+status_reason: 'High-quality refactoring with excellent architecture, but has minor test coverage gap for extract_clarification_questions() error scenarios'
+reviewer: 'Quinn (Test Architect)'
+updated: '2025-11-11T14:04:00Z'
+
+top_issues:
+  - severity: medium
+    category: test_coverage
+    description: 'Missing explicit tests for extract_clarification_questions() error handling and model selection'
+    refs:
+      - 'tests/unit/test_todolist.py'
+    suggested_owner: dev
+    rationale: 'While create_todolist() has comprehensive error tests, extract_clarification_questions() lacks similar coverage'
+
+waiver:
+  active: false
+
+quality_score: 90
+expires: '2025-11-25T14:04:00Z'
+
+evidence:
+  tests_reviewed: 10
+  risks_identified: 1
+  trace:
+    ac_covered: [1, 2, 3, 4, 5]
+    ac_gaps: []
+
+nfr_validation:
+  security:
+    status: PASS
+    notes: 'No security concerns. Proper dependency injection, no hardcoded credentials or sensitive data exposure'
+  performance:
+    status: PASS
+    notes: 'No performance degradation expected. Same LLM operations, now through centralized service with retry logic'
+  reliability:
+    status: PASS
+    notes: 'Significantly improved with comprehensive error handling, structured logging, and retry mechanisms from LLMService'
+  maintainability:
+    status: PASS
+    notes: 'Excellent improvement. Centralized configuration, model aliasing, comprehensive docstrings, and proper dependency injection'
+
+recommendations:
+  immediate:
+    - action: 'Add unit tests for extract_clarification_questions() covering: (1) LLM service failure, (2) JSON parse error, (3) custom model selection, (4) successful extraction with logging verification'
+      refs: ['tests/unit/test_todolist.py']
+      estimated_effort: '15-30 minutes'
+  future:
+    - action: 'Consider adding integration tests that verify the full flow: extract questions → answer → create todolist using real LLMService with test configuration'
+      refs: ['tests/integration/']
+      estimated_effort: '1-2 hours'
+    - action: 'Update story documentation to reflect actual method names (extract_clarification_questions vs create_questions_async)'
+      refs: ['capstone/agent_v2/docs/epics/stories/llm-service-story-5-refactor-todolist-manager.md']
+      estimated_effort: '5 minutes'
+
+risk_analysis:
+  probability: low
+  impact: medium
+  overall_risk_score: 3
+  mitigation: 'Add recommended tests; comprehensive unit tests already cover primary scenarios'
+
+test_architecture_assessment:
+  strengths:
+    - 'Excellent use of pytest fixtures for mock LLMService'
+    - 'Proper AsyncMock usage for async methods'
+    - 'Tests verify both behavior and implementation details (model alias usage)'
+    - 'Good coverage of CRUD operations and error scenarios'
+    - 'Tests updated to match new TodoItem structure'
+  weaknesses:
+    - 'Asymmetric test coverage: create_todolist has 3 tests, extract_clarification_questions has 0 explicit tests'
+    - 'Legacy FakeLLMResponse class still present but unused (can be removed)'
+  test_levels:
+    unit: comprehensive
+    integration: not_applicable
+    e2e: not_applicable
+
+code_quality_highlights:
+  - 'Clean dependency injection with Optional[LLMService] for backwards compatibility'
+  - 'Comprehensive structured logging with contextual information'
+  - 'Proper error handling with specific exception types'
+  - 'Complete type annotations and docstrings'
+  - 'Model strategy pattern (main for reasoning, fast for structured tasks)'
+  - 'Good separation of concerns: prompts, LLM calls, parsing'
+
+technical_debt:
+  identified: []
+  resolved:
+    - 'Removed hardcoded model names'
+    - 'Eliminated direct litellm dependency'
+    - 'Centralized LLM configuration'
+
