@@ -312,3 +312,246 @@ async def test_skip_detection_when_todolist_incomplete(agent, mock_state_manager
     ]
     assert len(detection_calls) == 0, "Detection should NOT log when todolist is incomplete"
 
+
+# ===== Story 2: Mission Reset Tests =====
+
+
+@pytest.mark.asyncio
+async def test_mission_reset_clears_state(agent, mock_state_manager, mock_todo_list_manager):
+    """Should clear mission and remove todolist_id from state."""
+    # Arrange: Agent with completed todolist and existing mission
+    agent.mission = "Previous mission"
+    state: Dict[str, Any] = {
+        "todolist_id": "completed-todolist-123"
+    }
+    mock_state_manager.load_state = AsyncMock(return_value=state)
+    mock_state_manager.save_state = AsyncMock()
+    
+    # Mock completed todolist
+    completed_todolist = create_completed_todolist()
+    mock_todo_list_manager.load_todolist = AsyncMock(return_value=completed_todolist)
+    
+    # Mock create_todolist for new plan
+    new_todolist = create_incomplete_todolist()
+    new_todolist.todolist_id = "new-todolist-456"
+    mock_todo_list_manager.create_todolist = AsyncMock(return_value=new_todolist)
+    
+    # Mock _react_loop
+    async def mock_react_loop(*args, **kwargs):
+        if False:
+            yield None
+    agent._react_loop = mock_react_loop
+    
+    # Mock logger
+    agent.logger = MagicMock()
+    
+    # Act: Execute with new query
+    events = []
+    async for event in agent.execute("New query", "session-reset-1"):
+        events.append(event)
+    
+    # Assert: Mission was cleared then reset to new query
+    assert agent.mission == "New query"
+    
+    # Assert: State was updated - save_state called at least twice 
+    # (once for reset, once for new todolist)
+    assert mock_state_manager.save_state.call_count >= 1
+    
+    # Assert: Reset logs were generated
+    agent.logger.info.assert_any_call(
+        "resetting_mission_for_new_query",
+        session_id="session-reset-1",
+        previous_mission_preview="Previous mission",
+        previous_todolist_id="completed-todolist-123",
+        new_query_preview="New query"
+    )
+    agent.logger.info.assert_any_call("mission_reset_complete", session_id="session-reset-1")
+
+
+@pytest.mark.asyncio
+async def test_mission_reset_emits_event(agent, mock_state_manager, mock_todo_list_manager):
+    """Should emit STATE_UPDATED event with reset info."""
+    # Arrange: Agent with completed todolist
+    agent.mission = "Old mission"
+    state: Dict[str, Any] = {
+        "todolist_id": "completed-todolist-abc"
+    }
+    mock_state_manager.load_state = AsyncMock(return_value=state)
+    mock_state_manager.save_state = AsyncMock()
+    
+    # Mock completed todolist
+    completed_todolist = create_completed_todolist()
+    completed_todolist.todolist_id = "completed-todolist-abc"
+    mock_todo_list_manager.load_todolist = AsyncMock(return_value=completed_todolist)
+    
+    # Mock create_todolist for new plan
+    new_todolist = create_incomplete_todolist()
+    mock_todo_list_manager.create_todolist = AsyncMock(return_value=new_todolist)
+    
+    # Mock _react_loop
+    async def mock_react_loop(*args, **kwargs):
+        if False:
+            yield None
+    agent._react_loop = mock_react_loop
+    
+    # Mock logger
+    agent.logger = MagicMock()
+    
+    # Act: Execute with new query, collect events
+    events = []
+    async for event in agent.execute("Another query", "session-reset-2"):
+        events.append(event)
+    
+    # Assert: STATE_UPDATED event emitted with reset info
+    reset_events = [
+        e for e in events 
+        if e.type.value == "state_updated" and e.data.get("mission_reset") is True
+    ]
+    assert len(reset_events) == 1, "Should emit exactly one reset event"
+    
+    reset_event = reset_events[0]
+    assert reset_event.data["reason"] == "completed_todolist_detected"
+    assert reset_event.data["previous_todolist_id"] == "completed-todolist-abc"
+
+
+@pytest.mark.asyncio
+async def test_new_todolist_created_after_reset(agent, mock_state_manager, mock_todo_list_manager):
+    """Should create new todolist with new mission."""
+    # Arrange: Agent with completed todolist
+    agent.mission = "First mission"
+    state: Dict[str, Any] = {
+        "todolist_id": "old-todolist-999"
+    }
+    mock_state_manager.load_state = AsyncMock(return_value=state)
+    mock_state_manager.save_state = AsyncMock()
+    
+    # Mock completed todolist
+    completed_todolist = create_completed_todolist()
+    completed_todolist.todolist_id = "old-todolist-999"
+    mock_todo_list_manager.load_todolist = AsyncMock(return_value=completed_todolist)
+    
+    # Mock create_todolist for new plan
+    new_todolist = create_incomplete_todolist()
+    new_todolist.todolist_id = "new-todolist-888"
+    mock_todo_list_manager.create_todolist = AsyncMock(return_value=new_todolist)
+    
+    # Mock _react_loop
+    async def mock_react_loop(*args, **kwargs):
+        if False:
+            yield None
+    agent._react_loop = mock_react_loop
+    
+    # Mock logger
+    agent.logger = MagicMock()
+    
+    # Act: Execute with new query
+    events = []
+    async for event in agent.execute("Second mission", "session-reset-3"):
+        events.append(event)
+    
+    # Assert: New todolist was created
+    mock_todo_list_manager.create_todolist.assert_called_once()
+    
+    # Assert: create_todolist was called with new mission
+    create_call_args = mock_todo_list_manager.create_todolist.call_args
+    assert create_call_args.kwargs["mission"] == "Second mission"
+    
+    # Assert: New todolist_id in state (different from previous)
+    assert agent.state.get("todolist_id") == "new-todolist-888"
+    assert agent.state["todolist_id"] != "old-todolist-999"
+
+
+@pytest.mark.asyncio
+async def test_reset_preserves_other_state(agent, mock_state_manager, mock_todo_list_manager):
+    """Should preserve answers and other state fields."""
+    # Arrange: State with answers and completed todolist
+    agent.mission = "Original mission"
+    state: Dict[str, Any] = {
+        "todolist_id": "completed-list-preserve",
+        "answers": {
+            "user_name": "John Doe",
+            "project_name": "Test Project"
+        },
+        "custom_field": "should_remain"
+    }
+    mock_state_manager.load_state = AsyncMock(return_value=state)
+    mock_state_manager.save_state = AsyncMock()
+    
+    # Mock completed todolist
+    completed_todolist = create_completed_todolist()
+    mock_todo_list_manager.load_todolist = AsyncMock(return_value=completed_todolist)
+    
+    # Mock create_todolist for new plan
+    new_todolist = create_incomplete_todolist()
+    mock_todo_list_manager.create_todolist = AsyncMock(return_value=new_todolist)
+    
+    # Mock _react_loop
+    async def mock_react_loop(*args, **kwargs):
+        if False:
+            yield None
+    agent._react_loop = mock_react_loop
+    
+    # Mock logger
+    agent.logger = MagicMock()
+    
+    # Act: Execute reset
+    events = []
+    async for event in agent.execute("New mission", "session-reset-4"):
+        events.append(event)
+    
+    # Assert: Answers still in state
+    assert "answers" in agent.state
+    assert agent.state["answers"]["user_name"] == "John Doe"
+    assert agent.state["answers"]["project_name"] == "Test Project"
+    
+    # Assert: Custom field preserved
+    assert agent.state.get("custom_field") == "should_remain"
+    
+    # Assert: Only todolist_id was initially removed (then re-added by new plan)
+    # The key point is that other state fields were NOT touched during reset
+
+
+@pytest.mark.asyncio
+async def test_no_reset_for_single_mission(agent, mock_state_manager, mock_todo_list_manager):
+    """Should not reset for traditional single-mission usage."""
+    # Arrange: Agent used once, not yet complete
+    agent.mission = None  # First time usage
+    state: Dict[str, Any] = {}  # No existing todolist
+    mock_state_manager.load_state = AsyncMock(return_value=state)
+    mock_state_manager.save_state = AsyncMock()
+    
+    # Mock create_todolist for first-time creation
+    new_todolist = create_incomplete_todolist()
+    mock_todo_list_manager.create_todolist = AsyncMock(return_value=new_todolist)
+    
+    # Mock _react_loop
+    async def mock_react_loop(*args, **kwargs):
+        if False:
+            yield None
+    agent._react_loop = mock_react_loop
+    
+    # Mock logger
+    agent.logger = MagicMock()
+    
+    # Act: Execute first time
+    events = []
+    async for event in agent.execute("First mission", "session-single"):
+        events.append(event)
+    
+    # Assert: No reset log messages
+    info_calls = [call for call in agent.logger.info.call_args_list]
+    reset_calls = [
+        call for call in info_calls 
+        if len(call[0]) > 0 and call[0][0] == "resetting_mission_for_new_query"
+    ]
+    assert len(reset_calls) == 0, "Should not reset on first mission"
+    
+    # Assert: No reset events
+    reset_events = [
+        e for e in events 
+        if e.type.value == "state_updated" and e.data.get("mission_reset") is True
+    ]
+    assert len(reset_events) == 0, "Should not emit reset event on first mission"
+    
+    # Assert: Mission was set normally
+    assert agent.mission == "First mission"
