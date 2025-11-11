@@ -357,10 +357,11 @@ class Agent:
         Executes the agent with the given user message using ReAct architecture:
         1) Load state
         2) Detect if completed todolist should be reset for new query
-        3) Set mission (only on first call or after reset)
-        4) Answer pending question (if any)
-        5) Create plan (if not exists)
-        6) Run ReAct loop
+        3) Reset mission and todolist if needed (multi-turn support)
+        4) Set mission (only on first call or after reset)
+        5) Answer pending question (if any)
+        6) Create plan (if not exists)
+        7) Run ReAct loop
 
         Args:
             user_message: The user message to execute the agent.
@@ -376,6 +377,7 @@ class Agent:
         # 2. Check for completed todolist on new input
         # This detects when user starts a new query after completing previous one
         should_reset_mission: bool = False
+        previous_todolist_id: Optional[str] = None
         
         # Only check if NOT answering a pending question
         if not self.state.get("pending_question"):
@@ -389,6 +391,7 @@ class Agent:
                     # Check if all tasks are completed
                     if self._is_plan_complete(existing_todolist):
                         should_reset_mission = True
+                        previous_todolist_id = todolist_id
                         self.logger.info(
                             "completed_todolist_detected_on_new_input",
                             session_id=session_id,
@@ -403,12 +406,49 @@ class Agent:
                         todolist_id=todolist_id
                     )
         
-        # 3. Mission setzen (nur beim ersten Call)
+        # 3. Execute mission reset if needed (Story 2: Multi-turn support)
+        if should_reset_mission:
+            self.logger.info(
+                "resetting_mission_for_new_query",
+                session_id=session_id,
+                previous_mission_preview=self.mission[:100] if self.mission else None,
+                previous_todolist_id=previous_todolist_id,
+                new_query_preview=user_message[:100]
+            )
+            
+            # Clear mission and todolist reference to allow fresh start
+            self.mission = None
+            self.state.pop("todolist_id", None)
+            
+            # Persist state changes
+            try:
+                await self.state_manager.save_state(session_id, self.state)
+            except Exception as e:
+                self.logger.error(
+                    "state_save_failed_during_reset",
+                    session_id=session_id,
+                    error=str(e)
+                )
+                # Continue execution despite save failure
+            
+            # Notify CLI that reset occurred
+            yield AgentEvent(
+                type=AgentEventType.STATE_UPDATED,
+                data={
+                    "mission_reset": True,
+                    "reason": "completed_todolist_detected",
+                    "previous_todolist_id": previous_todolist_id
+                }
+            )
+            
+            self.logger.info("mission_reset_complete", session_id=session_id)
+        
+        # 4. Mission setzen (nur beim ersten Call oder nach Reset)
         if self.mission is None:
             self.mission = user_message
             self.logger.info("mission_set", session_id=session_id, mission_preview=self.mission[:100])
 
-        # 4. Pending Question beantworten (falls vorhanden)
+        # 5. Pending Question beantworten (falls vorhanden)
         if self.state.get("pending_question"):
             answer_key = self.state["pending_question"]["answer_key"]
             self.state.setdefault("answers", {})[answer_key] = user_message
@@ -418,7 +458,7 @@ class Agent:
                             data={"answer_received": answer_key})
             self.logger.info("answer_received", session_id=session_id, answer_key=answer_key)
         
-        # 5. Plan erstellen (falls noch nicht vorhanden)
+        # 6. Plan erstellen (falls noch nicht vorhanden)
         todolist_existed = self.state.get("todolist_id") is not None
         todolist = await self._get_or_create_plan(session_id)
 
@@ -429,7 +469,7 @@ class Agent:
                                  "todolist": todolist.to_markdown(),
                                  "items": len(todolist.items)})
 
-        # 6. ReAct Loop
+        # 7. ReAct Loop
         async for event in self._react_loop(session_id, todolist):
             yield event
 
