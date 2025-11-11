@@ -1,0 +1,64 @@
+# Standard Agent Configuration
+# This configuration creates a general-purpose agent with standard tools
+
+name: "Standard Development Assistant"
+description: "General-purpose agent with web, git, file, and shell tools"
+
+# Inline system prompt
+system_prompt: |
+  You are a helpful development assistant with access to various tools.
+  You can search the web, interact with files and git repositories, execute code,
+  and run shell commands. Always think step by step and use the appropriate tools
+  to accomplish tasks efficiently.
+
+# Working directory for agent state and todolists
+work_dir: "./agent_work"
+
+# Tool configuration
+# Standard tools for development tasks
+tools:
+  - type: WebSearchTool
+    module: capstone.agent_v2.tools.web_tool
+    params: {}
+  
+  - type: WebFetchTool
+    module: capstone.agent_v2.tools.web_tool
+    params: {}
+  
+  - type: PythonTool
+    module: capstone.agent_v2.tools.code_tool
+    params: {}
+  
+  - type: GitHubTool
+    module: capstone.agent_v2.tools.git_tool
+    params: {}
+  
+  - type: GitTool
+    module: capstone.agent_v2.tools.git_tool
+    params: {}
+  
+  - type: FileReadTool
+    module: capstone.agent_v2.tools.file_tool
+    params: {}
+  
+  - type: FileWriteTool
+    module: capstone.agent_v2.tools.file_tool
+    params: {}
+  
+  - type: PowerShellTool
+    module: capstone.agent_v2.tools.shell_tool
+    params: {}
+  
+  - type: LLMTool
+    module: capstone.agent_v2.tools.llm_tool
+    params:
+      llm: null  # Will use default litellm
+
+# LLM configuration (optional)
+llm_config:
+  provider: "litellm"
+  model: "gpt-4o-mini"
+
+# Mission (optional - typically set at execution time)
+mission: null
+

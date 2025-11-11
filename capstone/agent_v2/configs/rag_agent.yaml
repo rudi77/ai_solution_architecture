@@ -1,0 +1,58 @@
+# RAG Agent Configuration
+# This configuration creates an agent specialized for document retrieval and semantic search
+
+name: "RAG Knowledge Assistant"
+description: "Agent with semantic search capabilities for enterprise documents"
+
+# System prompt can be inline or reference a Python module
+# Using file reference to load the RAG-specific system prompt
+system_prompt_file: "capstone.agent_v2.prompts.rag_system_prompt:RAG_SYSTEM_PROMPT"
+
+# Working directory for agent state and todolists
+work_dir: "./rag_agent_work"
+
+# Tool configuration
+# Each tool requires:
+#   - type: The class name of the tool
+#   - module: The fully qualified Python module path
+#   - params: Dictionary of parameters to pass to the tool constructor
+tools:
+  - type: SemanticSearchTool
+    module: capstone.agent_v2.tools.rag_semantic_search_tool
+    params:
+      user_context:
+        user_id: "default_user"
+        org_id: "default_org"
+        scope: "shared"
+  
+  - type: ListDocumentsTool
+    module: capstone.agent_v2.tools.rag_list_documents_tool
+    params:
+      user_context:
+        user_id: "default_user"
+        org_id: "default_org"
+        scope: "shared"
+  
+  - type: GetDocumentTool
+    module: capstone.agent_v2.tools.rag_get_document_tool
+    params:
+      user_context:
+        user_id: "default_user"
+        org_id: "default_org"
+        scope: "shared"
+  
+  - type: LLMTool
+    module: capstone.agent_v2.tools.llm_tool
+    params:
+      llm: null  # Will use default litellm
+
+# LLM configuration (optional)
+# Currently using default litellm configuration
+llm_config:
+  provider: "litellm"
+  model: "gpt-4o-mini"
+  # api_key_env: "OPENAI_API_KEY"  # Environment variable name
+
+# Mission (optional - typically set at execution time)
+mission: null
+
