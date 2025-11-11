@@ -12,6 +12,7 @@ import yaml
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from agent_factory import (
+    create_llm_service,
     create_standard_agent,
     create_rag_agent,
     load_agent_config_from_yaml,
@@ -21,8 +22,9 @@ from agent_factory import (
     ToolConfig,
     _load_system_prompt,
     _instantiate_tool,
-    _configure_llm
+    _create_llm_from_config
 )
+from capstone.agent_v2.services.llm_service import LLMService
 
 
 def test_create_standard_agent():
@@ -374,16 +376,14 @@ def test_instantiate_tool_with_params():
 
 
 def test_instantiate_tool_llm_tool():
-    """Test instantiating LLMTool with llm parameter."""
-    import litellm
-    
+    """Test instantiating LLMTool with llm_service parameter."""
     tool_config = ToolConfig(
         type="LLMTool",
         module="capstone.agent_v2.tools.llm_tool",
-        params={"llm": None}
+        params={"model_alias": "main"}
     )
     
-    tool = _instantiate_tool(tool_config, llm=litellm)
+    tool = _instantiate_tool(tool_config)
     assert tool is not None
     assert tool.name == "llm_generate"
 
@@ -412,21 +412,19 @@ def test_instantiate_tool_class_not_found():
         _instantiate_tool(tool_config)
 
 
-def test_configure_llm_none():
-    """Test configuring LLM with None config."""
-    import litellm
-    
-    llm = _configure_llm(None)
-    assert llm == litellm
+def test_create_llm_from_config_none():
+    """Test creating LLMService with None config."""
+    llm_service = _create_llm_from_config(None)
+    assert isinstance(llm_service, LLMService)
+    assert llm_service.default_model is not None
 
 
-def test_configure_llm_with_config():
-    """Test configuring LLM with config dict."""
-    import litellm
-    
-    config = {"model": "gpt-4", "provider": "openai"}
-    llm = _configure_llm(config)
-    assert llm == litellm  # Currently just returns litellm
+def test_create_llm_from_config_with_override():
+    """Test creating LLMService with model override."""
+    config = {"model_override": "powerful"}
+    llm_service = _create_llm_from_config(config)
+    assert isinstance(llm_service, LLMService)
+    assert llm_service.default_model == "powerful"
 
 
 def test_create_agent_from_config():
@@ -440,7 +438,7 @@ def test_create_agent_from_config():
         ToolConfig(
             type="LLMTool",
             module="capstone.agent_v2.tools.llm_tool",
-            params={"llm": None}
+            params={"model_alias": "main"}
         )
     ]
     
@@ -466,7 +464,7 @@ def test_create_agent_from_config_with_overrides():
         ToolConfig(
             type="LLMTool",
             module="capstone.agent_v2.tools.llm_tool",
-            params={"llm": None}
+            params={"model_alias": "main"}
         )
     ]
     
@@ -568,4 +566,86 @@ def test_deepcopy_prevents_config_mutation():
     # Verify original is unchanged
     assert original_params["user_context"]["user_id"] == "original_user"
     assert "new_key" not in original_params["user_context"]
+
+
+# ===== LLMService Tests =====
+
+def test_create_llm_service_with_default_config():
+    """Test creating LLMService with default config."""
+    service = create_llm_service()
+    
+    assert isinstance(service, LLMService)
+    assert service.default_model is not None
+
+
+def test_create_llm_service_with_custom_config(tmp_path):
+    """Test creating LLMService with custom config."""
+    # Create custom config
+    custom_config = tmp_path / "custom_llm.yaml"
+    custom_config.write_text("""
+default_model: "main"
+models:
+  main: "gpt-4.1"
+default_params:
+  temperature: 0.7
+  max_tokens: 2000
+retry_policy:
+  max_attempts: 3
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+logging:
+  log_token_usage: true
+""")
+    
+    service = create_llm_service(config_path=str(custom_config))
+    assert isinstance(service, LLMService)
+    assert service.default_model == "main"
+
+
+def test_create_llm_service_with_missing_config_raises_error():
+    """Test that missing config raises FileNotFoundError."""
+    with pytest.raises(FileNotFoundError):
+        create_llm_service(config_path="nonexistent.yaml")
+
+
+def test_create_standard_agent_has_llm_service(tmp_path):
+    """Test that standard agent is created with LLMService."""
+    agent = create_standard_agent(
+        name="Test Agent",
+        description="Test",
+        work_dir=str(tmp_path / "work")
+    )
+    
+    # Verify agent has llm_service
+    assert hasattr(agent, 'llm_service')
+    assert isinstance(agent.llm_service, LLMService)
+    
+    # Verify LLMTool has llm_service
+    from capstone.agent_v2.tools.llm_tool import LLMTool
+    llm_tools = [t for t in agent.tools if isinstance(t, LLMTool)]
+    assert len(llm_tools) > 0
+    assert hasattr(llm_tools[0], 'llm_service')
+
+
+@pytest.mark.asyncio
+@patch.dict(os.environ, {
+    "AZURE_SEARCH_ENDPOINT": "https://test.search.windows.net",
+    "AZURE_SEARCH_API_KEY": "test-key"
+})
+async def test_create_rag_agent_has_llm_service(tmp_path):
+    """Test that RAG agent is created with LLMService."""
+    agent = create_rag_agent(
+        session_id="test_001",
+        user_context={
+            "user_id": "user123",
+            "org_id": "org456",
+            "scope": "shared"
+        },
+        work_dir=str(tmp_path / "rag_work")
+    )
+    
+    # Verify agent has llm_service
+    assert hasattr(agent, 'llm_service')
+    assert isinstance(agent.llm_service, LLMService)
 
