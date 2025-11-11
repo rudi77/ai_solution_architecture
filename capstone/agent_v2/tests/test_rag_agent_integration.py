@@ -8,7 +8,7 @@ from unittest.mock import patch, AsyncMock
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agent import Agent
+from agent_factory import create_rag_agent
 
 
 @pytest.mark.asyncio
@@ -18,7 +18,7 @@ from agent import Agent
 })
 async def test_create_rag_agent():
     """Test RAG agent factory method creates agent successfully."""
-    agent = Agent.create_rag_agent(
+    agent = create_rag_agent(
         session_id="test_rag_001",
         user_context={"user_id": "test_user", "org_id": "test_org"}
     )
@@ -50,7 +50,7 @@ async def test_create_rag_agent():
 })
 async def test_rag_agent_tool_registration():
     """Test that SemanticSearchTool is properly registered."""
-    agent = Agent.create_rag_agent(
+    agent = create_rag_agent(
         session_id="test_rag_002",
         user_context={"user_id": "test_user"}
     )
@@ -77,7 +77,7 @@ async def test_rag_agent_system_prompt():
     """Test that RAG system prompt is correctly loaded."""
     from prompts.rag_system_prompt import RAG_SYSTEM_PROMPT
 
-    agent = Agent.create_rag_agent(
+    agent = create_rag_agent(
         session_id="test_rag_003"
     )
 
@@ -97,7 +97,7 @@ async def test_rag_agent_system_prompt():
 })
 async def test_rag_agent_with_none_user_context():
     """Test RAG agent creation with no user context."""
-    agent = Agent.create_rag_agent(
+    agent = create_rag_agent(
         session_id="test_rag_004",
         user_context=None
     )
@@ -128,7 +128,7 @@ async def test_rag_agent_custom_work_dir():
     temp_dir = tempfile.mkdtemp()
 
     try:
-        agent = Agent.create_rag_agent(
+        agent = create_rag_agent(
             session_id="test_rag_005",
             work_dir=temp_dir
         )
@@ -152,7 +152,7 @@ async def test_rag_agent_custom_work_dir():
 async def test_rag_agent_tool_execution_mock():
     """Test that agent can execute with mocked tool responses."""
     # Create agent
-    agent = Agent.create_rag_agent(
+    agent = create_rag_agent(
         session_id="test_rag_006",
         user_context={"user_id": "test_user"}
     )
