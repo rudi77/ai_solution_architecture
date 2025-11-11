@@ -947,7 +947,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         # todolist directory is work_dir/todolists
         todolist_dir = work_dir / "todolists"
         todolist_dir.mkdir(exist_ok=True)
-        planner = TodoListManager(base_dir=todolist_dir)
+        planner = TodoListManager(base_dir=todolist_dir, llm_service=llm_service)
 
         # state directory is work_dir/states
         state_dir = work_dir / "states"

@@ -78,28 +78,34 @@ Your role is to help decide WHICH tool to use and HOW to use it for the current 
 
 **Best for**:
 - "Which/Show me/List" questions about document availability
-- Finding documents by metadata (type, date, author)
+- Finding documents by metadata (type, organization, scope)
 - Getting an overview of available resources
 
 **Input Parameters**:
-- `filters` (dict, optional): Filter by document_type, date_range, author, keywords, etc.
+- `filters` (dict, optional): Filter by available fields:
+  - `document_type`: Document type (e.g., "application/pdf", "text/plain")
+  - `org_id`: Organization identifier
+  - `user_id`: User identifier (owner)
+  - `scope`: Access scope (e.g., "shared", "public", "private")
+  - Note: Only these fields are valid for filtering. Do NOT use "keywords", "author", or "date_range".
 - `limit` (int, optional): Maximum number of documents to return (default: 20)
 
 **Returns**:
 - List of documents with:
   - `document_id`: Unique identifier
-  - `title`: Document title
-  - `document_type`: Type (PDF, Manual, Report, etc.)
-  - `created_date`: Creation date
-  - `author`: Author information (if available)
-  - Basic metadata
+  - `document_title`: Document title
+  - `document_type`: Type (e.g., application/pdf)
+  - `org_id`: Organization identifier
+  - `user_id`: User/owner identifier
+  - `scope`: Access scope
+  - `chunk_count`: Number of content chunks
 
 **Example**:
 ```python
 {
   "tool": "rag_list_documents",
   "tool_input": {
-    "filters": {"document_type": "Manual"},
+    "filters": {"document_type": "application/pdf", "scope": "shared"},
     "limit": 20
   }
 }
