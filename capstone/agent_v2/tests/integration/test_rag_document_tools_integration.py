@@ -4,7 +4,7 @@ import os
 import pytest
 from capstone.agent_v2.tools.rag_list_documents_tool import ListDocumentsTool
 from capstone.agent_v2.tools.rag_get_document_tool import GetDocumentTool
-from capstone.agent_v2.agent import Agent
+from capstone.agent_v2.agent_factory import create_rag_agent
 
 
 # Skip tests if Azure credentials are not available
@@ -216,7 +216,7 @@ class TestRagDocumentToolsWithAgent:
     @pytest.fixture
     def agent(self):
         """Create RAG agent with document tools."""
-        return Agent.create_rag_agent(
+        return create_rag_agent(
             session_id="test_doc_tools_session",
             user_context={
                 "org_id": "MS-corp",

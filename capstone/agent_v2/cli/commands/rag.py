@@ -5,7 +5,7 @@ import os
 import time
 import typer
 from rich.console import Console
-from capstone.agent_v2.agent import Agent
+from capstone.agent_v2.agent_factory import create_rag_agent
 
 console = Console()
 app = typer.Typer(help="RAG Knowledge Retrieval Commands")
@@ -66,7 +66,7 @@ def rag_chat(
         console.print("[cyan]🚀 Initializing RAG Agent...[/cyan]")
 
         try:
-            agent = Agent.create_rag_agent(
+            agent = create_rag_agent(
                 session_id=session_id,
                 user_context=user_context
             )
