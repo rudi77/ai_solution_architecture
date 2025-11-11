@@ -2,27 +2,25 @@
 # LLM TEXT GENERATION TOOL
 # ============================================
 
-import json
-import time
 from typing import Any, Dict, Optional
 import structlog
-import litellm
 from capstone.agent_v2.tool import Tool
+from capstone.agent_v2.services.llm_service import LLMService
 
 
 class LLMTool(Tool):
-    """Generic LLM tool for natural language text generation"""
+    """Generic LLM tool for natural language text generation using LLMService."""
     
-    def __init__(self, llm, model: str = "gpt-4.1"):
+    def __init__(self, llm_service: LLMService, model_alias: str = "main"):
         """
-        Initialize LLMTool with an LLM instance.
+        Initialize LLMTool with LLMService.
         
         Args:
-            llm: The LLM instance (typically litellm or a configured LLM provider)
-            model: The LLM model to use (default: "gpt-4.1")
+            llm_service: The centralized LLM service
+            model_alias: Model alias from config (default: "main")
         """
-        self.llm = llm
-        self.model = model
+        self.llm_service = llm_service
+        self.model_alias = model_alias
         self.logger = structlog.get_logger()
     
     @property
@@ -72,7 +70,7 @@ class LLMTool(Tool):
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Execute LLM text generation.
+        Execute LLM text generation using LLMService.
         
         Args:
             prompt: The prompt/instruction for the LLM
@@ -92,131 +90,83 @@ class LLMTool(Tool):
             - hints: Suggestions for fixing errors (if failed)
             
         Example:
-            >>> tool = LLMTool(llm=litellm)
+            >>> tool = LLMTool(llm_service=llm_service)
             >>> result = await tool.execute(
             ...     prompt="Summarize this data",
             ...     context={"documents": [{"title": "doc1.pdf", "chunks": 214}]}
             ... )
             >>> print(result["generated_text"])
         """
-        start_time = time.time()
+        self.logger.info(
+            "llm_generate_started",
+            tool="llm_generate",
+            has_context=context is not None
+        )
         
         try:
-            # Build full prompt with context if provided
-            context_str = ""
-            if context:
-                context_str = self._serialize_context(context)
-                full_prompt = f"""Context Data:
-{context_str}
-
-Task: {prompt}
-"""
-            else:
-                full_prompt = prompt
-            
-            # Log metadata only (privacy-safe)
-            context_size = len(context_str)
-            self.logger.info(
-                "llm_generate_started",
-                tool="llm_generate",
-                prompt_length=len(full_prompt),
-                has_context=context is not None,
-                context_size=context_size
-            )
-            
-            # Warn about large contexts
-            if context_size > 2000:
-                self.logger.warning(
-                    "llm_generate_large_context",
-                    context_size=context_size,
-                    hint="Consider reducing context size for better performance"
-                )
-            
-            # Call LLM using litellm.acompletion
-            response = await litellm.acompletion(
-                model=self.model,
-                messages=[{"role": "user", "content": full_prompt}],
+            # Use LLMService.generate() method
+            result = await self.llm_service.generate(
+                prompt=prompt,
+                context=context,
+                model=self.model_alias,  # Use configured alias
                 max_tokens=max_tokens,
-                temperature=temperature
+                temperature=temperature,
+                **kwargs
             )
             
-            # Extract text and token counts
-            generated_text = response.choices[0].message.content
-            usage = response.usage if hasattr(response, 'usage') else {}
+            # Check if generation succeeded
+            if not result.get("success"):
+                self.logger.error(
+                    "llm_generate_failed",
+                    error=result.get("error"),
+                    error_type=result.get("error_type")
+                )
+                
+                return {
+                    "success": False,
+                    "error": result.get("error", "Unknown error"),
+                    "type": result.get("error_type", "UnknownError"),
+                    "hints": self._get_error_hints(
+                        result.get("error_type", ""),
+                        result.get("error", "")
+                    )
+                }
             
-            # Handle both dict and object forms of usage
-            if isinstance(usage, dict):
-                tokens_used = usage.get("total_tokens", 0)
-                prompt_tokens = usage.get("prompt_tokens", 0)
-                completion_tokens = usage.get("completion_tokens", 0)
-            else:
-                tokens_used = getattr(usage, "total_tokens", 0)
-                prompt_tokens = getattr(usage, "prompt_tokens", 0)
-                completion_tokens = getattr(usage, "completion_tokens", 0)
-            
-            latency_ms = int((time.time() - start_time) * 1000)
+            # Extract data from successful result
+            generated_text = result.get("generated_text") or result.get("content")
+            usage = result.get("usage", {})
             
             self.logger.info(
                 "llm_generate_completed",
-                tokens_used=tokens_used,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                latency_ms=latency_ms
+                tokens_used=usage.get("total_tokens", 0),
+                latency_ms=result.get("latency_ms", 0)
             )
             
             return {
                 "success": True,
                 "generated_text": generated_text,
-                "tokens_used": tokens_used,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens
+                "tokens_used": usage.get("total_tokens", 0),
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0)
             }
             
         except Exception as e:
-            latency_ms = int((time.time() - start_time) * 1000)
+            # Catch any unexpected errors
             error_type = type(e).__name__
             error_msg = str(e)
             
             self.logger.error(
-                "llm_generate_failed",
+                "llm_generate_exception",
                 error_type=error_type,
-                error=error_msg[:200],  # Truncate for logging
-                latency_ms=latency_ms
+                error=error_msg[:200]
             )
-            
-            # Determine hints based on error type
-            hints = self._get_error_hints(error_type, error_msg)
             
             return {
                 "success": False,
                 "error": error_msg,
                 "type": error_type,
-                "hints": hints
+                "hints": self._get_error_hints(error_type, error_msg)
             }
-    
-    def _serialize_context(self, context: Any) -> str:
-        """
-        Serialize context to a clean JSON string.
-        
-        Args:
-            context: Context data (dict, list, or string)
-            
-        Returns:
-            JSON-formatted string representation
-        """
-        if isinstance(context, str):
-            return context
-        
-        try:
-            return json.dumps(context, indent=2, ensure_ascii=False)
-        except (TypeError, ValueError) as e:
-            # Fallback to string representation if not JSON-serializable
-            self.logger.warning(
-                "context_serialization_fallback",
-                error=str(e),
-                hint="Context is not JSON-serializable, using string representation"
-            )
-            return str(context)
     
     def _get_error_hints(self, error_type: str, error_msg: str) -> list:
         """

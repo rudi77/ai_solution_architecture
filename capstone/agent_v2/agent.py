@@ -937,7 +937,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
                 FileReadTool(),
                 FileWriteTool(),
                 PowerShellTool(),
-                LLMTool(llm=llm) if llm else LLMTool(llm=llm_service),
+                LLMTool(llm_service=llm_service),
             ]
         
         system_prompt = GENERIC_SYSTEM_PROMPT if system_prompt is None else system_prompt

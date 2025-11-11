@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from capstone.agent_v2.tools.rag_semantic_search_tool import SemanticSearchTool
 from capstone.agent_v2.tools.llm_tool import LLMTool
 from capstone.agent_v2.tools.code_tool import PythonTool
-import litellm
+from capstone.agent_v2.services.llm_service import LLMService
 
 
 # Sample content blocks for testing (simulating rag_semantic_search output)
@@ -103,7 +103,8 @@ class TestSynthesisWorkflow:
     @pytest.mark.asyncio
     async def test_llm_synthesis_multimodal(self):
         """Test synthesis using llm_generate with mixed text + image blocks."""
-        tool = LLMTool(llm=litellm)
+        llm_service = LLMService()
+        tool = LLMTool(llm_service=llm_service)
         
         # Synthesize using llm_generate (Approach A - recommended)
         result = await tool.execute(
@@ -146,7 +147,8 @@ class TestSynthesisWorkflow:
     @pytest.mark.asyncio
     async def test_llm_synthesis_text_only(self):
         """Test synthesis with text-only blocks."""
-        tool = LLMTool(llm=litellm)
+        llm_service = LLMService()
+        tool = LLMTool(llm_service=llm_service)
         
         result = await tool.execute(
             prompt="""Synthesize these search results into a clear answer.
@@ -179,7 +181,8 @@ class TestSynthesisWorkflow:
     @pytest.mark.asyncio
     async def test_llm_synthesis_empty_results(self):
         """Test synthesis with empty search results."""
-        tool = LLMTool(llm=litellm)
+        llm_service = LLMService()
+        tool = LLMTool(llm_service=llm_service)
         
         result = await tool.execute(
             prompt="""The search returned no results. Provide a helpful message to the user
@@ -392,7 +395,8 @@ result = handle_empty_results(user_query)
             pytest.skip("No search results available in test index")
         
         # Step 2: Synthesize results using LLM
-        llm_tool = LLMTool(llm=litellm)
+        llm_service = LLMService()
+        llm_tool = LLMTool(llm_service=llm_service)
         
         synthesis_result = await llm_tool.execute(
             prompt="""Synthesize these search results into a comprehensive answer.
