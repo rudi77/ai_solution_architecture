@@ -6,11 +6,13 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional, Iterable, List, Tuple
 import re
-import litellm
 import json
 import uuid
+import structlog
 
 from dataclasses import dataclass, field, asdict
+
+from capstone.agent_v2.services.llm_service import LLMService
 
 # ===== Structured Plan Models (Single Source of Truth) =====
 class TaskStatus(str, Enum):
@@ -228,37 +230,94 @@ class TodoList:
 
 
 class TodoListManager:
-    def __init__(self, base_dir: str = "./checklists"):
-        self.base_dir = base_dir
-
-
-    async def extract_clarification_questions(self, mission: str, tools_desc: str) -> List[Dict[str, Any]]:
+    """
+    Manager for creating and managing Todo Lists using LLMService.
+    
+    Uses different model strategies:
+    - "main" model for complex reasoning (clarification questions)
+    - "fast" model for structured generation (todo lists)
+    """
+    
+    def __init__(self, base_dir: str = "./checklists", llm_service: Optional[LLMService] = None):
         """
-        Extracts clarification questions from the mission and tools_desc.
+        Initialize TodoListManager with LLMService.
+        
+        Args:
+            base_dir: Directory for storing todolists
+            llm_service: LLM service for generation operations (optional for backwards compatibility)
+        """
+        self.base_dir = base_dir
+        self.llm_service = llm_service
+        self.logger = structlog.get_logger()
+
+
+    async def extract_clarification_questions(
+        self, 
+        mission: str, 
+        tools_desc: str,
+        model: str = "main"
+    ) -> List[Dict[str, Any]]:
+        """
+        Extracts clarification questions from the mission and tools_desc using LLM.
+        
+        Uses "main" model by default for complex reasoning.
 
         Args:
             mission: The mission to create the todolist for.
             tools_desc: The description of the tools available.
+            model: Model alias to use (default: "main")
 
         Returns:
             A list of clarification questions.
+            
+        Raises:
+            RuntimeError: If LLM generation fails or service not configured
         """
+        if not self.llm_service:
+            raise RuntimeError("LLMService not configured for TodoListManager")
+            
         user_prompt, system_prompt = self.create_clarification_questions_prompts(mission, tools_desc)
-        response = await litellm.acompletion(
-            model="gpt-4.1",
+        
+        self.logger.info(
+            "extracting_clarification_questions",
+            mission_length=len(mission),
+            model=model
+        )
+        
+        result = await self.llm_service.complete(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0  # deterministischer
+            model=model,
+            temperature=0
         )
-        raw = response.choices[0].message.content
+        
+        if not result.get("success"):
+            self.logger.error(
+                "clarification_questions_failed",
+                error=result.get("error")
+            )
+            raise RuntimeError(f"Failed to extract questions: {result.get('error')}")
+        
+        raw = result["content"]
         try:
-            data = json.loads(raw)            
+            data = json.loads(raw)
+            
+            self.logger.info(
+                "clarification_questions_extracted",
+                question_count=len(data) if isinstance(data, list) else 0,
+                tokens=result.get("usage", {}).get("total_tokens", 0)
+            )
+            
+            return data
         except json.JSONDecodeError as e:
-            # Optional: Fallback/Retry oder klare Fehlermeldung
+            self.logger.error(
+                "clarification_questions_parse_failed",
+                error=str(e),
+                response=raw[:200]
+            )
             raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
-        return data
 
 
 
@@ -334,43 +393,81 @@ class TodoListManager:
 
 
 
-    async def create_todolist(self, mission: str, tools_desc: str, answers: Any) -> TodoList:
+    async def create_todolist(
+        self, 
+        mission: str, 
+        tools_desc: str, 
+        answers: Any = None,
+        model: str = "fast"
+    ) -> TodoList:
         """
-        Creates a new todolist based on the mission and tools_desc.
+        Creates a new todolist based on the mission and tools_desc using LLM.
+        
+        Uses "fast" model by default for efficient structured generation.
 
         Args:
             mission: The mission to create the todolist for.
             tools_desc: The description of the tools available.
+            answers: Optional dict of question-answer pairs from clarification.
+            model: Model alias to use (default: "fast")
 
         Returns:
             A new todolist based on the mission and tools_desc.
 
         Raises:
-            ValueError: Invalid JSON from model.
-
+            RuntimeError: If LLM generation fails or service not configured
+            ValueError: If JSON parsing fails
         """
-        user_prompt, system_prompt = self.create_final_todolist_prompts(mission, tools_desc, answers)
+        if not self.llm_service:
+            raise RuntimeError("LLMService not configured for TodoListManager")
+            
+        user_prompt, system_prompt = self.create_final_todolist_prompts(mission, tools_desc, answers or {})
+        
+        self.logger.info(
+            "creating_todolist",
+            mission_length=len(mission),
+            answer_count=len(answers) if isinstance(answers, dict) else 0,
+            model=model
+        )
 
-        response = await litellm.acompletion(
-            model="gpt-4.1-mini",
+        result = await self.llm_service.complete(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
+            model=model,
             response_format={"type": "json_object"},
-            temperature=0  # deterministischer
+            temperature=0
         )
 
-        # Sicheres Parsing
-        raw = response.choices[0].message.content
+        if not result.get("success"):
+            self.logger.error(
+                "todolist_creation_failed",
+                error=result.get("error")
+            )
+            raise RuntimeError(f"Failed to create todolist: {result.get('error')}")
+
+        raw = result["content"]
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            # Optional: Fallback/Retry oder klare Fehlermeldung
+            self.logger.error(
+                "todolist_parse_failed",
+                error=str(e),
+                response=raw[:200]
+            )
             raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
 
         todolist = TodoList.from_json(data)
         self.__write_todolist(todolist)
+        
+        self.logger.info(
+            "todolist_created",
+            todolist_id=todolist.todolist_id,
+            item_count=len(todolist.items),
+            tokens=result.get("usage", {}).get("total_tokens", 0)
+        )
+        
         return todolist
 
     # def __validate_plan_schema(plan: dict, tool_names: set):
