@@ -43,6 +43,7 @@ class ListDocumentsTool(Tool):
             "List all available documents in the knowledge base. "
             "Returns document metadata including document ID, title, type, "
             "organization, user, scope, and chunk count. "
+            "Valid filter fields: document_type, org_id, user_id, scope. "
             "Use this to discover what documents are available before searching their content."
         )
 
@@ -58,7 +59,7 @@ class ListDocumentsTool(Tool):
             "properties": {
                 "filters": {
                     "type": "object",
-                    "description": "Optional filters (e.g., {'document_type': 'application/pdf'})",
+                    "description": "Optional filters. Valid fields: document_type, org_id, user_id, scope. Example: {'document_type': 'application/pdf', 'scope': 'shared'}",
                     "default": {}
                 },
                 "limit": {
@@ -100,7 +101,7 @@ class ListDocumentsTool(Tool):
         Execute document listing from content-blocks index using facets.
 
         Args:
-            filters: Optional additional filters (document_type, org_id, scope)
+            filters: Optional additional filters. Valid fields: document_type, org_id, user_id, scope
             limit: Maximum number of documents to return (1-100)
             user_context: Optional user context override for security filtering
             **kwargs: Additional arguments (ignored)
