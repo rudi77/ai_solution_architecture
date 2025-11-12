@@ -141,8 +141,8 @@ Provide a 2-3 paragraph summary of key decisions, results, and context."""
     def get_last_n_messages(self, n: int) -> List[Dict[str, Any]]:
         """
         Gets the last n message pairs (user and assistant) in chronological order,
-        always including the system prompt as the first message. If there is an
-        incomplete trailing message (no pair), it is ignored.
+        always including the system prompt as the first message. Also includes
+        any trailing incomplete user message for conversational context.
 
         Args:
             n: The number of message pairs to get.
@@ -156,16 +156,18 @@ Provide a 2-3 paragraph summary of key decisions, results, and context."""
         # Exclude the system prompt from pairing logic
         body = self.messages[1:]
         num_pairs = len(body) // 2
+        has_trailing = len(body) % 2 == 1  # Odd number means trailing message
 
         if num_pairs == 0:
-            return [self.system_prompt]
+            # No complete pairs, but include trailing message if present
+            return [self.system_prompt] + (body if has_trailing else [])
 
         if n >= num_pairs:
-            # Return all complete pairs
-            return [self.system_prompt] + body[: num_pairs * 2]
+            # Return all complete pairs plus any trailing message
+            return [self.system_prompt] + body
 
-        # Return only the last n pairs, preserving chronological order
-        start_index = len(body) - (n * 2)
+        # Return last n pairs plus any trailing message
+        start_index = len(body) - (n * 2) - (1 if has_trailing else 0)
         return [self.system_prompt] + body[start_index:]
 
     def replace_system_prompt(self, system_prompt: str) -> None:
@@ -242,13 +244,27 @@ class Thought:
         """
         # Accept both JSON string and already-parsed dict
         if isinstance(json_str, (str, bytes, bytearray)):
-            data = json.loads(json_str)
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                # Try to extract JSON from markdown code blocks if present
+                import re
+                json_match = re.search(r'```json\s*\n(.*?)\n```', 
+                                      json_str, re.DOTALL)
+                if json_match:
+                    data = json.loads(json_match.group(1))
+                else:
+                    # Re-raise original error with more context
+                    raise ValueError(
+                        f"Invalid JSON in Thought: {e}. "
+                        f"Content preview: {json_str[:200]}..."
+                    ) from e
         elif isinstance(json_str, dict):
             data = json_str
         else:
             raise TypeError("Thought.from_json expects str|bytes|bytearray|dict")
         return Thought(
-            step_ref=data.get("step_ref") or data.get("next_step_ref"),  # Support both names
+            step_ref=data.get("step_ref") or data.get("next_step_ref"),
             rationale=data["rationale"],
             action=Action.from_json(data["action"]),
             expected_outcome=data["expected_outcome"],
@@ -368,9 +384,10 @@ class Agent:
         2) Detect if completed todolist should be reset for new query
         3) Reset mission and todolist if needed (multi-turn support)
         4) Set mission (only on first call or after reset)
-        5) Answer pending question (if any)
-        6) Create plan (if not exists)
-        7) Run ReAct loop
+        5) Add user message to conversation history
+        6) Answer pending question (if any)
+        7) Create plan (if not exists)
+        8) Run ReAct loop
 
         Args:
             user_message: The user message to execute the agent.
@@ -381,7 +398,12 @@ class Agent:
         """
         # 1. State laden
         self.state = await self.state_manager.load_state(session_id)
-        self.logger.info("execute_start", session_id=session_id)
+        self.logger.info(
+            "execute_start", 
+            session_id=session_id,
+            todolist_id_in_state=self.state.get("todolist_id"),
+            mission_set=self.mission is not None
+        )
 
         # 2. Check for completed todolist on new input
         # This detects when user starts a new query after completing previous one
@@ -492,7 +514,17 @@ class Agent:
             self.mission = user_message
             self.logger.info("mission_set", session_id=session_id, mission_preview=self.mission[:100])
 
-        # 5. Pending Question beantworten (falls vorhanden)
+        # 5. Add user message to conversation history (Story CONV-HIST-002)
+        # This ensures LLM can see the actual user query in conversation context
+        self.message_history.add_message(user_message, "user")
+        self.logger.info(
+            "user_message_added_to_history",
+            session_id=session_id,
+            message_preview=user_message[:100],
+            total_messages=len(self.message_history.messages)
+        )
+
+        # 6. Pending Question beantworten (falls vorhanden)
         if self.state.get("pending_question"):
             answer_key = self.state["pending_question"]["answer_key"]
             self.state.setdefault("answers", {})[answer_key] = user_message
@@ -502,9 +534,23 @@ class Agent:
                             data={"answer_received": answer_key})
             self.logger.info("answer_received", session_id=session_id, answer_key=answer_key)
         
-        # 6. Plan erstellen (falls noch nicht vorhanden)
+        # 7. Plan erstellen (falls noch nicht vorhanden)
         todolist_existed = self.state.get("todolist_id") is not None
+        self.logger.info(
+            "before_get_or_create_plan",
+            session_id=session_id,
+            todolist_existed=todolist_existed,
+            todolist_id_in_state=self.state.get("todolist_id"),
+            mission_preview=self.mission[:100] if self.mission else None
+        )
         todolist = await self._get_or_create_plan(session_id)
+        self.logger.info(
+            "after_get_or_create_plan",
+            session_id=session_id,
+            todolist_id=todolist.todolist_id,
+            num_items=len(todolist.items),
+            first_item_status=todolist.items[0].status.value if todolist.items else None
+        )
 
         # Emit todolist created event if it was just created
         if not todolist_existed:
@@ -513,7 +559,7 @@ class Agent:
                                  "todolist": todolist.to_markdown(),
                                  "items": len(todolist.items)})
 
-        # 7. ReAct Loop
+        # 8. ReAct Loop
         async for event in self._react_loop(session_id, todolist):
             yield event
 
@@ -665,6 +711,13 @@ class Agent:
                         self.logger.info("step_skipped_on_done", session_id=session_id,
                                        step=step.position,
                                        reason="early_completion")
+
+                # CRITICAL: Save state and todolist BEFORE breaking to persist SKIPPED status
+                await self.state_manager.save_state(session_id, self.state)
+                await self.todo_list_manager.update_todolist(todolist)
+                self.logger.info("state_and_todolist_saved_on_early_completion", 
+                               session_id=session_id,
+                               todolist_id=todolist.todolist_id)
 
                 # Emit final answer before breaking
                 final_answer = thought.action.summary if hasattr(thought.action, 'summary') else "Task completed"
@@ -846,6 +899,8 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
             "- If information is missing, use ask_user action.\n"
             "- If the step is already fulfilled, use complete action.\n"
             "- If the plan needs adjustment, use replan action.\n"
+            "- ALWAYS populate `expected_outcome` with a concise sentence describing what you expect after executing the action.\n"
+            "- When you choose the `complete` action, you must already have produced the final answer (e.g., via `llm_generate`) and include a clear summary in `action.summary`.\n"
             "Return STRICT JSON only (no extra text) matching this schema:\n"
             f"{json.dumps(schema_hint, ensure_ascii=False, indent=2)}\n\n"
         )})
@@ -880,7 +935,12 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         try:
             return Thought.from_json(raw_content)
         except Exception as e:
-            self.logger.error("thought_parse_failed", step=current_step.position, error=str(e))
+            self.logger.error(
+                "thought_parse_failed", 
+                step=current_step.position, 
+                error=str(e),
+                raw_content_preview=raw_content[:500] if raw_content else None
+            )
             raise
 
 
