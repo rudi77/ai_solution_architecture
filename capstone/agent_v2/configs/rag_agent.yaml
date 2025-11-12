@@ -25,21 +25,21 @@ tools:
         org_id: "default_org"
         scope: "shared"
   
-  - type: ListDocumentsTool
-    module: capstone.agent_v2.tools.rag_list_documents_tool
-    params:
-      user_context:
-        user_id: "default_user"
-        org_id: "default_org"
-        scope: "shared"
+  # - type: ListDocumentsTool
+  #   module: capstone.agent_v2.tools.rag_list_documents_tool
+  #   params:
+  #     user_context:
+  #       user_id: "default_user"
+  #       org_id: "default_org"
+  #       scope: "shared"
   
-  - type: GetDocumentTool
-    module: capstone.agent_v2.tools.rag_get_document_tool
-    params:
-      user_context:
-        user_id: "default_user"
-        org_id: "default_org"
-        scope: "shared"
+  # - type: GetDocumentTool
+  #   module: capstone.agent_v2.tools.rag_get_document_tool
+  #   params:
+  #     user_context:
+  #       user_id: "default_user"
+  #       org_id: "default_org"
+  #       scope: "shared"
   
   - type: LLMTool
     module: capstone.agent_v2.tools.llm_tool
