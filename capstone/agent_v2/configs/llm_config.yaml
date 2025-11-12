@@ -59,6 +59,25 @@ providers:
     api_key_env: "OPENAI_API_KEY"
     organization_env: "OPENAI_ORG_ID"
     base_url: null
+  
+  # Azure OpenAI Provider Configuration (Optional)
+  # Enable this section to use Azure OpenAI instead of or alongside OpenAI
+  azure:
+    enabled: false  # Set to true to enable Azure OpenAI
+    
+    # Environment variable names for Azure credentials
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    
+    # Azure API version (e.g., "2024-02-15-preview")
+    api_version: "2024-02-15-preview"
+    
+    # Map model aliases to Azure deployment names
+    # deployment_mapping:
+    #   gpt-4.1: "my-gpt-4-deployment"
+    #   gpt-4.1-mini: "my-gpt-4-mini-deployment"
+    #   gpt-5: "my-gpt-5-deployment"
+    deployment_mapping: {}
 
 logging:
   log_prompts: false
