@@ -281,30 +281,34 @@ class Observation:
     requires_user: bool = False
 
 
-def build_system_prompt(system_prompt: str, mission: str, tools_description: str) -> str:
+def build_system_prompt(system_prompt: str, mission: Optional[str], tools_description: str) -> str:
     """
     Build the system prompt from base, mission, and tools description.
+    
+    Story CONV-HIST-002: Mission is now optional to support mission-agnostic system prompts
+    that remain stable across multiple queries.
 
     Args:
         system_prompt (str): The static base instructions (timeless context).
-        mission (str): The agent's mission or current objective.
+        mission (Optional[str]): The agent's mission or current objective. 
+            Can be None for mission-agnostic prompts (recommended for multi-turn conversations).
         tools_description (str): The description of the tools available.
 
     Returns:
         str: Final system prompt ready for use.
     """
-    prompt = f"""<Base>
-{system_prompt.strip()}
-</Base>
-
-<Mission>
-{mission.strip() if mission else ""}
-</Mission>
-
-<ToolsDescription>
-{tools_description.strip() if tools_description else ""}
-</ToolsDescription>"""
-    return prompt
+    # Start with base prompt
+    prompt_parts = [f"<Base>\n{system_prompt.strip()}\n</Base>"]
+    
+    # Only add mission section if mission is provided (backward compatibility)
+    if mission:
+        prompt_parts.append(f"<Mission>\n{mission.strip()}\n</Mission>")
+    
+    # Add tools description
+    if tools_description:
+        prompt_parts.append(f"<ToolsDescription>\n{tools_description.strip()}\n</ToolsDescription>")
+    
+    return "\n\n".join(prompt_parts)
 
 
 
@@ -337,6 +341,8 @@ class Agent:
         self.name = name
         self.description = description
         self.system_prompt = system_prompt
+        # Store system prompt template for potential rebuilding (Story CONV-HIST-002)
+        self.system_prompt_template = system_prompt
         self.mission = mission
         self.tools = tools
         self.tools_description = self._get_tools_description()
@@ -345,8 +351,11 @@ class Agent:
         self.state_manager = state_manager
         self.llm_service = llm_service
         self.state = None
+        # Initialize with mission-agnostic system prompt (Story CONV-HIST-002)
+        # Mission is stored in self.mission but not embedded in system prompt
+        # User queries will be added as natural conversation messages
         self.message_history = MessageHistory(
-            build_system_prompt(system_prompt, mission, self.tools_description),
+            build_system_prompt(system_prompt, None, self.tools_description),
             llm_service
         )
         self.logger = structlog.get_logger().bind(agent=name)
