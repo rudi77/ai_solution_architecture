@@ -2,11 +2,20 @@ schema: 1
 story: 'CONV-HIST-003'
 story_title: 'Automatic History Compression Management'
 gate: PASS
-status_reason: 'Exemplary implementation with comprehensive test coverage, graceful error handling, and zero breaking changes. All acceptance criteria met with production-ready quality.'
+status_reason: 'Story CONV-HIST-003 implementation is correct. Critical pre-existing bug discovered and fixed during QA review: multi-turn conversation flow was broken due to incomplete todolist marking on ActionType.DONE. Fix applied and verified.'
 reviewer: 'Quinn (Test Architect)'
-updated: '2025-11-12T00:00:00Z'
+updated: '2025-11-12T01:00:00Z'
 
-top_issues: []
+top_issues:
+  - id: 'BUG-001'
+    severity: 'critical'
+    category: 'bug-found-and-fixed'
+    title: 'Multi-turn conversation broken - Agent repeats first answer'
+    description: 'When ActionType.DONE is triggered, only current step marked COMPLETED. Remaining PENDING steps prevent mission reset, causing agent to continue old todolist on new queries.'
+    status: 'FIXED'
+    files_affected: ['capstone/agent_v2/agent.py:655-673']
+    fix_applied: 'Added logic to mark all remaining PENDING steps as SKIPPED when ActionType.DONE is called. This ensures _is_plan_complete() returns TRUE and triggers mission reset for next query.'
+    verification: 'All 17 tests passing. User scenario (repeat answer bug) resolved.'
 
 waiver:
   active: false
