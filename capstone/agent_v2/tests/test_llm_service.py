@@ -102,6 +102,193 @@ model_params: {}
             LLMService(config_path=str(config_file))
 
 
+class TestAzureConfiguration:
+    """Test Azure provider configuration loading and validation."""
+
+    def test_azure_config_disabled_by_default(self, tmp_path):
+        """Test that Azure config with enabled=false doesn't trigger validation."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: false
+"""
+        config_file = tmp_path / "azure_disabled.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Should initialize without errors
+        service = LLMService(config_path=str(config_file))
+        assert service.provider_config.get("azure", {}).get("enabled") is False
+
+    def test_azure_config_missing_section_works(self, tmp_path):
+        """Test that config without Azure section loads successfully."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+"""
+        config_file = tmp_path / "no_azure.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Should initialize without errors (backward compatibility)
+        service = LLMService(config_path=str(config_file))
+        assert "azure" not in service.provider_config or not service.provider_config.get("azure")
+
+    def test_azure_config_enabled_with_valid_fields(self, tmp_path):
+        """Test Azure config with enabled=true and all required fields."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      gpt-4.1: "my-gpt4-deployment"
+      fast: "my-fast-deployment"
+"""
+        config_file = tmp_path / "azure_valid.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Should initialize without errors
+        service = LLMService(config_path=str(config_file))
+        azure_config = service.provider_config["azure"]
+        assert azure_config["enabled"] is True
+        assert azure_config["api_key_env"] == "AZURE_OPENAI_API_KEY"
+        assert azure_config["endpoint_url_env"] == "AZURE_OPENAI_ENDPOINT"
+        assert azure_config["api_version"] == "2024-02-15-preview"
+        assert "gpt-4.1" in azure_config["deployment_mapping"]
+
+    def test_azure_config_enabled_missing_api_key_env(self, tmp_path):
+        """Test Azure config fails when enabled=true but api_key_env missing."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_missing_key.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        with pytest.raises(ValueError, match="missing required fields.*api_key_env"):
+            LLMService(config_path=str(config_file))
+
+    def test_azure_config_enabled_missing_endpoint_url_env(self, tmp_path):
+        """Test Azure config fails when enabled=true but endpoint_url_env missing."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_missing_endpoint.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        with pytest.raises(ValueError, match="missing required fields.*endpoint_url_env"):
+            LLMService(config_path=str(config_file))
+
+    def test_azure_config_enabled_missing_api_version(self, tmp_path):
+        """Test Azure config fails when enabled=true but api_version missing."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_missing_version.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        with pytest.raises(ValueError, match="missing required fields.*api_version"):
+            LLMService(config_path=str(config_file))
+
+    def test_azure_config_enabled_missing_deployment_mapping(self, tmp_path):
+        """Test Azure config fails when enabled=true but deployment_mapping missing."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+"""
+        config_file = tmp_path / "azure_missing_mapping.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        with pytest.raises(ValueError, match="missing required fields.*deployment_mapping"):
+            LLMService(config_path=str(config_file))
+
+    def test_azure_config_enabled_invalid_deployment_mapping_type(self, tmp_path):
+        """Test Azure config fails when deployment_mapping is not a dictionary."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: "not-a-dict"
+"""
+        config_file = tmp_path / "azure_invalid_mapping.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        with pytest.raises(ValueError, match="deployment_mapping must be a dictionary"):
+            LLMService(config_path=str(config_file))
+
+    def test_azure_config_enabled_with_empty_deployment_mapping(self, tmp_path):
+        """Test Azure config accepts empty deployment_mapping dictionary."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_empty_mapping.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Should accept empty dict (user might populate it later)
+        service = LLMService(config_path=str(config_file))
+        assert service.provider_config["azure"]["deployment_mapping"] == {}
+
+
 class TestModelResolution:
     """Test model alias resolution."""
 

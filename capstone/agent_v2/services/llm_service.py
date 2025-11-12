@@ -101,7 +101,50 @@ class LLMService:
 
         # Provider configuration
         self.provider_config = config.get("providers", {})
+        
+        # Validate Azure configuration if enabled
+        self._validate_azure_config()
 
+    def _validate_azure_config(self) -> None:
+        """
+        Validate Azure configuration if enabled.
+        
+        Raises:
+            ValueError: If Azure is enabled but required fields are missing
+        """
+        azure_config = self.provider_config.get("azure", {})
+        
+        # Skip validation if Azure is not enabled or section doesn't exist
+        if not azure_config or not azure_config.get("enabled", False):
+            return
+        
+        # Required fields when Azure is enabled
+        required_fields = ["api_key_env", "endpoint_url_env", "api_version", "deployment_mapping"]
+        missing_fields = []
+        
+        for field in required_fields:
+            if field not in azure_config or azure_config[field] is None:
+                missing_fields.append(field)
+        
+        if missing_fields:
+            raise ValueError(
+                f"Azure provider is enabled but missing required fields: {', '.join(missing_fields)}. "
+                "Please provide all required fields or set enabled: false."
+            )
+        
+        # Validate deployment_mapping is a dictionary
+        if not isinstance(azure_config["deployment_mapping"], dict):
+            raise ValueError(
+                "Azure deployment_mapping must be a dictionary mapping model aliases to deployment names"
+            )
+        
+        self.logger.info(
+            "azure_config_validated",
+            endpoint_env=azure_config["api_key_env"],
+            api_version=azure_config["api_version"],
+            deployment_count=len(azure_config["deployment_mapping"]),
+        )
+    
     def _initialize_provider(self) -> None:
         """Initialize LLM provider with API keys from environment."""
         openai_config = self.provider_config.get("openai", {})
