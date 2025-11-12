@@ -432,6 +432,36 @@ class Agent:
             self.mission = None
             self.state.pop("todolist_id", None)
             
+            # Trigger history compression if message count exceeds threshold (CONV-HIST-003)
+            message_count = len(self.message_history.messages)
+            if message_count > self.message_history.SUMMARY_THRESHOLD:
+                self.logger.info(
+                    "triggering_history_compression",
+                    session_id=session_id,
+                    message_count_before=message_count,
+                    threshold=self.message_history.SUMMARY_THRESHOLD
+                )
+                
+                try:
+                    await self.message_history.compress_history_async()
+                    
+                    new_message_count = len(self.message_history.messages)
+                    self.logger.info(
+                        "history_compression_complete",
+                        session_id=session_id,
+                        message_count_before=message_count,
+                        message_count_after=new_message_count,
+                        messages_reduced=message_count - new_message_count
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        "history_compression_failed",
+                        session_id=session_id,
+                        error=str(e),
+                        message_count=message_count
+                    )
+                    # Continue execution despite compression failure
+            
             # Persist state changes
             try:
                 await self.state_manager.save_state(session_id, self.state)
