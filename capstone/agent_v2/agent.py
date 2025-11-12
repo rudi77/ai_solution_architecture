@@ -657,6 +657,14 @@ class Agent:
                 self.logger.info("early_completion", session_id=session_id,
                                step=current_step.position)
                 current_step.status = TaskStatus.COMPLETED
+                
+                # Mark all remaining pending steps as SKIPPED to allow mission reset on next query
+                for step in todolist.items:
+                    if step.status == TaskStatus.PENDING:
+                        step.status = TaskStatus.SKIPPED
+                        self.logger.info("step_skipped_on_done", session_id=session_id,
+                                       step=step.position,
+                                       reason="early_completion")
 
                 # Emit final answer before breaking
                 final_answer = thought.action.summary if hasattr(thought.action, 'summary') else "Task completed"
