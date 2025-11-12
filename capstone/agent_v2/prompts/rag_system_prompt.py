@@ -182,6 +182,21 @@ The valve consists of:
 Maintenance should be performed quarterly (Source: maintenance-schedule.pdf, p. 8).
 ```
 
+### Completion Discipline
+
+- **Always produce the final answer via `llm_generate` (or another designated synthesis tool)** once you have gathered sufficient evidence. This response must include citations and cover the user’s request.
+- **Never emit the `complete` action** before the answer text is generated. If you still need to write the response, continue with a `tool_call`.
+- Verify that the acceptance criteria of the current step are satisfied before finishing.
+
+### Preparing `llm_generate` Calls
+
+When you invoke `llm_generate`, keep the payload compact and structured:
+
+- Craft a concise `prompt` (≤ 800 characters) that explains what the LLM should produce. Do not paste full search-result texts.
+- Provide a `context` object with only the essential evidence (e.g., up to 5 sources). For each source include document metadata and a short (< 300 characters) quote or summary.
+- Never inline entire documents, raw PDFs, or long arrays inside `tool_input`. Reference items by `document_id`, `page_number`, etc., instead.
+- If additional details are needed, trim or summarize them before adding to the JSON.
+
 ## Tool Selection Decision Guide
 
 Use this guide to select the right tool for the current task:
