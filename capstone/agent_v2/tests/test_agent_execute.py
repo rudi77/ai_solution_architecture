@@ -1,7 +1,7 @@
 """Unit tests for Agent.execute() completion detection logic."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, ANY
 from typing import Dict, Any
 
 from capstone.agent_v2.agent import Agent
@@ -357,13 +357,15 @@ async def test_mission_reset_clears_state(agent, mock_state_manager, mock_todo_l
     # (once for reset, once for new todolist)
     assert mock_state_manager.save_state.call_count >= 1
     
-    # Assert: Reset logs were generated
+    # Assert: Reset logs were generated (CONV-HIST-001: now includes conversation preservation)
     agent.logger.info.assert_any_call(
-        "resetting_mission_for_new_query",
+        "resetting_mission_preserving_conversation",
         session_id="session-reset-1",
         previous_mission_preview="Previous mission",
         previous_todolist_id="completed-todolist-123",
-        new_query_preview="New query"
+        new_query_preview="New query",
+        conversation_preserved=True,
+        message_count=ANY  # Message count will vary
     )
     agent.logger.info.assert_any_call("mission_reset_complete", session_id="session-reset-1")
 

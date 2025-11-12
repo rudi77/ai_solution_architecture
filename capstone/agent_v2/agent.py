@@ -409,14 +409,17 @@ class Agent:
         # 3. Execute mission reset if needed (Story 2: Multi-turn support)
         if should_reset_mission:
             self.logger.info(
-                "resetting_mission_for_new_query",
+                "resetting_mission_preserving_conversation",
                 session_id=session_id,
                 previous_mission_preview=self.mission[:100] if self.mission else None,
                 previous_todolist_id=previous_todolist_id,
-                new_query_preview=user_message[:100]
+                new_query_preview=user_message[:100],
+                conversation_preserved=True,
+                message_count=len(self.message_history.messages)
             )
             
             # Clear mission and todolist reference to allow fresh start
+            # NOTE: Conversation history is preserved across resets (CONV-HIST-001)
             self.mission = None
             self.state.pop("todolist_id", None)
             
@@ -437,7 +440,9 @@ class Agent:
                 data={
                     "mission_reset": True,
                     "reason": "completed_todolist_detected",
-                    "previous_todolist_id": previous_todolist_id
+                    "previous_todolist_id": previous_todolist_id,
+                    "conversation_preserved": True,
+                    "message_count": len(self.message_history.messages)
                 }
             )
             
