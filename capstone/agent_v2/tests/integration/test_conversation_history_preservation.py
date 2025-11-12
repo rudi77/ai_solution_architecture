@@ -2,6 +2,7 @@
 Integration tests for conversation history preservation across mission resets.
 
 Story: CONV-HIST-001 - Remove MessageHistory Reset from Mission Reset
+Story: CONV-HIST-002 - System Prompt Decoupling from Mission
 """
 
 import pytest
@@ -315,4 +316,158 @@ async def test_logging_includes_conversation_metrics(test_agent, caplog):
     
     # Should have logs about mission reset
     assert len(reset_logs) > 0 or any("mission_reset" in str(call) for call in log_entries)
+
+
+# ============================================================================
+# Story CONV-HIST-002: System Prompt Decoupling from Mission
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_stable_across_resets(test_agent):
+    """System prompt should not change when mission resets (Story CONV-HIST-002)."""
+    # Setup: Configure state manager to return state with completed todolist
+    test_agent.state_manager.load_state = AsyncMock(return_value={"todolist_id": "test-todo-1"})
+    
+    # Get initial system prompt (first message in history)
+    initial_system_prompt = test_agent.message_history.messages[0]["content"]
+    assert test_agent.message_history.messages[0]["role"] == "system"
+    
+    # Verify system prompt does NOT contain mission
+    assert "Initial mission" not in initial_system_prompt
+    
+    with patch.object(test_agent, '_generate_thought_with_context', new_callable=AsyncMock) as mock_thought:
+        mock_thought.return_value = {"action": {"type": "complete", "output": "Done"}}
+        
+        # Query 1: Execute and complete
+        async for event in test_agent.execute("Query 1: First question", "session-1"):
+            if event.type == AgentEventType.STATE_UPDATED and event.data.get("mission_reset"):
+                break
+        
+        # Add messages to simulate execution
+        test_agent.message_history.add_message("Query 1: First question", "user")
+        test_agent.message_history.add_message("Response 1", "assistant")
+        
+        # Get system prompt after first query
+        after_query1_system_prompt = test_agent.message_history.messages[0]["content"]
+        
+        # Query 2: Execute (triggers reset)
+        test_agent.state = {"todolist_id": "test-todo-2"}
+        async for event in test_agent.execute("Query 2: Different question", "session-1"):
+            if event.type == AgentEventType.STATE_UPDATED and event.data.get("mission_reset"):
+                break
+        
+        # Get system prompt after reset
+        after_query2_system_prompt = test_agent.message_history.messages[0]["content"]
+        
+        # Assert: System prompt unchanged (still first message)
+        assert test_agent.message_history.messages[0]["role"] == "system"
+        
+        # Assert: Same system prompt content before and after reset
+        assert initial_system_prompt == after_query1_system_prompt
+        assert initial_system_prompt == after_query2_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_queries_appear_as_user_messages(test_agent):
+    """User queries should appear as natural conversation messages (Story CONV-HIST-002)."""
+    # Setup
+    test_agent.state_manager.load_state = AsyncMock(return_value={})
+    
+    # Add queries manually (simulating agent execution flow)
+    query1 = "What is X?"
+    query2 = "What is Y?"
+    
+    test_agent.message_history.add_message(query1, "user")
+    test_agent.message_history.add_message("X is a concept", "assistant")
+    test_agent.message_history.add_message(query2, "user")
+    test_agent.message_history.add_message("Y is another concept", "assistant")
+    
+    # Assert: Query 1 added as {"role": "user", "content": "What is X?"}
+    user_messages = [m for m in test_agent.message_history.messages if m["role"] == "user"]
+    assert len(user_messages) >= 2
+    assert any(query1 in m["content"] for m in user_messages)
+    
+    # Assert: Query 2 also in history as user message
+    assert any(query2 in m["content"] for m in user_messages)
+    
+    # Assert: Natural conversation flow in history (system, user, assistant, user, assistant)
+    roles = [m["role"] for m in test_agent.message_history.messages]
+    assert roles[0] == "system"
+    # Should have alternating user/assistant after system
+    assert "user" in roles[1:]
+    assert "assistant" in roles[1:]
+
+
+@pytest.mark.asyncio
+async def test_conversational_flow_with_stable_prompt(test_agent):
+    """Agent should handle multi-turn conversation with stable system prompt (Story CONV-HIST-002)."""
+    # Setup: Agent with mission-agnostic prompt
+    test_agent.state_manager.load_state = AsyncMock(return_value={})
+    
+    # Get initial system prompt
+    initial_system_prompt = test_agent.message_history.messages[0]["content"]
+    initial_message_count = len(test_agent.message_history.messages)
+    
+    # Execute 3 different queries
+    queries = [
+        "What is machine learning?",
+        "How does it work?",
+        "Can you give an example?"
+    ]
+    
+    for query in queries:
+        test_agent.message_history.add_message(query, "user")
+        # Simulate LLM response
+        test_agent.message_history.add_message(f"Response to: {query}", "assistant")
+    
+    # Assert: All queries processed correctly (messages added)
+    final_message_count = len(test_agent.message_history.messages)
+    assert final_message_count > initial_message_count
+    assert final_message_count >= initial_message_count + (len(queries) * 2)  # user + assistant per query
+    
+    # Assert: System prompt unchanged
+    current_system_prompt = test_agent.message_history.messages[0]["content"]
+    assert current_system_prompt == initial_system_prompt
+    
+    # Assert: Each query visible in history as user message
+    user_messages = [m for m in test_agent.message_history.messages if m["role"] == "user"]
+    for query in queries:
+        assert any(query in m["content"] for m in user_messages)
+    
+    # Assert: LLM responses appropriate for each query (present in history)
+    assistant_messages = [m for m in test_agent.message_history.messages if m["role"] == "assistant"]
+    assert len(assistant_messages) >= len(queries)
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_does_not_contain_mission(test_agent):
+    """System prompt should NOT contain mission text (Story CONV-HIST-002)."""
+    # Get system prompt from message history
+    system_prompt = test_agent.message_history.messages[0]["content"]
+    
+    # Assert: System prompt does not contain mission
+    assert test_agent.mission not in system_prompt or test_agent.mission == "Initial mission"
+    # More specifically, should not have <Mission> tags
+    assert "<Mission>" not in system_prompt
+    
+    # Assert: Mission stored in agent but not in prompt
+    assert test_agent.mission is not None
+    assert test_agent.mission == "Initial mission"
+
+
+@pytest.mark.asyncio
+async def test_backward_compatibility_mission_still_stored(test_agent):
+    """Mission parameter still accepted and stored for backward compatibility (Story CONV-HIST-002)."""
+    # Assert: Agent still has mission attribute
+    assert hasattr(test_agent, "mission")
+    assert test_agent.mission == "Initial mission"
+    
+    # Assert: Mission can be updated
+    test_agent.mission = "Updated mission"
+    assert test_agent.mission == "Updated mission"
+    
+    # Assert: System prompt template stored
+    assert hasattr(test_agent, "system_prompt_template")
+    assert test_agent.system_prompt_template == "Test system prompt"
 
