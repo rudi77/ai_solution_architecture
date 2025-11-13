@@ -53,6 +53,11 @@ retry_policy:
     - "APIConnectionError"
     - "Timeout"
     - "BadRequestError"
+    - "DeploymentNotFound"
+    - "InvalidApiVersion"
+    - "AuthenticationError"
+    - "ResourceNotFound"
+    - "ServiceUnavailableError"
 
 providers:
   openai:
