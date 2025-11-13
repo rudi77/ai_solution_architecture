@@ -3,6 +3,19 @@ LLM Service for centralized LLM interactions.
 
 This module provides a centralized service for all LLM interactions with support
 for model-aware parameter mapping, retry logic, and configuration management.
+
+Supports multiple LLM providers:
+- OpenAI: Direct OpenAI API access (default)
+- Azure OpenAI: Azure-hosted OpenAI models with deployment-based routing
+
+Key features:
+- Model alias resolution with deployment mapping for Azure
+- Automatic parameter mapping between GPT-4 and GPT-5 parameter sets
+- Configurable retry logic with exponential backoff
+- Structured logging with provider-specific context
+- Azure-specific error parsing and troubleshooting guidance
+
+For Azure OpenAI setup instructions, see docs/azure-openai-setup.md
 """
 
 import asyncio
@@ -186,11 +199,43 @@ class LLMService:
         """
         Initialize Azure OpenAI provider with credentials from environment.
         
-        Reads Azure-specific environment variables, validates endpoint URL format,
-        and configures LiteLLM for Azure OpenAI support.
+        This method sets up Azure OpenAI connectivity by reading credentials from
+        environment variables and configuring LiteLLM to route requests through
+        Azure's API endpoints with deployment-based model mapping.
+        
+        Setup Requirements:
+        -------------------
+        1. Azure OpenAI Resource: Create an Azure OpenAI resource in Azure Portal
+        2. Deploy Models: Deploy desired models (e.g., GPT-4) in Azure Portal
+        3. Environment Variables:
+           - AZURE_OPENAI_API_KEY: API key from Azure Portal → Keys and Endpoint
+           - AZURE_OPENAI_ENDPOINT: Full endpoint URL (e.g., https://your-resource.openai.azure.com/)
+        4. Configuration: Enable Azure in llm_config.yaml and map model aliases to deployment names
+        
+        Configuration Format:
+        ---------------------
+        providers:
+          azure:
+            enabled: true
+            api_key_env: "AZURE_OPENAI_API_KEY"
+            endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+            api_version: "2024-02-15-preview"
+            deployment_mapping:
+              main: "my-gpt4-deployment"
+              fast: "my-gpt4-mini-deployment"
+        
+        Validation:
+        -----------
+        - Validates endpoint URL uses HTTPS protocol
+        - Warns if endpoint doesn't contain expected Azure OpenAI domain patterns
+        - Checks for presence of required credentials (non-blocking warnings)
+        - Sets LiteLLM environment variables for Azure OpenAI routing
         
         Raises:
-            ValueError: If endpoint URL format is invalid
+            ValueError: If endpoint URL format is invalid (non-HTTPS)
+        
+        See Also:
+            docs/azure-openai-setup.md for complete setup guide
         """
         azure_config = self.provider_config.get("azure", {})
         
