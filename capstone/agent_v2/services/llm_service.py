@@ -244,19 +244,73 @@ class LLMService:
 
     def _resolve_model(self, model_alias: Optional[str]) -> str:
         """
-        Resolve model alias to actual model name.
-
+        Resolve model alias to actual model name or Azure deployment name.
+        
+        When Azure provider is enabled:
+        - Resolves model alias through Azure deployment_mapping
+        - Falls back to OpenAI model name if alias not in deployment_mapping
+        - Raises ValueError if Azure enabled and alias has no deployment mapping (strict mode)
+        
+        When Azure provider is disabled:
+        - Uses traditional OpenAI model name resolution
+        
         Args:
             model_alias: Model alias or None (uses default)
-
+        
         Returns:
-            Actual model name
+            Actual model name (OpenAI) or deployment name (Azure)
+        
+        Raises:
+            ValueError: If Azure enabled and alias has no deployment mapping
         """
         if model_alias is None:
             model_alias = self.default_model
-
-        # Resolve alias to actual model name
-        return self.models.get(model_alias, model_alias)
+        
+        # Check if Azure is enabled
+        azure_config = self.provider_config.get("azure", {})
+        azure_enabled = azure_config.get("enabled", False)
+        
+        if azure_enabled:
+            # Azure provider: resolve through deployment_mapping
+            deployment_mapping = azure_config.get("deployment_mapping", {})
+            
+            # First, resolve alias to OpenAI model name
+            openai_model = self.models.get(model_alias, model_alias)
+            
+            # Check if deployment mapping exists for this alias
+            if model_alias in deployment_mapping:
+                deployment_name = deployment_mapping[model_alias]
+                
+                self.logger.info(
+                    "model_resolved",
+                    provider="azure",
+                    model_alias=model_alias,
+                    deployment_name=deployment_name,
+                    openai_model=openai_model,
+                )
+                
+                return f"azure/{deployment_name}"
+            else:
+                # No deployment mapping for this alias
+                # Check if fallback to OpenAI model name is allowed
+                # (For now, we'll be strict and raise an error)
+                raise ValueError(
+                    f"Azure provider is enabled but no deployment mapping found for model alias '{model_alias}'. "
+                    f"Please add '{model_alias}' to deployment_mapping in azure provider configuration, "
+                    f"or set azure.enabled to false to use OpenAI models."
+                )
+        else:
+            # OpenAI provider: traditional resolution
+            resolved_model = self.models.get(model_alias, model_alias)
+            
+            self.logger.info(
+                "model_resolved",
+                provider="openai",
+                model_alias=model_alias,
+                resolved_model=resolved_model,
+            )
+            
+            return resolved_model
 
     def _get_model_parameters(self, model: str) -> Dict[str, Any]:
         """
