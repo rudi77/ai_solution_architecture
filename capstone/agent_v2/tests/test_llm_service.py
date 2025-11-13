@@ -1022,6 +1022,224 @@ class TestGenerateMethod:
         assert "topic" in messages[0]["content"]
 
 
+@pytest.mark.asyncio
+class TestAzureCompletionMethod:
+    """Test complete() method with Azure provider."""
+
+    @pytest.fixture
+    def azure_config(self, tmp_path):
+        """Create Azure-enabled config file."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+  fast: "gpt-4.1-mini"
+model_params:
+  gpt-4.1:
+    temperature: 0.7
+    max_tokens: 2000
+default_params:
+  temperature: 0.7
+  max_tokens: 2000
+retry_policy:
+  max_attempts: 3
+  backoff_multiplier: 2
+  timeout: 30
+  retry_on_errors:
+    - "RateLimitError"
+    - "DeploymentNotFound"
+    - "InvalidApiVersion"
+    - "AuthenticationError"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "gpt-4-deployment"
+      fast: "gpt-4-mini-deployment"
+logging:
+  log_token_usage: true
+  log_parameter_mapping: true
+"""
+        config_file = tmp_path / "azure_config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        return str(config_file)
+
+    async def test_azure_completion_success(self, azure_config, monkeypatch):
+        """Test successful Azure completion with proper provider context logging."""
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-azure-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=azure_config)
+        
+        # Mock litellm response
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Azure test response"
+        mock_response.usage = {
+            "total_tokens": 100,
+            "prompt_tokens": 50,
+            "completion_tokens": 50,
+        }
+        
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response) as mock_completion:
+            result = await service.complete(
+                messages=[{"role": "user", "content": "Hello"}],
+                model="main"
+            )
+        
+        # Verify success
+        assert result["success"] is True
+        assert result["content"] == "Azure test response"
+        assert result["usage"]["total_tokens"] == 100
+        
+        # Verify Azure model format was used
+        call_args = mock_completion.call_args
+        assert call_args[1]["model"] == "azure/gpt-4-deployment"
+
+    async def test_azure_completion_logs_deployment_name(self, azure_config, monkeypatch):
+        """Test that Azure completions log deployment name instead of model name."""
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-azure-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=azure_config)
+        
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test"
+        mock_response.usage = {"total_tokens": 10, "prompt_tokens": 5, "completion_tokens": 5}
+        
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
+            with patch.object(service.logger, "info") as mock_logger:
+                await service.complete(
+                    messages=[{"role": "user", "content": "Test"}],
+                    model="main"
+                )
+                
+                # Check that logger was called with provider and deployment info
+                log_calls = [call for call in mock_logger.call_args_list]
+                completion_started_calls = [
+                    call for call in log_calls 
+                    if call[0][0] == "llm_completion_started"
+                ]
+                
+                assert len(completion_started_calls) > 0
+                start_call = completion_started_calls[0]
+                assert start_call[1]["provider"] == "azure"
+                assert start_call[1]["deployment"] == "gpt-4-deployment"
+
+    async def test_azure_completion_retry_on_deployment_not_found(self, azure_config, monkeypatch):
+        """Test retry logic for Azure-specific DeploymentNotFound error."""
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-azure-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=azure_config)
+        
+        call_count = 0
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Success after retry"
+        mock_response.usage = {"total_tokens": 10, "prompt_tokens": 5, "completion_tokens": 5}
+        
+        async def mock_acompletion(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise Exception("DeploymentNotFound: The specified deployment was not found")
+            return mock_response
+        
+        with patch("litellm.acompletion", side_effect=mock_acompletion):
+            result = await service.complete(
+                messages=[{"role": "user", "content": "Test"}],
+                model="main"
+            )
+        
+        assert result["success"] is True
+        assert call_count == 2  # Should have retried once
+
+    async def test_azure_completion_retry_on_invalid_api_version(self, azure_config, monkeypatch):
+        """Test retry logic for Azure-specific InvalidApiVersion error."""
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-azure-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=azure_config)
+        
+        call_count = 0
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Success"
+        mock_response.usage = {"total_tokens": 10, "prompt_tokens": 5, "completion_tokens": 5}
+        
+        async def mock_acompletion(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise Exception("InvalidApiVersion: API version is not supported")
+            return mock_response
+        
+        with patch("litellm.acompletion", side_effect=mock_acompletion):
+            result = await service.complete(
+                messages=[{"role": "user", "content": "Test"}],
+                model="main"
+            )
+        
+        assert result["success"] is True
+        assert call_count == 3  # Should have retried twice
+
+    async def test_azure_completion_error_logging_includes_provider(self, azure_config, monkeypatch):
+        """Test that Azure error logs include provider and deployment information."""
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-azure-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=azure_config)
+        
+        async def mock_acompletion(*args, **kwargs):
+            raise ValueError("Test error - not retryable")
+        
+        with patch("litellm.acompletion", side_effect=mock_acompletion):
+            with patch.object(service.logger, "error") as mock_logger:
+                result = await service.complete(
+                    messages=[{"role": "user", "content": "Test"}],
+                    model="main"
+                )
+                
+                # Verify error was logged with provider context
+                assert mock_logger.called
+                error_call = mock_logger.call_args
+                assert error_call[1]["provider"] == "azure"
+                assert error_call[1]["deployment"] == "gpt-4-deployment"
+        
+        assert result["success"] is False
+
+    async def test_azure_completion_parameter_mapping_works(self, azure_config, monkeypatch):
+        """Test that parameter mapping works identically for Azure models."""
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-azure-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=azure_config)
+        
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test"
+        mock_response.usage = {"total_tokens": 10, "prompt_tokens": 5, "completion_tokens": 5}
+        
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response) as mock_completion:
+            await service.complete(
+                messages=[{"role": "user", "content": "Test"}],
+                model="main",
+                temperature=0.5,
+                max_tokens=1000
+            )
+            
+            # Verify parameters were passed to litellm
+            call_args = mock_completion.call_args
+            assert "temperature" in call_args[1]
+            assert call_args[1]["temperature"] == 0.5
+            assert call_args[1]["max_tokens"] == 1000
+
+
 class TestProviderInitializationPerformance:
     """Test provider initialization performance requirements (IV3)."""
 

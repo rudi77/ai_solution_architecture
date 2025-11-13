@@ -456,6 +456,18 @@ class LLMService:
 
         # Map parameters for model family
         final_params = self._map_parameters_for_model(actual_model, merged_params)
+        
+        # Determine provider and display name for logging
+        azure_config = self.provider_config.get("azure", {})
+        is_azure = azure_config.get("enabled", False)
+        
+        if is_azure and actual_model.startswith("azure/"):
+            provider = "azure"
+            deployment_name = actual_model.replace("azure/", "")
+            display_name = deployment_name
+        else:
+            provider = "openai"
+            display_name = actual_model
 
         # Retry logic
         for attempt in range(self.retry_policy.max_attempts):
@@ -464,7 +476,9 @@ class LLMService:
 
                 self.logger.info(
                     "llm_completion_started",
+                    provider=provider,
                     model=actual_model,
+                    deployment=display_name if is_azure else None,
                     attempt=attempt + 1,
                     message_count=len(messages),
                 )
@@ -496,7 +510,9 @@ class LLMService:
                 if self.logging_config.get("log_token_usage", True):
                     self.logger.info(
                         "llm_completion_success",
+                        provider=provider,
                         model=actual_model,
+                        deployment=display_name if is_azure else None,
                         tokens=token_stats.get("total_tokens", 0),
                         latency_ms=latency_ms,
                     )
@@ -523,7 +539,9 @@ class LLMService:
                     backoff_time = self.retry_policy.backoff_multiplier**attempt
                     self.logger.warning(
                         "llm_completion_retry",
+                        provider=provider,
                         model=actual_model,
+                        deployment=display_name if is_azure else None,
                         error_type=error_type,
                         attempt=attempt + 1,
                         backoff_seconds=backoff_time,
@@ -532,7 +550,9 @@ class LLMService:
                 else:
                     self.logger.error(
                         "llm_completion_failed",
+                        provider=provider,
                         model=actual_model,
+                        deployment=display_name if is_azure else None,
                         error_type=error_type,
                         error=error_msg[:200],
                         attempts=attempt + 1,
