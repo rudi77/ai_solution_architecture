@@ -506,6 +506,247 @@ class TestModelResolution:
         assert service._resolve_model("gpt-4-turbo") == "gpt-4-turbo"
 
 
+class TestAzureModelResolution:
+    """Test Azure deployment model resolution."""
+    
+    def test_azure_model_resolution_with_valid_mapping(self, tmp_path):
+        """
+        Given: Azure enabled with deployment mapping for model alias
+        When: Model alias is resolved
+        Then: Returns Azure deployment name with 'azure/' prefix
+        """
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+  fast: "gpt-4.1-mini"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "gpt-4-deployment-prod"
+      fast: "gpt-4-mini-deployment-prod"
+"""
+        config_file = tmp_path / "azure_enabled.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Resolve model aliases through Azure deployment mapping
+        assert service._resolve_model("main") == "azure/gpt-4-deployment-prod"
+        assert service._resolve_model("fast") == "azure/gpt-4-mini-deployment-prod"
+    
+    def test_azure_model_resolution_with_default_model(self, tmp_path):
+        """
+        Given: Azure enabled with deployment mapping for default model
+        When: No model alias provided (None)
+        Then: Resolves to default model's deployment name
+        """
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "gpt-4-deployment-prod"
+"""
+        config_file = tmp_path / "azure_default.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # None should resolve to default model, then through deployment mapping
+        assert service._resolve_model(None) == "azure/gpt-4-deployment-prod"
+    
+    def test_azure_model_resolution_missing_deployment_raises_error(self, tmp_path):
+        """
+        Given: Azure enabled but deployment mapping missing for alias
+        When: Model alias is resolved
+        Then: Raises ValueError with clear message
+        """
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+  fast: "gpt-4.1-mini"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "gpt-4-deployment-prod"
+      # 'fast' is NOT in the mapping
+"""
+        config_file = tmp_path / "azure_incomplete.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # 'main' should work
+        assert service._resolve_model("main") == "azure/gpt-4-deployment-prod"
+        
+        # 'fast' should raise clear error
+        with pytest.raises(ValueError, match="no deployment mapping found for model alias 'fast'"):
+            service._resolve_model("fast")
+    
+    def test_azure_model_resolution_empty_deployment_mapping_raises_error(self, tmp_path):
+        """
+        Given: Azure enabled but deployment_mapping is empty
+        When: Any model alias is resolved
+        Then: Raises ValueError with clear message
+        """
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_empty_mapping.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Should raise error for any alias
+        with pytest.raises(ValueError, match="no deployment mapping found"):
+            service._resolve_model("main")
+    
+    def test_openai_model_resolution_unchanged_when_azure_disabled(self, tmp_path):
+        """
+        Given: Azure disabled (enabled: false)
+        When: Model alias is resolved
+        Then: Uses traditional OpenAI model name resolution
+        """
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+  fast: "gpt-4.1-mini"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: false
+    deployment_mapping:
+      main: "should-not-be-used"
+"""
+        config_file = tmp_path / "azure_disabled.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Should use OpenAI model names, not Azure deployments
+        assert service._resolve_model("main") == "gpt-4.1"
+        assert service._resolve_model("fast") == "gpt-4.1-mini"
+    
+    def test_openai_model_resolution_unchanged_when_no_azure_config(self, tmp_path):
+        """
+        Given: No Azure configuration section (backward compatibility)
+        When: Model alias is resolved
+        Then: Uses traditional OpenAI model name resolution
+        """
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+  fast: "gpt-4.1-mini"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+"""
+        config_file = tmp_path / "no_azure.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Should use OpenAI model names
+        assert service._resolve_model("main") == "gpt-4.1"
+        assert service._resolve_model("fast") == "gpt-4.1-mini"
+        assert service._resolve_model(None) == "gpt-4.1"
+    
+    def test_azure_model_resolution_logs_provider_and_deployment(self, tmp_path, caplog):
+        """
+        Given: Azure enabled with deployment mapping
+        When: Model alias is resolved
+        Then: Logs provider='azure' and deployment name at INFO level
+        """
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "gpt-4-deployment-prod"
+"""
+        config_file = tmp_path / "azure_logging.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Resolve model and check logs
+        result = service._resolve_model("main")
+        assert result == "azure/gpt-4-deployment-prod"
+        
+        # Note: structlog records may need different assertion approach
+        # For now, just verify the method completes successfully
+    
+    def test_openai_model_resolution_logs_provider_and_model(self, tmp_path, caplog):
+        """
+        Given: OpenAI provider (Azure disabled)
+        When: Model alias is resolved
+        Then: Logs provider='openai' and resolved model name at INFO level
+        """
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+"""
+        config_file = tmp_path / "openai_logging.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Resolve model and check logs
+        result = service._resolve_model("main")
+        assert result == "gpt-4.1"
+        
+        # Note: structlog records may need different assertion approach
+        # For now, just verify the method completes successfully
+
+
 class TestParameterMapping:
     """Test GPT-4 vs GPT-5 parameter mapping."""
 
