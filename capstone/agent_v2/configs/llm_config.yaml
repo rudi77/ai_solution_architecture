@@ -60,29 +60,107 @@ retry_policy:
     - "ServiceUnavailableError"
 
 providers:
+  # OpenAI Provider (Default)
+  # Direct access to OpenAI API - requires OPENAI_API_KEY environment variable
   openai:
     api_key_env: "OPENAI_API_KEY"
     organization_env: "OPENAI_ORG_ID"
     base_url: null
   
-  # Azure OpenAI Provider Configuration (Optional)
-  # Enable this section to use Azure OpenAI instead of or alongside OpenAI
+  # ============================================================================
+  # Azure OpenAI Provider Configuration
+  # ============================================================================
+  # Enable this section to use Azure-hosted OpenAI models
+  # 
+  # SETUP STEPS:
+  # 1. Create Azure OpenAI resource in Azure Portal
+  # 2. Deploy models (e.g., GPT-4, GPT-4.1) with deployment names
+  # 3. Copy endpoint URL and API key from Azure Portal → Keys and Endpoint
+  # 4. Set environment variables (see below)
+  # 5. Enable Azure provider and map model aliases to deployment names
+  #
+  # See docs/azure-openai-setup.md for detailed setup guide
+  # ============================================================================
+  
   azure:
-    enabled: false  # Set to true to enable Azure OpenAI
+    # Set to true to enable Azure OpenAI (disables OpenAI provider)
+    enabled: false
     
-    # Environment variable names for Azure credentials
+    # -------------------------------------------------------------------------
+    # Required Environment Variables
+    # -------------------------------------------------------------------------
+    # These variables must be set in your environment when Azure is enabled
+    #
+    # PowerShell:
+    #   $env:AZURE_OPENAI_API_KEY = "your-api-key-here"
+    #   $env:AZURE_OPENAI_ENDPOINT = "https://your-resource.openai.azure.com/"
+    #
+    # Linux/Mac:
+    #   export AZURE_OPENAI_API_KEY="your-api-key-here"
+    #   export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
+    # -------------------------------------------------------------------------
+    
     api_key_env: "AZURE_OPENAI_API_KEY"
     endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
     
-    # Azure API version (e.g., "2024-02-15-preview")
+    # -------------------------------------------------------------------------
+    # Azure API Version
+    # -------------------------------------------------------------------------
+    # Azure OpenAI uses versioned APIs. Common versions:
+    # - "2024-02-15-preview" (recommended, supports GPT-4 and GPT-5)
+    # - "2023-12-01-preview"
+    # - "2023-05-15"
+    #
+    # Check Azure OpenAI documentation for latest supported versions
+    # https://learn.microsoft.com/en-us/azure/ai-services/openai/reference
+    # -------------------------------------------------------------------------
+    
     api_version: "2024-02-15-preview"
     
-    # Map model aliases to Azure deployment names
+    # -------------------------------------------------------------------------
+    # Deployment Mapping
+    # -------------------------------------------------------------------------
+    # Map model aliases (from 'models' section above) to Azure deployment names
+    #
+    # IMPORTANT: Deployment names must exactly match what you created in Azure Portal
+    #
+    # Example - All models via Azure:
     # deployment_mapping:
-    #   gpt-4.1: "my-gpt-4-deployment"
-    #   gpt-4.1-mini: "my-gpt-4-mini-deployment"
-    #   gpt-5: "my-gpt-5-deployment"
+    #   main: "my-gpt41-deployment"        # Maps 'main' alias → GPT-4.1 deployment
+    #   fast: "my-gpt41-mini-deployment"   # Maps 'fast' alias → GPT-4.1-mini deployment
+    #   powerful: "my-gpt5-deployment"     # Maps 'powerful' alias → GPT-5 deployment
+    #   legacy: "my-gpt4-turbo-deployment" # Maps 'legacy' alias → GPT-4-turbo deployment
+    #
+    # Example - Hybrid configuration (some via Azure, others require OpenAI):
+    # deployment_mapping:
+    #   main: "my-gpt41-deployment"        # GPT-4.1 via Azure
+    #   fast: "my-gpt41-mini-deployment"   # GPT-4.1-mini via Azure
+    #   # 'powerful' and 'legacy' would require azure.enabled: false or separate config
+    #
+    # NOTE: When Azure is enabled, ALL model aliases must have deployment mappings
+    #       or requests will fail with "no deployment mapping found" error
+    # -------------------------------------------------------------------------
+    
     deployment_mapping: {}
+    
+    # -------------------------------------------------------------------------
+    # Hybrid Configuration Strategy
+    # -------------------------------------------------------------------------
+    # Azure provider operates in exclusive mode - when enabled, ALL LLM calls
+    # route through Azure. For true hybrid (some OpenAI, some Azure), use one of:
+    #
+    # Option 1: Multiple LLMService instances
+    #   - Create two config files (llm_config_openai.yaml, llm_config_azure.yaml)
+    #   - Instantiate separate LLMService instances for each provider
+    #
+    # Option 2: Environment-based switching
+    #   - Use different config files per environment (dev, staging, prod)
+    #   - Set azure.enabled based on deployment environment
+    #
+    # Option 3: Model-based routing (requires code changes)
+    #   - Deploy commonly-used models to Azure (cost savings)
+    #   - Keep specialized models on OpenAI
+    # -------------------------------------------------------------------------
 
 logging:
   log_prompts: false
