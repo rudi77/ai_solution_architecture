@@ -157,6 +157,15 @@ class LLMService:
                 api_version=azure_config.get("api_version"),
             )
         else:
+            # Log Azure status (disabled)
+            if azure_config:
+                self.logger.info(
+                    "azure_provider_status",
+                    provider="azure",
+                    enabled=False,
+                    reason="Azure provider is disabled in configuration",
+                )
+            
             # Default to OpenAI
             openai_config = self.provider_config.get("openai", {})
 
@@ -235,11 +244,19 @@ class LLMService:
         if self.azure_api_version:
             os.environ["AZURE_API_VERSION"] = self.azure_api_version
         
+        # Get deployment count for status logging
+        deployment_count = len(azure_config.get("deployment_mapping", {}))
+        configured_deployments = list(azure_config.get("deployment_mapping", {}).keys())
+        
         self.logger.info(
             "azure_provider_initialized",
+            provider="azure",
+            enabled=True,
             endpoint=self.azure_endpoint,
             api_version=self.azure_api_version,
             api_key_set=bool(self.azure_api_key),
+            deployment_count=deployment_count,
+            configured_deployments=configured_deployments,
         )
 
     def _resolve_model(self, model_alias: Optional[str]) -> str:
@@ -311,6 +328,243 @@ class LLMService:
             )
             
             return resolved_model
+
+    def _parse_azure_error(self, error: Exception) -> Dict[str, Any]:
+        """
+        Parse Azure API error and extract actionable information.
+        
+        Common Azure error scenarios and troubleshooting:
+        
+        1. DeploymentNotFound / ResourceNotFound:
+           - Cause: Deployment name doesn't exist or is misspelled in Azure
+           - Fix: Verify deployment name in Azure Portal matches deployment_mapping config
+           - Check: Azure Portal → OpenAI Resource → Model deployments
+        
+        2. InvalidApiVersion / UnsupportedApiVersion:
+           - Cause: API version not supported by Azure endpoint
+           - Fix: Update api_version in config to supported version (e.g., "2024-02-15-preview")
+           - Check: Azure OpenAI API documentation for supported versions
+        
+        3. AuthenticationError / InvalidApiKey:
+           - Cause: API key is invalid, expired, or missing
+           - Fix: Regenerate API key in Azure Portal and update environment variable
+           - Check: Environment variable AZURE_OPENAI_API_KEY is set correctly
+        
+        4. InvalidEndpoint / EndpointNotFound:
+           - Cause: Endpoint URL is incorrect or resource doesn't exist
+           - Fix: Verify endpoint URL matches Azure resource endpoint
+           - Check: Azure Portal → OpenAI Resource → Keys and Endpoint
+        
+        5. RateLimitError / TooManyRequests:
+           - Cause: Exceeded rate limit or quota for deployment
+           - Fix: Wait and retry, or increase deployment capacity in Azure
+           - Check: Azure Portal → OpenAI Resource → Quotas
+        
+        Args:
+            error: Exception raised by LiteLLM/Azure API
+        
+        Returns:
+            Dict with extracted error information and troubleshooting guidance
+        """
+        import re
+        
+        error_msg = str(error)
+        error_type = type(error).__name__
+        
+        parsed_info = {
+            "error_type": error_type,
+            "error_message": error_msg,
+            "provider": "azure" if "azure" in error_msg.lower() else "unknown",
+        }
+        
+        # Extract deployment name if present
+        if "deployment" in error_msg.lower():
+            # Try to extract deployment name from error message
+            deployment_match = re.search(r"deployment[:\s]+['\"]?([a-zA-Z0-9\-_]+)['\"]?", error_msg, re.IGNORECASE)
+            if deployment_match:
+                parsed_info["deployment_name"] = deployment_match.group(1)
+                parsed_info["hint"] = (
+                    f"Deployment '{deployment_match.group(1)}' not found. "
+                    "Check Azure Portal → OpenAI Resource → Model deployments"
+                )
+        
+        # Extract API version if present
+        if "api" in error_msg.lower() and "version" in error_msg.lower():
+            api_version_match = re.search(r"version\s+['\"]([0-9]{4}-[0-9]{2}-[0-9]{2}[a-z\-]*)['\"]", error_msg, re.IGNORECASE)
+            if api_version_match:
+                parsed_info["api_version"] = api_version_match.group(1)
+                parsed_info["hint"] = (
+                    f"API version '{api_version_match.group(1)}' may not be supported. "
+                    "Try '2024-02-15-preview' or check Azure OpenAI documentation"
+                )
+        
+        # Extract endpoint if present
+        if "endpoint" in error_msg.lower() or "https://" in error_msg:
+            endpoint_match = re.search(r"https://[a-zA-Z0-9\-\.]+", error_msg)
+            if endpoint_match:
+                parsed_info["endpoint_url"] = endpoint_match.group(0)
+                parsed_info["hint"] = (
+                    f"Check endpoint URL '{endpoint_match.group(0)}' in Azure Portal → "
+                    "OpenAI Resource → Keys and Endpoint"
+                )
+        
+        # Authentication errors
+        if any(keyword in error_msg.lower() for keyword in ["auth", "authentication", "api key", "unauthorized"]):
+            azure_config = self.provider_config.get("azure", {})
+            api_key_env = azure_config.get("api_key_env", "AZURE_OPENAI_API_KEY")
+            parsed_info["hint"] = (
+                f"Authentication failed. Check that environment variable '{api_key_env}' "
+                "is set with a valid Azure OpenAI API key"
+            )
+        
+        # Rate limit errors
+        if any(keyword in error_msg.lower() for keyword in ["rate limit", "quota", "too many requests"]):
+            parsed_info["hint"] = (
+                "Rate limit exceeded. Wait and retry, or increase deployment capacity "
+                "in Azure Portal → OpenAI Resource → Quotas"
+            )
+        
+        return parsed_info
+
+    async def test_azure_connection(self) -> Dict[str, Any]:
+        """
+        Test Azure OpenAI connection and validate configuration.
+        
+        This diagnostic method validates:
+        - Azure endpoint accessibility
+        - API key authentication
+        - Deployment availability
+        - API version compatibility
+        
+        Returns:
+            Dict with test results:
+            - success: bool - overall test result
+            - endpoint_reachable: bool - endpoint is accessible
+            - authentication_valid: bool - API key is valid
+            - deployments_available: List[str] - available deployments tested
+            - errors: List[str] - any errors encountered
+            - recommendations: List[str] - troubleshooting guidance
+        
+        Example:
+            >>> result = await llm_service.test_azure_connection()
+            >>> if not result["success"]:
+            ...     print("Issues:", result["errors"])
+            ...     print("Try:", result["recommendations"])
+        """
+        azure_config = self.provider_config.get("azure", {})
+        
+        # Check if Azure is enabled
+        if not azure_config.get("enabled", False):
+            return {
+                "success": False,
+                "error": "Azure provider is not enabled in configuration",
+                "recommendations": ["Set azure.enabled: true in llm_config.yaml"],
+            }
+        
+        result = {
+            "success": True,
+            "endpoint_reachable": False,
+            "authentication_valid": False,
+            "deployments_tested": [],
+            "deployments_available": [],
+            "errors": [],
+            "recommendations": [],
+        }
+        
+        # Check credentials
+        if not self.azure_api_key:
+            result["success"] = False
+            result["errors"].append(f"Azure API key not found in environment variable '{azure_config.get('api_key_env')}'")
+            result["recommendations"].append(f"Set environment variable {azure_config.get('api_key_env')} with your Azure OpenAI API key")
+        
+        if not self.azure_endpoint:
+            result["success"] = False
+            result["errors"].append(f"Azure endpoint not found in environment variable '{azure_config.get('endpoint_url_env')}'")
+            result["recommendations"].append(f"Set environment variable {azure_config.get('endpoint_url_env')} with your Azure OpenAI endpoint URL")
+        
+        # If credentials missing, return early
+        if not self.azure_api_key or not self.azure_endpoint:
+            return result
+        
+        # Test each configured deployment
+        deployment_mapping = azure_config.get("deployment_mapping", {})
+        
+        if not deployment_mapping:
+            result["success"] = False
+            result["errors"].append("No deployments configured in deployment_mapping")
+            result["recommendations"].append("Add at least one deployment mapping in azure.deployment_mapping config")
+            return result
+        
+        # Test a simple completion with each deployment
+        test_message = [{"role": "user", "content": "Hello"}]
+        
+        for alias, deployment_name in deployment_mapping.items():
+            result["deployments_tested"].append(alias)
+            
+            try:
+                self.logger.info(
+                    "testing_azure_deployment",
+                    alias=alias,
+                    deployment=deployment_name,
+                )
+                
+                # Attempt a minimal completion
+                test_result = await self.complete(
+                    messages=test_message,
+                    model=alias,
+                    max_tokens=5,
+                )
+                
+                if test_result.get("success"):
+                    result["deployments_available"].append(alias)
+                    result["endpoint_reachable"] = True
+                    result["authentication_valid"] = True
+                    
+                    self.logger.info(
+                        "azure_deployment_test_success",
+                        alias=alias,
+                        deployment=deployment_name,
+                    )
+                else:
+                    error_msg = test_result.get("error", "Unknown error")
+                    result["errors"].append(f"Deployment '{alias}' ({deployment_name}): {error_msg}")
+                    
+                    # Parse error for guidance
+                    parsed = self._parse_azure_error(Exception(error_msg))
+                    if "hint" in parsed:
+                        result["recommendations"].append(f"{alias}: {parsed['hint']}")
+                    
+                    self.logger.warning(
+                        "azure_deployment_test_failed",
+                        alias=alias,
+                        deployment=deployment_name,
+                        error=error_msg[:200],
+                    )
+            
+            except Exception as e:
+                result["errors"].append(f"Deployment '{alias}' ({deployment_name}): {str(e)}")
+                
+                # Parse error for guidance
+                parsed = self._parse_azure_error(e)
+                if "hint" in parsed:
+                    result["recommendations"].append(f"{alias}: {parsed['hint']}")
+                
+                self.logger.error(
+                    "azure_deployment_test_exception",
+                    alias=alias,
+                    deployment=deployment_name,
+                    error=str(e)[:200],
+                )
+        
+        # Set overall success based on whether any deployments worked
+        if not result["deployments_available"]:
+            result["success"] = False
+            if not result["recommendations"]:
+                result["recommendations"].append(
+                    "Check Azure Portal → OpenAI Resource → Model deployments to verify deployment names"
+                )
+        
+        return result
 
     def _get_model_parameters(self, model: str) -> Dict[str, Any]:
         """
@@ -529,6 +783,11 @@ class LLMService:
                 error_type = type(e).__name__
                 error_msg = str(e)
 
+                # Parse Azure errors for actionable information
+                parsed_error = None
+                if is_azure:
+                    parsed_error = self._parse_azure_error(e)
+
                 # Check if should retry (check both error type and message)
                 should_retry = attempt < self.retry_policy.max_attempts - 1 and any(
                     err_type in error_type or err_type in error_msg
@@ -537,33 +796,57 @@ class LLMService:
 
                 if should_retry:
                     backoff_time = self.retry_policy.backoff_multiplier**attempt
-                    self.logger.warning(
-                        "llm_completion_retry",
-                        provider=provider,
-                        model=actual_model,
-                        deployment=display_name if is_azure else None,
-                        error_type=error_type,
-                        attempt=attempt + 1,
-                        backoff_seconds=backoff_time,
-                    )
+                    
+                    log_context = {
+                        "provider": provider,
+                        "model": actual_model,
+                        "deployment": display_name if is_azure else None,
+                        "error_type": error_type,
+                        "attempt": attempt + 1,
+                        "backoff_seconds": backoff_time,
+                    }
+                    
+                    # Add Azure-specific context if available
+                    if parsed_error and "hint" in parsed_error:
+                        log_context["hint"] = parsed_error["hint"]
+                    
+                    self.logger.warning("llm_completion_retry", **log_context)
                     await asyncio.sleep(backoff_time)
                 else:
-                    self.logger.error(
-                        "llm_completion_failed",
-                        provider=provider,
-                        model=actual_model,
-                        deployment=display_name if is_azure else None,
-                        error_type=error_type,
-                        error=error_msg[:200],
-                        attempts=attempt + 1,
-                    )
+                    log_context = {
+                        "provider": provider,
+                        "model": actual_model,
+                        "deployment": display_name if is_azure else None,
+                        "error_type": error_type,
+                        "error": error_msg[:200],
+                        "attempts": attempt + 1,
+                    }
+                    
+                    # Add Azure-specific context for troubleshooting
+                    if parsed_error:
+                        if "deployment_name" in parsed_error:
+                            log_context["azure_deployment"] = parsed_error["deployment_name"]
+                        if "api_version" in parsed_error:
+                            log_context["azure_api_version"] = parsed_error["api_version"]
+                        if "endpoint_url" in parsed_error:
+                            log_context["azure_endpoint"] = parsed_error["endpoint_url"]
+                        if "hint" in parsed_error:
+                            log_context["troubleshooting_hint"] = parsed_error["hint"]
+                    
+                    self.logger.error("llm_completion_failed", **log_context)
 
-                    return {
+                    error_result = {
                         "success": False,
                         "error": error_msg,
                         "error_type": error_type,
                         "model": actual_model,
                     }
+                    
+                    # Include parsed error details for Azure
+                    if parsed_error:
+                        error_result["parsed_error"] = parsed_error
+                    
+                    return error_result
 
         # Should not reach here, but handle anyway
         return {
