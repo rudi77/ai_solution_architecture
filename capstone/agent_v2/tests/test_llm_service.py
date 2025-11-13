@@ -12,6 +12,7 @@ Tests cover:
 
 import os
 import pytest
+import structlog
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1296,6 +1297,479 @@ providers:
         
         assert service is not None
         assert elapsed_ms < 100, f"Initialization took {elapsed_ms:.2f}ms, expected < 100ms"
+
+
+class TestAzureErrorParsing:
+    """Test Azure error parsing functionality (Story 1.5 - AC2)."""
+
+    def test_parse_deployment_not_found_error(self, tmp_path):
+        """Test parsing DeploymentNotFound error extracts deployment name."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "gpt-4-deployment"
+"""
+        config_file = tmp_path / "azure_config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        error = Exception("DeploymentNotFound: deployment 'wrong-deployment' was not found")
+        parsed = service._parse_azure_error(error)
+        
+        assert parsed["error_type"] == "Exception"
+        assert "deployment_name" in parsed
+        assert parsed["deployment_name"] == "wrong-deployment"
+        assert "hint" in parsed
+        assert "Azure Portal" in parsed["hint"]
+
+    def test_parse_invalid_api_version_error(self, tmp_path):
+        """Test parsing InvalidApiVersion error extracts version."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        error = Exception("InvalidApiVersion: API version '2023-01-01' is not supported")
+        parsed = service._parse_azure_error(error)
+        
+        assert "api_version" in parsed
+        assert parsed["api_version"] == "2023-01-01"
+        assert "hint" in parsed
+        assert "2024-02-15-preview" in parsed["hint"]
+
+    def test_parse_authentication_error(self, tmp_path):
+        """Test parsing authentication error provides API key guidance."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        error = Exception("AuthenticationError: Invalid API key provided")
+        parsed = service._parse_azure_error(error)
+        
+        assert "hint" in parsed
+        assert "AZURE_OPENAI_API_KEY" in parsed["hint"]
+        assert "Authentication failed" in parsed["hint"]
+
+    def test_parse_endpoint_error(self, tmp_path):
+        """Test parsing endpoint error extracts URL."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        error = Exception("Endpoint https://wrong-resource.openai.azure.com not found")
+        parsed = service._parse_azure_error(error)
+        
+        assert "endpoint_url" in parsed
+        assert parsed["endpoint_url"] == "https://wrong-resource.openai.azure.com"
+        assert "hint" in parsed
+
+    def test_parse_rate_limit_error(self, tmp_path):
+        """Test parsing rate limit error provides quota guidance."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_config.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        error = Exception("RateLimitError: Too many requests, quota exceeded")
+        parsed = service._parse_azure_error(error)
+        
+        assert "hint" in parsed
+        assert "Rate limit" in parsed["hint"]
+        assert "Quotas" in parsed["hint"]
+
+
+@pytest.mark.asyncio
+class TestAzureConnectionDiagnostic:
+    """Test Azure connection diagnostic method (Story 1.5 - AC5)."""
+
+    async def test_azure_connection_test_when_disabled(self, tmp_path):
+        """Test connection test returns error when Azure is disabled."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: false
+"""
+        config_file = tmp_path / "azure_disabled.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        service = LLMService(config_path=str(config_file))
+        result = await service.test_azure_connection()
+        
+        assert result["success"] is False
+        assert "not enabled" in result["error"]
+        assert len(result["recommendations"]) > 0
+
+    async def test_azure_connection_test_missing_credentials(self, tmp_path, monkeypatch):
+        """Test connection test detects missing credentials."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "test-deployment"
+"""
+        config_file = tmp_path / "azure_enabled.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Don't set environment variables
+        monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+        
+        service = LLMService(config_path=str(config_file))
+        result = await service.test_azure_connection()
+        
+        assert result["success"] is False
+        assert len(result["errors"]) > 0
+        assert any("API key" in error for error in result["errors"])
+        assert any("endpoint" in error for error in result["errors"])
+        assert len(result["recommendations"]) > 0
+
+    async def test_azure_connection_test_no_deployments(self, tmp_path, monkeypatch):
+        """Test connection test detects missing deployment configuration."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_no_deploy.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=str(config_file))
+        result = await service.test_azure_connection()
+        
+        assert result["success"] is False
+        assert any("No deployments" in error for error in result["errors"])
+        assert any("deployment_mapping" in rec for rec in result["recommendations"])
+
+    async def test_azure_connection_test_successful(self, tmp_path, monkeypatch):
+        """Test successful Azure connection test."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "test-deployment"
+"""
+        config_file = tmp_path / "azure_test.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Mock successful completion
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test"
+        mock_response.usage = {"total_tokens": 5, "prompt_tokens": 3, "completion_tokens": 2}
+        
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
+            result = await service.test_azure_connection()
+        
+        assert result["success"] is True
+        assert result["endpoint_reachable"] is True
+        assert result["authentication_valid"] is True
+        assert "main" in result["deployments_tested"]
+        assert "main" in result["deployments_available"]
+        assert len(result["errors"]) == 0
+
+    async def test_azure_connection_test_deployment_failure(self, tmp_path, monkeypatch):
+        """Test connection test handles deployment failures with guidance."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "wrong-deployment"
+"""
+        config_file = tmp_path / "azure_fail.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Mock deployment failure
+        async def mock_acompletion(*args, **kwargs):
+            raise Exception("DeploymentNotFound: deployment 'wrong-deployment' not found")
+        
+        with patch("litellm.acompletion", side_effect=mock_acompletion):
+            result = await service.test_azure_connection()
+        
+        assert result["success"] is False
+        assert "main" in result["deployments_tested"]
+        assert "main" not in result["deployments_available"]
+        assert len(result["errors"]) > 0
+        assert len(result["recommendations"]) > 0
+        # Should have troubleshooting guidance
+        assert any("deployment" in rec.lower() for rec in result["recommendations"])
+
+
+@pytest.mark.asyncio
+class TestEnhancedErrorLogging:
+    """Test enhanced error logging with Azure-specific context (Story 1.5 - AC2)."""
+
+    async def test_azure_error_includes_parsed_context(self, tmp_path, monkeypatch):
+        """Test that Azure errors include parsed troubleshooting context."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+retry_policy:
+  max_attempts: 1
+  retry_on_errors: []
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "test-deployment"
+logging:
+  log_token_usage: true
+"""
+        config_file = tmp_path / "azure_error_test.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Mock Azure deployment error
+        async def mock_acompletion(*args, **kwargs):
+            raise Exception("DeploymentNotFound: deployment 'test-deployment' not found")
+        
+        with patch("litellm.acompletion", side_effect=mock_acompletion):
+            result = await service.complete(
+                messages=[{"role": "user", "content": "Test"}],
+                model="main"
+            )
+        
+        assert result["success"] is False
+        assert "parsed_error" in result
+        assert result["parsed_error"]["error_type"] == "Exception"
+        assert "deployment_name" in result["parsed_error"]
+
+    async def test_azure_retry_includes_hint(self, tmp_path, monkeypatch):
+        """Test that Azure retry logs include troubleshooting hints."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+retry_policy:
+  max_attempts: 2
+  backoff_multiplier: 1
+  retry_on_errors:
+    - "DeploymentNotFound"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "test-deployment"
+logging:
+  log_token_usage: true
+"""
+        config_file = tmp_path / "azure_retry.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        call_count = 0
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Success"
+        mock_response.usage = {"total_tokens": 5, "prompt_tokens": 3, "completion_tokens": 2}
+        
+        async def mock_acompletion(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise Exception("DeploymentNotFound: deployment 'test-deployment' not found")
+            return mock_response
+        
+        with patch("litellm.acompletion", side_effect=mock_acompletion):
+            with patch.object(service.logger, "warning") as mock_logger:
+                result = await service.complete(
+                    messages=[{"role": "user", "content": "Test"}],
+                    model="main"
+                )
+                
+                # Verify warning was logged with hint
+                assert mock_logger.called
+                warning_call = mock_logger.call_args
+                # Check that hint was included in log context
+                assert "hint" in warning_call[1]
+        
+        assert result["success"] is True
+        assert call_count == 2
+
+
+class TestAzureProviderStatusLogging:
+    """Test Azure provider status logging at initialization (Story 1.5 - AC3)."""
+
+    def test_azure_enabled_logs_status_and_deployments(self, tmp_path, monkeypatch, caplog):
+        """Test Azure initialization logs enabled status with deployment info."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+  fast: "gpt-4.1-mini"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      main: "gpt4-prod"
+      fast: "gpt4-mini-prod"
+"""
+        config_file = tmp_path / "azure_status.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://test.openai.azure.com")
+        
+        # Create service - should log initialization status
+        service = LLMService(config_path=str(config_file))
+        
+        # Verify the Azure provider was initialized with correct attributes
+        assert hasattr(service, "azure_api_key")
+        assert service.azure_api_key == "test-key"
+        assert service.azure_endpoint == "https://test.openai.azure.com"
+        assert service.azure_api_version == "2024-02-15-preview"
+        
+        # Verify deployment mapping was loaded
+        azure_config = service.provider_config.get("azure", {})
+        assert azure_config.get("enabled") is True
+        assert len(azure_config.get("deployment_mapping", {})) == 2
+        assert "main" in azure_config.get("deployment_mapping", {})
+        assert "fast" in azure_config.get("deployment_mapping", {})
+
+    def test_azure_disabled_logs_status(self, tmp_path):
+        """Test Azure disabled status is logged."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: false
+"""
+        config_file = tmp_path / "azure_disabled_log.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Create service - Azure should be disabled
+        service = LLMService(config_path=str(config_file))
+        
+        # Verify Azure is disabled
+        azure_config = service.provider_config.get("azure", {})
+        assert azure_config.get("enabled") is False
+        
+        # Verify Azure attributes are not set when disabled
+        assert not hasattr(service, "azure_api_key") or service.azure_api_key is None
 
 
 @pytest.mark.integration
