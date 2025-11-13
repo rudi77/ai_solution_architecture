@@ -147,18 +147,100 @@ class LLMService:
     
     def _initialize_provider(self) -> None:
         """Initialize LLM provider with API keys from environment."""
-        openai_config = self.provider_config.get("openai", {})
-
-        # Load API key from environment
-        api_key_env = openai_config.get("api_key_env", "OPENAI_API_KEY")
-        api_key = os.getenv(api_key_env)
-
-        if not api_key:
-            self.logger.warning(
-                "openai_api_key_missing",
-                env_var=api_key_env,
-                hint="Set environment variable for API access",
+        # Check if Azure is enabled
+        azure_config = self.provider_config.get("azure", {})
+        if azure_config.get("enabled", False):
+            self._initialize_azure_provider()
+            self.logger.info(
+                "provider_selected",
+                provider="azure",
+                api_version=azure_config.get("api_version"),
             )
+        else:
+            # Default to OpenAI
+            openai_config = self.provider_config.get("openai", {})
+
+            # Load API key from environment
+            api_key_env = openai_config.get("api_key_env", "OPENAI_API_KEY")
+            api_key = os.getenv(api_key_env)
+
+            if not api_key:
+                self.logger.warning(
+                    "openai_api_key_missing",
+                    env_var=api_key_env,
+                    hint="Set environment variable for API access",
+                )
+            
+            self.logger.info("provider_selected", provider="openai")
+
+    def _initialize_azure_provider(self) -> None:
+        """
+        Initialize Azure OpenAI provider with credentials from environment.
+        
+        Reads Azure-specific environment variables, validates endpoint URL format,
+        and configures LiteLLM for Azure OpenAI support.
+        
+        Raises:
+            ValueError: If endpoint URL format is invalid
+        """
+        azure_config = self.provider_config.get("azure", {})
+        
+        # Get environment variable names from config
+        api_key_env = azure_config.get("api_key_env", "AZURE_OPENAI_API_KEY")
+        endpoint_env = azure_config.get("endpoint_url_env", "AZURE_OPENAI_ENDPOINT")
+        
+        # Read from environment
+        self.azure_api_key = os.getenv(api_key_env)
+        self.azure_endpoint = os.getenv(endpoint_env)
+        self.azure_api_version = azure_config.get("api_version")
+        
+        # Warn if credentials are missing
+        if not self.azure_api_key:
+            self.logger.warning(
+                "azure_api_key_missing",
+                env_var=api_key_env,
+                hint="Set environment variable for Azure OpenAI API access",
+            )
+        
+        if not self.azure_endpoint:
+            self.logger.warning(
+                "azure_endpoint_missing",
+                env_var=endpoint_env,
+                hint="Set environment variable for Azure OpenAI endpoint URL",
+            )
+        
+        # Validate endpoint URL format if provided
+        if self.azure_endpoint:
+            # Azure endpoint should be HTTPS and contain 'openai.azure.com'
+            if not self.azure_endpoint.startswith("https://"):
+                raise ValueError(
+                    f"Azure endpoint must use HTTPS protocol: {self.azure_endpoint}"
+                )
+            
+            if "openai.azure.com" not in self.azure_endpoint and "api.cognitive.microsoft.com" not in self.azure_endpoint:
+                self.logger.warning(
+                    "azure_endpoint_format_unusual",
+                    endpoint=self.azure_endpoint,
+                    hint="Expected endpoint to contain 'openai.azure.com' or 'api.cognitive.microsoft.com'",
+                )
+        
+        # Set LiteLLM environment variables for Azure OpenAI
+        # LiteLLM uses these for Azure OpenAI requests
+        if self.azure_api_key:
+            os.environ["AZURE_API_KEY"] = self.azure_api_key
+        
+        if self.azure_endpoint:
+            os.environ["AZURE_API_BASE"] = self.azure_endpoint
+        
+        if self.azure_api_version:
+            os.environ["AZURE_API_VERSION"] = self.azure_api_version
+        
+        self.logger.info(
+            "azure_provider_initialized",
+            endpoint=self.azure_endpoint,
+            api_version=self.azure_api_version,
+            api_key_set=bool(self.azure_api_key),
+        )
 
     def _resolve_model(self, model_alias: Optional[str]) -> str:
         """

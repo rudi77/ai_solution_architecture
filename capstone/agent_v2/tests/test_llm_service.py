@@ -10,6 +10,7 @@ Tests cover:
 - Error handling
 """
 
+import os
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -287,6 +288,201 @@ providers:
         # Should accept empty dict (user might populate it later)
         service = LLMService(config_path=str(config_file))
         assert service.provider_config["azure"]["deployment_mapping"] == {}
+
+
+class TestAzureProviderInitialization:
+    """Test Azure provider initialization with environment variables."""
+
+    def test_azure_provider_initialization_with_valid_env_vars(self, tmp_path, monkeypatch):
+        """Test Azure provider initialization with all required environment variables."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      gpt-4.1: "my-deployment"
+"""
+        config_file = tmp_path / "azure_env.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Set environment variables
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key-12345")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://my-resource.openai.azure.com")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Verify instance variables are set
+        assert service.azure_api_key == "test-key-12345"
+        assert service.azure_endpoint == "https://my-resource.openai.azure.com"
+        assert service.azure_api_version == "2024-02-15-preview"
+        
+        # Verify LiteLLM environment variables are set
+        assert os.getenv("AZURE_API_KEY") == "test-key-12345"
+        assert os.getenv("AZURE_API_BASE") == "https://my-resource.openai.azure.com"
+        assert os.getenv("AZURE_API_VERSION") == "2024-02-15-preview"
+
+    def test_azure_provider_warns_missing_api_key(self, tmp_path, monkeypatch, caplog):
+        """Test warning is logged when Azure API key is missing."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_missing_key.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Only set endpoint, not API key
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://my-resource.openai.azure.com")
+        monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Verify warning was logged
+        assert service.azure_api_key is None
+
+    def test_azure_provider_warns_missing_endpoint(self, tmp_path, monkeypatch, caplog):
+        """Test warning is logged when Azure endpoint is missing."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_missing_endpoint.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Only set API key, not endpoint
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key-12345")
+        monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Verify warning was logged
+        assert service.azure_endpoint is None
+
+    def test_azure_provider_validates_https_protocol(self, tmp_path, monkeypatch):
+        """Test Azure provider rejects non-HTTPS endpoints."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_http.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Set HTTP endpoint (should fail)
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "http://my-resource.openai.azure.com")
+        
+        with pytest.raises(ValueError, match="must use HTTPS protocol"):
+            LLMService(config_path=str(config_file))
+
+    def test_azure_provider_accepts_valid_azure_endpoints(self, tmp_path, monkeypatch):
+        """Test Azure provider accepts valid Azure endpoint formats."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_valid.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        valid_endpoints = [
+            "https://my-resource.openai.azure.com",
+            "https://my-resource.api.cognitive.microsoft.com",
+        ]
+        
+        for endpoint in valid_endpoints:
+            monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+            monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", endpoint)
+            
+            service = LLMService(config_path=str(config_file))
+            assert service.azure_endpoint == endpoint
+
+    def test_azure_provider_warns_unusual_endpoint_format(self, tmp_path, monkeypatch, caplog):
+        """Test warning for unusual but valid endpoint formats."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "azure_unusual.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        # Set unusual but HTTPS endpoint
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://custom-domain.example.com")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Should initialize but log warning
+        assert service.azure_endpoint == "https://custom-domain.example.com"
+
+    def test_openai_provider_selected_when_azure_disabled(self, tmp_path, monkeypatch):
+        """Test OpenAI provider is used when Azure is disabled."""
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+  azure:
+    enabled: false
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping: {}
+"""
+        config_file = tmp_path / "openai_only.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+        
+        service = LLMService(config_path=str(config_file))
+        
+        # Azure attributes should not exist
+        assert not hasattr(service, "azure_api_key") or service.azure_api_key is None
 
 
 class TestModelResolution:
@@ -583,6 +779,64 @@ class TestGenerateMethod:
         call_args = mock_completion.call_args
         messages = call_args[1]["messages"]
         assert "topic" in messages[0]["content"]
+
+
+class TestProviderInitializationPerformance:
+    """Test provider initialization performance requirements (IV3)."""
+
+    def test_openai_provider_initialization_performance(self, tmp_path, monkeypatch):
+        """Test OpenAI provider initialization completes under 100ms."""
+        import time
+        
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  openai:
+    api_key_env: "OPENAI_API_KEY"
+"""
+        config_file = tmp_path / "perf_openai.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        
+        start_time = time.perf_counter()
+        service = LLMService(config_path=str(config_file))
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        
+        assert service is not None
+        assert elapsed_ms < 100, f"Initialization took {elapsed_ms:.2f}ms, expected < 100ms"
+
+    def test_azure_provider_initialization_performance(self, tmp_path, monkeypatch):
+        """Test Azure provider initialization completes under 100ms."""
+        import time
+        
+        config_content = """
+default_model: "main"
+models:
+  main: "gpt-4.1"
+providers:
+  azure:
+    enabled: true
+    api_key_env: "AZURE_OPENAI_API_KEY"
+    endpoint_url_env: "AZURE_OPENAI_ENDPOINT"
+    api_version: "2024-02-15-preview"
+    deployment_mapping:
+      gpt-4.1: "my-deployment"
+"""
+        config_file = tmp_path / "perf_azure.yaml"
+        config_file.write_text(config_content, encoding="utf-8")
+        
+        monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://my-resource.openai.azure.com")
+        
+        start_time = time.perf_counter()
+        service = LLMService(config_path=str(config_file))
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        
+        assert service is not None
+        assert elapsed_ms < 100, f"Initialization took {elapsed_ms:.2f}ms, expected < 100ms"
 
 
 @pytest.mark.integration
