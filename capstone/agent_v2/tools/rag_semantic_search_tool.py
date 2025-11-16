@@ -325,6 +325,7 @@ class SemanticSearchTool(Tool):
 
         self.logger.error(
             "search_failed",
+            index_name=self.azure_base.content_index,
             error_type=error_type,
             error=error_message,
             query=query[:100],
