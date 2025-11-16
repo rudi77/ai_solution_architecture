@@ -42,8 +42,9 @@ class GetDocumentTool(Tool):
             "document title (filename). Returns complete document "
             "information including title, type, chunk count, page count, "
             "content types (text/images), and access control metadata. "
-            "Use this after listing documents to get detailed information "
-            "about a specific document."
+            "Optionally include full chunk content for document "
+            "summarization. Use this after listing documents to get "
+            "detailed information about a specific document."
         )
 
     @property
@@ -63,6 +64,16 @@ class GetDocumentTool(Tool):
                         "(e.g., '30603b8a-9f41-47f4-9fe0-f329104faed5_"
                         "eGECKO-Personalzeitmanagement.pdf')"
                     )
+                },
+                "include_chunk_content": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, includes full chunk content (text, "
+                        "images, metadata) for all chunks. Useful for "
+                        "document summarization. Default: false (returns "
+                        "only chunk IDs)"
+                    ),
+                    "default": False
                 },
                 "user_context": {
                     "type": "object",
@@ -91,6 +102,7 @@ class GetDocumentTool(Tool):
     async def execute(
         self,
         document_id: str,
+        include_chunk_content: bool = False,
         user_context: Optional[Dict[str, Any]] = None,
         **kwargs
     ) -> Dict[str, Any]:
@@ -100,6 +112,8 @@ class GetDocumentTool(Tool):
         Args:
             document_id: The document title/filename
                         (also accepts document_id for compatibility)
+            include_chunk_content: If True, returns full chunk content.
+                                  If False (default), returns only chunk IDs
             user_context: Optional user context override for security
                          filtering
             **kwargs: Additional arguments (ignored)
@@ -119,7 +133,9 @@ class GetDocumentTool(Tool):
                     "page_count": 7,
                     "has_images": True,
                     "has_text": True,
-                    "chunks": ["content_id_1", "content_id_2", ...]
+                    "chunks": ["content_id_1", "content_id_2", ...] or
+                             [{"content_id": "...", "content_text": "...",
+                               "content_path": "...", ...}, ...]
                 }
             }
 
@@ -132,12 +148,21 @@ class GetDocumentTool(Tool):
             ... )
             >>> print(result["document"]["chunk_count"])
             15
+            >>>
+            >>> # With full content for summarization
+            >>> result = await tool.execute(
+            ...     document_id="example.pdf",
+            ...     include_chunk_content=True
+            ... )
+            >>> print(result["document"]["chunks"][0]["content_text"])
+            "Full text content..."
         """
         start_time = time.time()
 
         self.logger.info(
             "get_document_started",
-            document_id=document_id
+            document_id=document_id,
+            include_chunk_content=include_chunk_content
         )
 
         try:
@@ -192,35 +217,36 @@ class GetDocumentTool(Tool):
 
                 # Aggregate chunk data
                 chunks = []
+                chunk_ids = []
                 document_metadata = None
                 max_page = 0
                 has_text = False
                 has_images = False
-                chunk_ids = []
 
                 async for chunk in search_results:
-                    chunks.append(chunk)
-                    chunk_ids.append(chunk.get("content_id"))
+                    chunk_data = dict(chunk)
+                    chunks.append(chunk_data)
+                    chunk_ids.append(chunk_data.get("content_id"))
 
                     # Capture document metadata from first chunk
                     if document_metadata is None:
                         document_metadata = {
-                            "document_id": chunk.get("document_id"),
-                            "document_title": chunk.get("document_title"),
-                            "document_type": chunk.get("document_type"),
-                            "org_id": chunk.get("org_id"),
-                            "user_id": chunk.get("user_id"),
-                            "scope": chunk.get("scope")
+                            "document_id": chunk_data.get("document_id"),
+                            "document_title": chunk_data.get("document_title"),
+                            "document_type": chunk_data.get("document_type"),
+                            "org_id": chunk_data.get("org_id"),
+                            "user_id": chunk_data.get("user_id"),
+                            "scope": chunk_data.get("scope")
                         }
 
                     # Check content types
-                    if chunk.get("content_text"):
+                    if chunk_data.get("content_text"):
                         has_text = True
-                    if chunk.get("content_path"):
+                    if chunk_data.get("content_path"):
                         has_images = True
 
                     # Extract max page number from locationMetadata
-                    location_metadata = chunk.get("locationMetadata")
+                    location_metadata = chunk_data.get("locationMetadata")
                     if (location_metadata and
                             isinstance(location_metadata, dict)):
                         page_num = location_metadata.get("pageNumber")
@@ -248,7 +274,7 @@ class GetDocumentTool(Tool):
                     "page_count": max_page if max_page > 0 else None,
                     "has_images": has_images,
                     "has_text": has_text,
-                    "chunks": chunk_ids
+                    "chunks": chunks if include_chunk_content else chunk_ids
                 }
 
             # Calculate latency
@@ -260,6 +286,7 @@ class GetDocumentTool(Tool):
                 index_name=self.azure_base.content_index,
                 document_id=document_id,
                 chunk_count=len(chunks),
+                include_chunk_content=include_chunk_content,
                 search_latency_ms=latency_ms
             )
 
@@ -342,6 +369,7 @@ class GetDocumentTool(Tool):
         self.logger.error(
             "get_document_failed",
             azure_operation="get_document",
+            index_name=self.azure_base.content_index,
             error_type=error_type,
             error=error_message,
             document_id=document_id,

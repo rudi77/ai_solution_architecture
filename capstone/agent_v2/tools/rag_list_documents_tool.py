@@ -383,6 +383,7 @@ class ListDocumentsTool(Tool):
         self.logger.error(
             "list_documents_failed",
             azure_operation="list_documents",
+            index_name=self.azure_base.content_index,
             error_type=error_type,
             error=error_message,
             search_latency_ms=latency_ms,
