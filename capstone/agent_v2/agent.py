@@ -72,7 +72,7 @@ You are a ReAct-style execution agent.
 # Das n sollte einstellbar sein!
 class MessageHistory:
     MAX_MESSAGES = 50
-    SUMMARY_THRESHOLD = 40
+    SUMMARY_THRESHOLD = 20  # Reduced from 40 to compress more aggressively
     
     def __init__(self, system_prompt: str, llm_service: LLMService):
         """
@@ -762,6 +762,29 @@ class Agent:
                 final_answer = thought.action.summary if hasattr(thought.action, 'summary') else "Task completed"
                 yield AgentEvent(type=AgentEventType.COMPLETE,
                                 data={"message": final_answer, "summary": final_answer})
+                
+                # Compress history after task completion to avoid context pollution
+                message_count = len(self.message_history.messages)
+                if message_count > self.message_history.SUMMARY_THRESHOLD:
+                    self.logger.info(
+                        "compressing_history_after_task_completion",
+                        session_id=session_id,
+                        message_count=message_count
+                    )
+                    try:
+                        await self.message_history.compress_history_async()
+                        self.logger.info(
+                            "history_compressed_after_task",
+                            session_id=session_id,
+                            new_message_count=len(self.message_history.messages)
+                        )
+                    except Exception as e:
+                        self.logger.error(
+                            "history_compression_failed_after_task",
+                            session_id=session_id,
+                            error=str(e)
+                        )
+                
                 break
             
             # 4. State + Plan persistieren
@@ -782,7 +805,28 @@ class Agent:
                                     step=current_step.position)
                     # Optional: ask_user für manuelle Intervention
         
-        # Fertig
+        # Fertig - compress history after completing all tasks
+        message_count = len(self.message_history.messages)
+        if message_count > self.message_history.SUMMARY_THRESHOLD:
+            self.logger.info(
+                "compressing_history_after_all_tasks",
+                session_id=session_id,
+                message_count=message_count
+            )
+            try:
+                await self.message_history.compress_history_async()
+                self.logger.info(
+                    "history_compressed_after_all_tasks",
+                    session_id=session_id,
+                    new_message_count=len(self.message_history.messages)
+                )
+            except Exception as e:
+                self.logger.error(
+                    "history_compression_failed_after_all_tasks",
+                    session_id=session_id,
+                    error=str(e)
+                )
+        
         yield AgentEvent(type=AgentEventType.COMPLETE, 
                         data={"todolist": todolist.to_markdown()})
 
@@ -885,8 +929,8 @@ class Agent:
             "confidence": "float (0-1, optional)"
         }
 
-        # Get the last 4 message pairs from history
-        messages = self.message_history.get_last_n_messages(4)
+        # Get the last 2 message pairs from history (reduced from 4 to avoid context pollution)
+        messages = self.message_history.get_last_n_messages(2)
 
         # Build error context if this is a retry
         error_context = ""
