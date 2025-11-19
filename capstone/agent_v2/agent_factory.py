@@ -217,7 +217,11 @@ def create_rag_agent(
         SemanticSearchTool(user_context=user_context),
         ListDocumentsTool(user_context=user_context),
         GetDocumentTool(user_context=user_context),
-        LLMTool(llm_service=llm_service, model_alias="main")
+        LLMTool(llm_service=llm_service, model_alias="main"),
+        PythonTool(),
+        FileReadTool(),
+        FileWriteTool(),
+        PowerShellTool(),
     ]
     
     # Set default work directory
