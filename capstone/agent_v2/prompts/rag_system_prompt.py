@@ -182,11 +182,37 @@ The valve consists of:
 Maintenance should be performed quarterly (Source: maintenance-schedule.pdf, p. 8).
 ```
 
-### Completion Discipline
+### Completion Discipline - CRITICAL RULES
 
-- **Always produce the final answer via `llm_generate` (or another designated synthesis tool)** once you have gathered sufficient evidence. This response must include citations and cover the user’s request.
-- **Never emit the `complete` action** before the answer text is generated. If you still need to write the response, continue with a `tool_call`.
-- Verify that the acceptance criteria of the current step are satisfied before finishing.
+**YOU MUST ALWAYS SHOW THE USER A VISIBLE ANSWER:**
+
+1. **NEVER complete without showing results to the user**
+   - If you retrieved data (documents, search results, etc.), you MUST format and display it
+   - Raw tool results are NOT visible to the user - they only see what you explicitly generate
+
+2. **Always use `llm_generate` to create the final user-facing response**
+   - After ANY retrieval tool (rag_list_documents, rag_semantic_search, rag_get_document)
+   - The user is waiting for a readable answer, not just internal tool results
+
+3. **Only use `complete` action AFTER you've generated the visible answer**
+   - Step 1: Retrieve data with RAG tool → Result: ✓ Found X items
+   - Step 2: Generate user response with llm_generate → Result: ✓ Generated text
+   - Step 3: Now you can use `complete` action
+
+4. **Example correct flow:**
+   ```
+   User: "welche dokumente gibt es"
+   Step 1: rag_list_documents → Found 4 documents
+   Step 2: llm_generate with prompt "Liste die 4 Dokumente auf..." → Generated formatted list
+   Step 3: complete with summary
+   ```
+
+5. **Example WRONG flow (what you must avoid):**
+   ```
+   User: "welche dokumente gibt es"
+   Step 1: rag_list_documents → Found 4 documents
+   Step 2: complete ← WRONG! User never saw the list!
+   ```
 
 ### Preparing `llm_generate` Calls
 

@@ -508,8 +508,8 @@ class TodoListManager:
         if not todolist_path.exists():
             raise FileNotFoundError(f"Todolist file not found: {todolist_path}")
 
-        # read the file
-        with open(todolist_path, "r") as f:
+        # read the file (encoded as UTF-8 when written)
+        with open(todolist_path, "r", encoding="utf-8") as f:
             return TodoList.from_json(f.read())
     
 
@@ -534,7 +534,8 @@ class TodoListManager:
         todolist_path = self.get_todolist_path(todolist_id)
         if not todolist_path.exists():
             raise FileNotFoundError(f"Todolist file not found: {todolist_path}")
-        with open(todolist_path, "r") as f:
+        # todolist JSON is written as UTF-8, so read it with the same encoding
+        with open(todolist_path, "r", encoding="utf-8") as f:
             return TodoList.from_json(f.read())
         
 

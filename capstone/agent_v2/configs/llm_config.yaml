@@ -84,7 +84,7 @@ providers:
   
   azure:
     # Set to true to enable Azure OpenAI (disables OpenAI provider)
-    enabled: false
+    enabled: true
     
     # -------------------------------------------------------------------------
     # Required Environment Variables
@@ -124,24 +124,14 @@ providers:
     #
     # IMPORTANT: Deployment names must exactly match what you created in Azure Portal
     #
-    # Example - All models via Azure:
-    # deployment_mapping:
-    #   main: "my-gpt41-deployment"        # Maps 'main' alias → GPT-4.1 deployment
-    #   fast: "my-gpt41-mini-deployment"   # Maps 'fast' alias → GPT-4.1-mini deployment
-    #   powerful: "my-gpt5-deployment"     # Maps 'powerful' alias → GPT-5 deployment
-    #   legacy: "my-gpt4-turbo-deployment" # Maps 'legacy' alias → GPT-4-turbo deployment
-    #
-    # Example - Hybrid configuration (some via Azure, others require OpenAI):
-    # deployment_mapping:
-    #   main: "my-gpt41-deployment"        # GPT-4.1 via Azure
-    #   fast: "my-gpt41-mini-deployment"   # GPT-4.1-mini via Azure
-    #   # 'powerful' and 'legacy' would require azure.enabled: false or separate config
-    #
-    # NOTE: When Azure is enabled, ALL model aliases must have deployment mappings
-    #       or requests will fail with "no deployment mapping found" error
+    # Current configuration maps to your Azure deployments:
+    #   - main alias → gpt-4.1 deployment
+    #   - fast alias → gpt-4.1-mini deployment
     # -------------------------------------------------------------------------
     
-    deployment_mapping: {}
+    deployment_mapping:
+      main: "gpt-4.1"
+      fast: "gpt-4.1-mini"
     
     # -------------------------------------------------------------------------
     # Hybrid Configuration Strategy

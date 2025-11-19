@@ -240,29 +240,68 @@ class Thought:
     @staticmethod
     def from_json(json_str: str) -> "Thought":
         """
-        Creates a Thought object from a JSON string.
+        Creates a Thought object from a JSON string with robust error handling.
         """
+        import re
+        
         # Accept both JSON string and already-parsed dict
         if isinstance(json_str, (str, bytes, bytearray)):
+            # Convert bytes to string if needed
+            if isinstance(json_str, (bytes, bytearray)):
+                json_str = json_str.decode('utf-8', errors='replace')
+            
             try:
                 data = json.loads(json_str)
             except json.JSONDecodeError as e:
-                # Try to extract JSON from markdown code blocks if present
-                import re
+                # Strategy 1: Try to extract JSON from markdown code blocks
                 json_match = re.search(r'```json\s*\n(.*?)\n```', 
                                       json_str, re.DOTALL)
                 if json_match:
-                    data = json.loads(json_match.group(1))
+                    try:
+                        data = json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        pass  # Fall through to next strategy
                 else:
-                    # Re-raise original error with more context
-                    raise ValueError(
-                        f"Invalid JSON in Thought: {e}. "
-                        f"Content preview: {json_str[:200]}..."
-                    ) from e
+                    # Strategy 2: Try to fix truncated JSON by finding last complete object
+                    try:
+                        # Find the last valid closing brace
+                        last_brace = json_str.rfind('}')
+                        if last_brace > 0:
+                            truncated = json_str[:last_brace + 1]
+                            data = json.loads(truncated)
+                        else:
+                            raise e
+                    except (json.JSONDecodeError, ValueError):
+                        # Strategy 3: Try to extract just the action object if present
+                        action_match = re.search(
+                            r'"action"\s*:\s*\{[^}]*"type"\s*:\s*"([^"]+)"',
+                            json_str
+                        )
+                        if action_match:
+                            # Build minimal valid thought with extracted action type
+                            action_type = action_match.group(1)
+                            data = {
+                                "step_ref": 0,
+                                "rationale": "JSON parsing recovered from truncated response",
+                                "action": {
+                                    "type": action_type,
+                                    "tool": None,
+                                    "tool_input": {}
+                                },
+                                "expected_outcome": "Recovered from parsing error",
+                                "confidence": 0.5
+                            }
+                        else:
+                            # All strategies failed - raise with context
+                            raise ValueError(
+                                f"Invalid JSON in Thought: {e}. "
+                                f"Content preview: {json_str[:500]}..."
+                            ) from e
         elif isinstance(json_str, dict):
             data = json_str
         else:
             raise TypeError("Thought.from_json expects str|bytes|bytearray|dict")
+        
         return Thought(
             step_ref=data.get("step_ref") or data.get("next_step_ref"),
             rationale=data["rationale"],
@@ -901,6 +940,8 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
             "- If the plan needs adjustment, use replan action.\n"
             "- ALWAYS populate `expected_outcome` with a concise sentence describing what you expect after executing the action.\n"
             "- When you choose the `complete` action, you must already have produced the final answer (e.g., via `llm_generate`) and include a clear summary in `action.summary`.\n"
+            "- **IMPORTANT**: Keep all text fields CONCISE (max 200 chars each) to ensure valid JSON.\n"
+            "- For tool_input fields with long text (prompts, code), keep them under 1000 characters.\n"
             "Return STRICT JSON only (no extra text) matching this schema:\n"
             f"{json.dumps(schema_hint, ensure_ascii=False, indent=2)}\n\n"
         )})

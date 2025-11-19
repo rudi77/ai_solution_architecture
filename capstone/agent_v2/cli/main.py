@@ -88,6 +88,14 @@ def initialize_cli():
     # Load settings
     settings = CLISettings()
 
+    # Optional: forward Azure OpenAI config from CLI settings to standard env vars
+    # This lets users set AGENT_AZURE_OPENAI_API_KEY / AGENT_AZURE_OPENAI_ENDPOINT
+    # and have them used by LLMService, which expects AZURE_OPENAI_*.
+    if getattr(settings, "azure_openai_api_key", None):
+        os.environ.setdefault("AZURE_OPENAI_API_KEY", settings.azure_openai_api_key)  # type: ignore[attr-defined]
+    if getattr(settings, "azure_openai_endpoint", None):
+        os.environ.setdefault("AZURE_OPENAI_ENDPOINT", settings.azure_openai_endpoint)  # type: ignore[attr-defined]
+
     # Initialize plugin manager
     plugin_manager = PluginManager()
     plugin_manager.discover_plugins()
