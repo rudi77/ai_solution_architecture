@@ -2,9 +2,8 @@
 Configuration management for the CLI.
 """
 
-import os
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -15,45 +14,100 @@ class CLISettings(BaseSettings):
     """CLI configuration settings with environment variable support."""
 
     # Default provider
-    default_provider: str = Field(default="openai", description="Default LLM provider")
+    default_provider: str = Field(
+        default="openai",
+        description="Default LLM provider",
+    )
 
     # Output preferences
-    default_output_format: str = Field(default="table", description="Default output format")
-    auto_confirm: bool = Field(default=False, description="Auto-confirm operations")
-    show_progress: bool = Field(default=True, description="Show progress bars")
-    color_output: bool = Field(default=True, description="Enable colored output")
+    default_output_format: str = Field(
+        default="table",
+        description="Default output format",
+    )
+    auto_confirm: bool = Field(
+        default=False,
+        description="Auto-confirm operations",
+    )
+    show_progress: bool = Field(
+        default=True,
+        description="Show progress bars",
+    )
+    color_output: bool = Field(
+        default=True,
+        description="Enable colored output",
+    )
 
     # Tool settings
     tool_discovery_paths: List[str] = Field(
         default_factory=lambda: ["./tools", "~/.agent/tools"],
-        description="Paths to search for tools"
+        description="Paths to search for tools",
     )
-    auto_install_tools: bool = Field(default=False, description="Auto-install missing tools")
+    auto_install_tools: bool = Field(
+        default=False,
+        description="Auto-install missing tools",
+    )
 
     # Mission settings
     mission_template_paths: List[str] = Field(
         default_factory=lambda: ["./missions", "~/.agent/missions"],
-        description="Paths to search for mission templates"
+        description="Paths to search for mission templates",
     )
 
     # Session settings
-    session_cleanup_days: int = Field(default=30, description="Days to keep session data")
-    session_storage_path: str = Field(default="~/.agent/sessions", description="Session storage path")
+    session_cleanup_days: int = Field(
+        default=30,
+        description="Days to keep session data",
+    )
+    session_storage_path: str = Field(
+        default="~/.agent/sessions",
+        description="Session storage path",
+    )
 
     # Debug settings
-    debug_mode: bool = Field(default=False, description="Enable debug mode")
-    log_level: str = Field(default="INFO", description="Logging level")
-    log_file: Optional[str] = Field(default=None, description="Log file path")
+    debug_mode: bool = Field(
+        default=False,
+        description="Enable debug mode",
+    )
+    log_level: str = Field(
+        default="INFO",
+        description="Logging level",
+    )
+    log_file: Optional[str] = Field(
+        default=None,
+        description="Log file path",
+    )
 
     # Azure Search RAG settings
-    azure_search_endpoint: Optional[str] = Field(default=None, description="Azure Search endpoint URL")
-    azure_search_api_key: Optional[str] = Field(default=None, description="Azure Search API key")
-    azure_search_content_index: Optional[str] = Field(default=None, description="Azure Search content index name")
+    azure_search_endpoint: Optional[str] = Field(
+        default=None,
+        description="Azure Search endpoint URL",
+    )
+    azure_search_api_key: Optional[str] = Field(
+        default=None,
+        description="Azure Search API key",
+    )
+    azure_search_content_index: Optional[str] = Field(
+        default=None,
+        description="Azure Search content index name",
+    )
+
+    # Azure OpenAI passthrough (optional)
+    # These allow configuring Azure OpenAI via AGENT_*-prefixed env vars,
+    # which will be forwarded to the standard AZURE_OPENAI_* env vars.
+    azure_openai_api_key: Optional[str] = Field(
+        default=None,
+        description="Azure OpenAI API key (forwarded to AZURE_OPENAI_API_KEY)",
+    )
+    azure_openai_endpoint: Optional[str] = Field(
+        default=None,
+        description="Azure OpenAI endpoint URL "
+        "(forwarded to AZURE_OPENAI_ENDPOINT)",
+    )
 
     model_config = {
         "env_file": ".env",
         "env_prefix": "AGENT_",
-        "case_sensitive": False
+        "case_sensitive": False,
     }
 
     @classmethod

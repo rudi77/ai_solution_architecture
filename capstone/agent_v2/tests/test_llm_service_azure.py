@@ -803,3 +803,4 @@ async def test_azure_with_real_config():
     if azure_config.get("enabled"):
         assert service.azure_api_version is not None
 
+
