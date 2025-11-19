@@ -48,7 +48,18 @@ tools:
 
   - type: PythonTool
     module: capstone.agent_v2.tools.code_tool
-    params: {}      
+    params: {}
+  - type: FileReadTool
+    module: capstone.agent_v2.tools.file_tool
+    params: {}
+  
+  - type: FileWriteTool
+    module: capstone.agent_v2.tools.file_tool
+    params: {}
+  
+  - type: PowerShellTool
+    module: capstone.agent_v2.tools.shell_tool
+    params: {}        
 
 # Optional LLM configuration
 # Allows overriding the default LLM config file and model
