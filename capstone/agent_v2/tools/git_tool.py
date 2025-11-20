@@ -12,7 +12,7 @@ import urllib
 import urllib.request
 import urllib.error
 
-from capstone.agent_v2.tool import Tool
+from capstone.agent_v2.tool import Tool, ApprovalRiskLevel
 import structlog
 
 
@@ -27,6 +27,22 @@ class GitTool(Tool):
     def description(self) -> str:
         return "Execute git operations (init, add, commit, push, status, clone, etc.)"
     
+    @property
+    def requires_approval(self) -> bool:
+        return True
+
+    @property
+    def approval_risk_level(self) -> ApprovalRiskLevel:
+        return ApprovalRiskLevel.HIGH
+
+    def get_approval_preview(self, **kwargs) -> str:
+        operation = kwargs.get("operation")
+        if operation == "push":
+            remote = kwargs.get("remote", "origin")
+            branch = kwargs.get("branch", "main")
+            return f"⚠️ GIT PUSH OPERATION\nTool: {self.name}\nOperation: push\nRemote: {remote}\nBranch: {branch}"
+        return super().get_approval_preview(**kwargs)
+
     @property
     def parameters_schema(self) -> Dict[str, Any]:
         return {
