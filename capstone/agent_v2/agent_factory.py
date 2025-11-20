@@ -106,7 +106,8 @@ def create_standard_agent(
     mission: Optional[str] = None,
     work_dir: str = "./agent_work",
     llm_config_path: Optional[str] = None,
-    llm_service: Optional[LLMService] = None
+    llm_service: Optional[LLMService] = None,
+    approval_policy: "ApprovalPolicy" = None
 ) -> Agent:
     """
     Create a general-purpose agent with standard tools.
@@ -130,6 +131,7 @@ def create_standard_agent(
         work_dir: The work directory for the agent (default: ./agent_work).
         llm_config_path: Path to LLM config (default: configs/llm_config.yaml)
         llm_service: LLMService instance (default: creates default service).
+        approval_policy: Policy for handling approval requests (default: PROMPT).
     
     Returns:
         Agent instance configured with standard tools.
@@ -141,6 +143,8 @@ def create_standard_agent(
         ...     mission="Find information about Python async patterns"
         ... )
     """
+    from capstone.agent_v2.agent import ApprovalPolicy
+    
     # Create LLMService if not provided
     if llm_service is None:
         llm_service = create_llm_service(config_path=llm_config_path)
@@ -158,6 +162,10 @@ def create_standard_agent(
         LLMTool(llm_service=llm_service, model_alias="main"),
     ]
     
+    # Default approval policy
+    if approval_policy is None:
+        approval_policy = ApprovalPolicy.PROMPT
+    
     return Agent.create_agent(
         name=name,
         description=description,
@@ -165,7 +173,8 @@ def create_standard_agent(
         mission=mission,
         tools=tools,
         work_dir=work_dir,
-        llm_service=llm_service
+        llm_service=llm_service,
+        approval_policy=approval_policy
     )
 
 
@@ -174,7 +183,8 @@ def create_rag_agent(
     user_context: Optional[Dict[str, Any]] = None,
     work_dir: Optional[str] = None,
     llm_config_path: Optional[str] = None,
-    llm_service: Optional[LLMService] = None
+    llm_service: Optional[LLMService] = None,
+    approval_policy: "ApprovalPolicy" = None
 ) -> Agent:
     """
     Create an agent with RAG capabilities for document search and retrieval.
@@ -191,6 +201,7 @@ def create_rag_agent(
         work_dir: Working directory for state and todolists (default: ./rag_agent_work).
         llm_config_path: Path to LLM config (default: configs/llm_config.yaml)
         llm_service: LLMService instance (default: creates default service).
+        approval_policy: Policy for handling approval requests (default: PROMPT).
     
     Returns:
         Agent instance configured with RAG tools and system prompt.
@@ -203,6 +214,7 @@ def create_rag_agent(
         >>> async for event in agent.execute("What does the manual say about pumps?", session_id):
         ...     print(event)
     """
+    from capstone.agent_v2.agent import ApprovalPolicy
     from capstone.agent_v2.tools.rag_semantic_search_tool import SemanticSearchTool
     from capstone.agent_v2.tools.rag_list_documents_tool import ListDocumentsTool
     from capstone.agent_v2.tools.rag_get_document_tool import GetDocumentTool
@@ -228,6 +240,10 @@ def create_rag_agent(
     if work_dir is None:
         work_dir = "./rag_agent_work"
     
+    # Default approval policy
+    if approval_policy is None:
+        approval_policy = ApprovalPolicy.PROMPT
+    
     return Agent.create_agent(
         name="RAG Knowledge Assistant",
         description="Agent with semantic search capabilities for enterprise documents",
@@ -235,7 +251,8 @@ def create_rag_agent(
         mission=None,  # Mission will be set per execute() call
         tools=rag_tools,
         work_dir=work_dir,
-        llm_service=llm_service
+        llm_service=llm_service,
+        approval_policy=approval_policy
     )
 
 

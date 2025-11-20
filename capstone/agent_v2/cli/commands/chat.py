@@ -53,6 +53,16 @@ def start(
         "--session", "-s",
         help="Session name (auto-generated if not provided)"
     ),
+    auto_approve: bool = typer.Option(
+        False,
+        "--auto-approve",
+        help="Auto-approve all sensitive operations (use with caution)"
+    ),
+    deny_sensitive: bool = typer.Option(
+        False,
+        "--deny-sensitive",
+        help="Deny all sensitive operations (dry-run mode)"
+    ),
 ):
     """
     Start an interactive chat session with the agent.
@@ -62,6 +72,8 @@ def start(
         agent chat start --mission "Help me organize my files"
         agent chat start --mission-file ./path/to/mission.md
         agent chat start --work-dir ./workspace --provider anthropic
+        agent chat start --auto-approve  # Auto-approve sensitive operations
+        agent chat start --deny-sensitive  # Deny all sensitive operations
     """
     settings = CLISettings()
     selected_provider = provider or settings.default_provider
@@ -78,6 +90,18 @@ def start(
             console.print(f"[red]❌ Failed to read mission file: {e}[/red]")
             raise typer.Exit(code=1)
 
+    # Determine approval policy (Story 2.3)
+    approval_policy_str = "PROMPT"  # Default
+    if auto_approve and deny_sensitive:
+        console.print("[red]❌ Error: Cannot use both --auto-approve and --deny-sensitive[/red]")
+        raise typer.Exit(code=1)
+    elif auto_approve:
+        approval_policy_str = "AUTO_APPROVE"
+        console.print("[yellow]⚠️  Auto-approval enabled - all operations will execute without confirmation[/yellow]")
+    elif deny_sensitive:
+        approval_policy_str = "AUTO_DENY"
+        console.print("[blue]ℹ️  Sensitive operations disabled - they will be skipped[/blue]")
+
     # Generate session info
     session_id = session_name or f"chat-{uuid.uuid4()}"
     if not work_dir:
@@ -89,13 +113,14 @@ def start(
         f"[dim]Session ID:[/dim] {session_id[:16]}...\n"
         f"[dim]Provider:[/dim] {selected_provider}\n"
         f"[dim]Work Directory:[/dim] {work_dir}\n"
+        f"[dim]Approval Policy:[/dim] {approval_policy_str}\n"
         f"[dim]Mission:[/dim] {('from file: ' + str(mission_file)) if (mission_file is not None) else (resolved_mission or 'None - free chat')}\n\n"
         f"[yellow]Type 'exit' to end the session[/yellow]",
         title="🤖 Agent V2 Chat"
     ))
 
     # Start the chat loop
-    asyncio.run(_demo_chat_loop(resolved_mission, work_dir, selected_provider, session_id))
+    asyncio.run(_demo_chat_loop(resolved_mission, work_dir, selected_provider, session_id, approval_policy_str))
 
 
 @app.command()
@@ -115,7 +140,7 @@ def resume(
     console.print("This would load the previous conversation and agent state")
 
 
-async def _demo_chat_loop(mission: Optional[str], work_dir: Path, provider: str, session_id: str):
+async def _demo_chat_loop(mission: Optional[str], work_dir: Path, provider: str, session_id: str, approval_policy_str: str = "PROMPT"):
     """Real agent chat loop implementation."""
     import os
 
@@ -137,7 +162,7 @@ async def _demo_chat_loop(mission: Optional[str], work_dir: Path, provider: str,
         if str(root_dir) not in sys.path:
             sys.path.insert(0, str(root_dir))
 
-        from capstone.agent_v2.agent import Agent, AgentEventType, GENERIC_SYSTEM_PROMPT
+        from capstone.agent_v2.agent import Agent, AgentEventType, ApprovalPolicy, GENERIC_SYSTEM_PROMPT
 
         console.print("[green]🤖 Initializing real Agent...[/green]")
 
@@ -147,6 +172,9 @@ async def _demo_chat_loop(mission: Optional[str], work_dir: Path, provider: str,
         #     current_input = f"My mission is: {mission}. How can you help me with this?"
         #     console.print(f"[bold green]You[/bold green]: {current_input}")
 
+        # Parse approval policy (Story 2.3)
+        approval_policy = ApprovalPolicy(approval_policy_str.lower().replace("-", "_"))
+
         # Create the real agent like in your debug script
         agent = Agent.create_agent(
             name="AgentV2-Chat",
@@ -155,6 +183,7 @@ async def _demo_chat_loop(mission: Optional[str], work_dir: Path, provider: str,
             mission=mission,
             work_dir=str(work_dir.resolve()),
             llm=None,  # Use default LLM configuration
+            approval_policy=approval_policy,
         )
 
         console.print("[green]✅ Agent initialized successfully![/green]")
