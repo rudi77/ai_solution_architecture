@@ -2,6 +2,7 @@
 
 from dataclasses import field, asdict, dataclass
 import os
+from datetime import datetime
 from enum import Enum
 import json
 from pathlib import Path
@@ -437,6 +438,11 @@ class Agent:
         """
         # 1. State laden
         self.state = await self.state_manager.load_state(session_id)
+        # Initialize approval state (Story 2.2)
+        self.state.setdefault("approval_cache", {})
+        self.state.setdefault("trust_mode", False)
+        self.state.setdefault("approval_history", [])
+        
         self.logger.info(
             "execute_start", 
             session_id=session_id,
@@ -692,6 +698,42 @@ class Agent:
                 return  # Pause execution
             
             elif thought.action.type == ActionType.TOOL:
+                # Story 2.2: Approval Gate
+                tool_obj = self._get_tool(thought.action.tool)
+                if tool_obj and tool_obj.requires_approval and not self._check_approval_granted(tool_obj):
+                    # Check if we have an answer for this specific approval request
+                    approval_key = f"approval_step_{current_step.position}_{tool_obj.name}_{current_step.attempts}"
+                    user_answer = self.state.get("answers", {}).get(approval_key)
+                    
+                    if user_answer:
+                        # Process the answer
+                        if not self._process_approval_response(user_answer, tool_obj, current_step.position):
+                            # Denied
+                            current_step.status = TaskStatus.SKIPPED
+                            self.logger.info("step_skipped_approval_denied", session_id=session_id, step=current_step.position)
+                            yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                                           data={"step_skipped": current_step.position,
+                                                 "reason": "approval_denied"})
+                            # Save state before continuing
+                            await self.state_manager.save_state(session_id, self.state)
+                            await self.todo_list_manager.update_todolist(todolist)
+                            continue
+                        # If approved, proceed to execution
+                    else:
+                        # Request approval
+                        prompt = self._build_approval_prompt(tool_obj, thought.action.tool_input)
+                        
+                        self.state["pending_question"] = {
+                            "answer_key": approval_key,
+                            "question": prompt,
+                            "for_step": current_step.position
+                        }
+                        await self.state_manager.save_state(session_id, self.state)
+                        
+                        yield AgentEvent(type=AgentEventType.ASK_USER, 
+                                        data={"question": prompt})
+                        return  # Pause execution
+
                 # Tool ausführen
                 observation = await self._execute_tool_safe(thought.action)
                 
@@ -1043,6 +1085,50 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
             for s in todolist.items
         )
 
+
+    def _check_approval_granted(self, tool: Tool) -> bool:
+        """Check if tool is approved for execution."""
+        if self.state.get("trust_mode"):
+            return True
+        return self.state.get("approval_cache", {}).get(tool.name, False)
+
+    def _process_approval_response(self, response: str, tool: Tool, step_pos: int) -> bool:
+        """Process user response to approval request."""
+        response = response.lower().strip()
+        
+        approved = False
+        if response == "trust":
+            self.state["trust_mode"] = True
+            approved = True
+            decision = "trusted"
+        elif response in ["y", "yes"]:
+            self.state.setdefault("approval_cache", {})[tool.name] = True
+            approved = True
+            decision = "approved"
+        else:
+            decision = "denied"
+            
+        # Audit Log
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "tool": tool.name,
+            "step": step_pos,
+            "risk": tool.approval_risk_level.value,
+            "decision": decision
+        }
+        self.state.setdefault("approval_history", []).append(record)
+        
+        return approved
+
+    def _build_approval_prompt(self, tool: Tool, params: Dict) -> str:
+        """Builds the approval prompt."""
+        preview = tool.get_approval_preview(**(params or {}))
+        risk_emoji = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(tool.approval_risk_level.value, "⚠️")
+        
+        prompt = f"{risk_emoji} Approval Required [{tool.approval_risk_level.value}]\n\n"
+        prompt += preview
+        prompt += "\n\nApprove this operation? (y/n/trust)"
+        return prompt
 
     async def _execute_tool_safe(self, action: Action) -> Dict[str, Any]:
         """
