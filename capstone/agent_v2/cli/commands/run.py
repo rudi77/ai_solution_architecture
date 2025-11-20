@@ -63,13 +63,25 @@ def mission(
         "--auto-confirm",
         help="Auto-confirm all prompts"
     ),
+    auto_approve: bool = typer.Option(
+        False,
+        "--auto-approve",
+        help="Auto-approve all sensitive operations (use with caution)"
+    ),
+    deny_sensitive: bool = typer.Option(
+        False,
+        "--deny-sensitive",
+        help="Deny all sensitive operations (dry-run mode)"
+    ),
 ):
     """
     Execute a mission template with specified parameters.
 
     Examples:
-        agent run data-analysis --provider openai --interactive
-        agent run code-review --batch --output json
+        agent run mission data-analysis --provider openai --interactive
+        agent run mission code-review --batch --output json
+        agent run mission deploy --auto-approve  # Auto-approve sensitive operations
+        agent run mission test --deny-sensitive  # Deny all sensitive operations
     """
     settings = CLISettings()
     if config_file:
@@ -77,6 +89,17 @@ def mission(
 
     # Use provided provider or default
     selected_provider = provider or settings.default_provider
+
+    # Validate approval policy flags (Story 2.3)
+    if auto_approve and deny_sensitive:
+        console.print("[red]❌ Error: Cannot use both --auto-approve and --deny-sensitive[/red]")
+        raise typer.Exit(code=1)
+    
+    # Display approval policy warnings
+    if auto_approve:
+        console.print("[yellow]⚠️  Auto-approval enabled - all operations will execute without confirmation[/yellow]")
+    elif deny_sensitive:
+        console.print("[blue]ℹ️  Sensitive operations disabled - they will be skipped[/blue]")
 
     console.print(f"[bold blue]Executing mission:[/bold blue] {template}")
     console.print(f"[dim]Provider: {selected_provider}[/dim]")

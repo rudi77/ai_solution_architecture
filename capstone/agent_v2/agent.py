@@ -191,6 +191,13 @@ class ActionType(Enum):
     DONE = "complete"
     REPLAN = "replan"
 
+
+class ApprovalPolicy(str, Enum):
+    """Policy for handling approval requests for sensitive operations."""
+    PROMPT = "prompt"              # Ask user for each approval (default)
+    AUTO_APPROVE = "auto_approve"  # Approve all automatically (logs warning)
+    AUTO_DENY = "auto_deny"        # Deny all automatically (logs error)
+
 @dataclass
 class Action:
     type: ActionType  # tool_call, ask_user, complete, replan
@@ -378,7 +385,8 @@ class Agent:
         todo_list_manager: TodoListManager,
         state_manager: StateManager,
         llm_service: LLMService,
-        llm=None):
+        llm=None,
+        approval_policy: ApprovalPolicy = ApprovalPolicy.PROMPT):
         """
         Initializes the Agent with the given name, description, system prompt, mission, tools, and LLM service.
         
@@ -392,6 +400,7 @@ class Agent:
             state_manager: The state manager for the agent. This is the state manager that the agent uses to save the state of the agent.
             llm_service: LLM service for completions
             llm: (Deprecated) Legacy LLM parameter for backward compatibility
+            approval_policy: Policy for handling approval requests (default: PROMPT)
         """
 
         self.name = name
@@ -406,6 +415,7 @@ class Agent:
         self.todo_list_manager = todo_list_manager
         self.state_manager = state_manager
         self.llm_service = llm_service
+        self.approval_policy = approval_policy
         self.state = None
         # Initialize with mission-agnostic system prompt (Story CONV-HIST-002)
         # Mission is stored in self.mission but not embedded in system prompt
@@ -569,6 +579,59 @@ class Agent:
             total_messages=len(self.message_history.messages)
         )
 
+        # 5.5. Check for set-policy command (Story 2.3)
+        if user_message.strip().lower().startswith("set-policy"):
+            parts = user_message.strip().split(maxsplit=1)
+            if len(parts) == 2:
+                policy_str = parts[1].strip().lower().replace("-", "_")
+                try:
+                    new_policy = ApprovalPolicy(policy_str)
+                    old_policy = self.approval_policy
+                    self.approval_policy = new_policy
+                    
+                    # Log policy change
+                    self.logger.info(
+                        "approval_policy_changed",
+                        session_id=session_id,
+                        old_policy=old_policy.value,
+                        new_policy=new_policy.value
+                    )
+                    
+                    # Audit log
+                    record = {
+                        "timestamp": datetime.now().isoformat(),
+                        "action": "policy_change",
+                        "old_policy": old_policy.value,
+                        "new_policy": new_policy.value
+                    }
+                    self.state.setdefault("approval_history", []).append(record)
+                    await self.state_manager.save_state(session_id, self.state)
+                    
+                    yield AgentEvent(
+                        type=AgentEventType.STATE_UPDATED,
+                        data={
+                            "policy_changed": True,
+                            "old_policy": old_policy.value,
+                            "new_policy": new_policy.value,
+                            "message": f"Approval policy changed to {new_policy.value}"
+                        }
+                    )
+                    return
+                except ValueError:
+                    yield AgentEvent(
+                        type=AgentEventType.ERROR,
+                        data={
+                            "error": f"Invalid policy: {parts[1]}. Valid options: prompt, auto-approve, auto-deny"
+                        }
+                    )
+                    return
+            else:
+                yield AgentEvent(
+                    type=AgentEventType.ERROR,
+                    data={"error": "Usage: set-policy [prompt|auto-approve|auto-deny]"}
+                )
+                return
+
         # 6. Pending Question beantworten (falls vorhanden)
         if self.state.get("pending_question"):
             answer_key = self.state["pending_question"]["answer_key"]
@@ -698,41 +761,56 @@ class Agent:
                 return  # Pause execution
             
             elif thought.action.type == ActionType.TOOL:
-                # Story 2.2: Approval Gate
+                # Story 2.2 & 2.3: Approval Gate with Policy
                 tool_obj = self._get_tool(thought.action.tool)
-                if tool_obj and tool_obj.requires_approval and not self._check_approval_granted(tool_obj):
-                    # Check if we have an answer for this specific approval request
-                    approval_key = f"approval_step_{current_step.position}_{tool_obj.name}_{current_step.attempts}"
-                    user_answer = self.state.get("answers", {}).get(approval_key)
+                if tool_obj and tool_obj.requires_approval:
+                    # Request approval based on policy
+                    approval_decision = self._request_approval(tool_obj, thought.action.tool_input)
                     
-                    if user_answer:
-                        # Process the answer
-                        if not self._process_approval_response(user_answer, tool_obj, current_step.position):
-                            # Denied
-                            current_step.status = TaskStatus.SKIPPED
-                            self.logger.info("step_skipped_approval_denied", session_id=session_id, step=current_step.position)
-                            yield AgentEvent(type=AgentEventType.STATE_UPDATED,
-                                           data={"step_skipped": current_step.position,
-                                                 "reason": "approval_denied"})
-                            # Save state before continuing
-                            await self.state_manager.save_state(session_id, self.state)
-                            await self.todo_list_manager.update_todolist(todolist)
-                            continue
-                        # If approved, proceed to execution
-                    else:
-                        # Request approval
-                        prompt = self._build_approval_prompt(tool_obj, thought.action.tool_input)
-                        
-                        self.state["pending_question"] = {
-                            "answer_key": approval_key,
-                            "question": prompt,
-                            "for_step": current_step.position
-                        }
+                    if approval_decision is False:
+                        # Denied (AUTO_DENY policy or user denied)
+                        current_step.status = TaskStatus.SKIPPED
+                        self.logger.info("step_skipped_approval_denied", session_id=session_id, step=current_step.position)
+                        yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                                       data={"step_skipped": current_step.position,
+                                             "reason": "approval_denied"})
                         await self.state_manager.save_state(session_id, self.state)
+                        await self.todo_list_manager.update_todolist(todolist)
+                        continue
+                    
+                    elif approval_decision is None:
+                        # Need user input (PROMPT policy)
+                        approval_key = f"approval_step_{current_step.position}_{tool_obj.name}_{current_step.attempts}"
+                        user_answer = self.state.get("answers", {}).get(approval_key)
                         
-                        yield AgentEvent(type=AgentEventType.ASK_USER, 
-                                        data={"question": prompt})
-                        return  # Pause execution
+                        if user_answer:
+                            # Process the answer
+                            if not self._process_approval_response(user_answer, tool_obj, current_step.position):
+                                # Denied
+                                current_step.status = TaskStatus.SKIPPED
+                                self.logger.info("step_skipped_approval_denied", session_id=session_id, step=current_step.position)
+                                yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                                               data={"step_skipped": current_step.position,
+                                                     "reason": "approval_denied"})
+                                await self.state_manager.save_state(session_id, self.state)
+                                await self.todo_list_manager.update_todolist(todolist)
+                                continue
+                            # If approved, proceed to execution
+                        else:
+                            # Request approval
+                            prompt = self._build_approval_prompt(tool_obj, thought.action.tool_input)
+                            
+                            self.state["pending_question"] = {
+                                "answer_key": approval_key,
+                                "question": prompt,
+                                "for_step": current_step.position
+                            }
+                            await self.state_manager.save_state(session_id, self.state)
+                            
+                            yield AgentEvent(type=AgentEventType.ASK_USER, 
+                                            data={"question": prompt})
+                            return  # Pause execution
+                    # If approval_decision is True, proceed to execution
 
                 # Tool ausführen
                 observation = await self._execute_tool_safe(thought.action)
@@ -1086,6 +1164,63 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         )
 
 
+    def _request_approval(self, tool: Tool, parameters: Dict) -> Optional[bool]:
+        """
+        Request approval based on policy.
+        
+        Returns:
+            True: Approved (proceed with execution)
+            False: Denied (skip execution)
+            None: Need user input (pause execution)
+        """
+        # Policy-based decisions (Story 2.3)
+        if self.approval_policy == ApprovalPolicy.AUTO_APPROVE:
+            self.logger.warning(
+                "auto_approve_policy",
+                tool=tool.name,
+                parameters=parameters,
+                risk=tool.approval_risk_level.value
+            )
+            # Log to approval history
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "tool": tool.name,
+                "step": None,
+                "risk": tool.approval_risk_level.value,
+                "decision": "auto_approved",
+                "policy": "AUTO_APPROVE"
+            }
+            self.state.setdefault("approval_history", []).append(record)
+            return True
+        
+        if self.approval_policy == ApprovalPolicy.AUTO_DENY:
+            self.logger.error(
+                "auto_deny_policy",
+                tool=tool.name,
+                parameters=parameters,
+                risk=tool.approval_risk_level.value
+            )
+            # Log to approval history
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "tool": tool.name,
+                "step": None,
+                "risk": tool.approval_risk_level.value,
+                "decision": "auto_denied",
+                "policy": "AUTO_DENY"
+            }
+            self.state.setdefault("approval_history", []).append(record)
+            return False
+        
+        # PROMPT policy - check existing approvals first
+        if self.state.get("trust_mode"):
+            return True
+        if self.state.get("approval_cache", {}).get(tool.name, False):
+            return True
+        
+        # Need user input
+        return None
+
     def _check_approval_granted(self, tool: Tool) -> bool:
         """Check if tool is approved for execution."""
         if self.state.get("trust_mode"):
@@ -1260,7 +1395,8 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         work_dir: str,
         llm_service: LLMService,
         llm=None,
-        tools: Optional[List[Tool]] = None
+        tools: Optional[List[Tool]] = None,
+        approval_policy: ApprovalPolicy = ApprovalPolicy.PROMPT
     ) -> "Agent":
         """
         Creates an agent with the given parameters.
@@ -1276,6 +1412,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
             tools: List of Tool instances to equip the agent with. If None, uses default tool set
                    (WebSearchTool, WebFetchTool, PythonTool, GitHubTool, GitTool, FileReadTool,
                    FileWriteTool, PowerShellTool, LLMTool).
+            approval_policy: Policy for handling approval requests (default: PROMPT).
 
         Returns:
             An Agent instance with the specified configuration.
@@ -1308,7 +1445,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         state_dir.mkdir(exist_ok=True)
         state_manager = StateManager(state_dir=state_dir)
 
-        return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm_service, llm)
+        return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm_service, llm, approval_policy)
 
 
 # ============================================
