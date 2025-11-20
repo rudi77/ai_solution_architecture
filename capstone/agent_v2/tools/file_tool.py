@@ -3,7 +3,7 @@
 # ============================================
 from pathlib import Path
 from typing import Any, Dict
-from capstone.agent_v2.tool import Tool
+from capstone.agent_v2.tool import Tool, ApprovalRiskLevel
 
 
 class FileReadTool(Tool):
@@ -64,6 +64,14 @@ class FileWriteTool(Tool):
     def description(self) -> str:
         return "Write content to file with backup and safety checks"
     
+    @property
+    def requires_approval(self) -> bool:
+        return True
+
+    @property
+    def approval_risk_level(self) -> ApprovalRiskLevel:
+        return ApprovalRiskLevel.MEDIUM
+
     async def execute(self, path: str, content: str, backup: bool = True, **kwargs) -> Dict[str, Any]:
         """
         Write content to file with backup and safety checks

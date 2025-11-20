@@ -7,7 +7,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict
-from capstone.agent_v2.tool import Tool
+from capstone.agent_v2.tool import Tool, ApprovalRiskLevel
 
 
 class ShellTool(Tool):
@@ -85,6 +85,14 @@ class PowerShellTool(Tool):
     @property
     def description(self) -> str:
         return "Execute PowerShell commands with timeout and safety limits"
+
+    @property
+    def requires_approval(self) -> bool:
+        return True
+
+    @property
+    def approval_risk_level(self) -> ApprovalRiskLevel:
+        return ApprovalRiskLevel.HIGH
 
     async def execute(self, command: str, timeout: int = 30, cwd: str = None, **kwargs) -> Dict[str, Any]:
 

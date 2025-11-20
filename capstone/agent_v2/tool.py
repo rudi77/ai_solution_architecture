@@ -5,6 +5,13 @@
 from abc import ABC, abstractmethod
 import inspect
 from typing import Any, Optional, Dict, List, Tuple
+from enum import Enum
+
+
+class ApprovalRiskLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class Tool(ABC):
@@ -20,6 +27,25 @@ class Tool(ABC):
     def description(self) -> str:
         pass
     
+    @property
+    def requires_approval(self) -> bool:
+        """Whether this tool requires user approval before execution"""
+        return False
+    
+    @property
+    def approval_risk_level(self) -> ApprovalRiskLevel:
+        """Risk level for approval prompts"""
+        return ApprovalRiskLevel.LOW if not self.requires_approval else ApprovalRiskLevel.MEDIUM
+    
+    def get_approval_preview(self, **kwargs) -> str:
+        """Generate human-readable preview of operation for approval prompt"""
+        import json
+        try:
+            params_str = json.dumps(kwargs, indent=2)
+        except Exception:
+            params_str = str(kwargs)
+        return f"Tool: {self.name}\nOperation: {self.description}\nParameters:\n{params_str}"
+
     @property
     def parameters_schema(self) -> Dict[str, Any]:
         """Override to provide custom parameter schema for OpenAI function calling"""
