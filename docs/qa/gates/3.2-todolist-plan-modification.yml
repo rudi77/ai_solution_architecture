@@ -1,0 +1,64 @@
+schema: 1
+story: '3.2'
+story_title: 'Extend TodoListManager with Plan Modification - Brownfield Addition'
+gate: PASS
+status_reason: 'All functional and quality requirements met. Excellent implementation with comprehensive test coverage (29 tests, 100% pass rate). Code quality is high with proper error handling, logging, validation, and backward compatibility. Minor design note about duplicate positions is non-blocking.'
+reviewer: 'Quinn (Test Architect)'
+updated: '2025-01-20T00:00:00Z'
+
+top_issues: []
+
+waiver:
+  active: false
+
+quality_score: 95
+
+expires: '2025-02-03T00:00:00Z'
+
+evidence:
+  tests_reviewed: 29
+  risks_identified: 0
+  trace:
+    ac_covered: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    ac_gaps: []
+  ac_notes:
+    ac_1: 'replan_count field added to TodoItem with default 0, fully serialized/deserialized'
+    ac_2: 'modify_step() implemented with validation, rollback, and replan limit enforcement'
+    ac_3: 'decompose_step() implemented with dependency chaining, position renumbering, and proper SKIPPED handling'
+    ac_4: 'replace_step() implemented with position preservation and dependency maintenance'
+    ac_5: 'Comprehensive dependency validation with circular dependency detection using DFS, excludes SKIPPED items'
+    ac_6: 'Replan limit (max 2) enforced in all three modification methods with proper error messages'
+    ac_7: 'Backward compatible - existing TodoLists load correctly (replan_count defaults to 0)'
+    ac_8: 'Serialization/deserialization handles replan_count field correctly'
+    ac_9: 'Persistence includes replan_count in JSON format'
+    ac_10: 'Structured logging with operation context for all modifications'
+    ac_11: 'Unit tests for all three modification methods with success and error cases'
+    ac_12: 'Unit tests for dependency validation covering valid, invalid reference, and circular dependencies'
+    ac_13: 'Unit tests for replan limit enforcement in all methods'
+    ac_14: 'Integration test validates full modification workflow (modify → decompose → replace)'
+    ac_15: 'Serialization tests verify replan_count field persistence'
+
+nfr_validation:
+  security:
+    status: PASS
+    notes: 'Input validation present (position checks, dependency validation), atomic operations prevent partial state corruption, proper error handling prevents information leakage, no sensitive data exposure'
+  performance:
+    status: PASS
+    notes: 'Efficient dependency validation using DFS (O(V+E)), position renumbering is O(n), proper async/await usage, no performance concerns for expected use cases'
+  reliability:
+    status: PASS
+    notes: 'Comprehensive error handling with rollback mechanisms, validation prevents invalid states, atomic operations ensure consistency, proper logging enables debugging, replan limit prevents infinite loops'
+  maintainability:
+    status: PASS
+    notes: 'Clear code structure following existing patterns, comprehensive docstrings with type annotations, highly testable design, helper methods for clarity, easy to extend'
+
+recommendations:
+  immediate: []
+  future:
+    - action: 'Consider adding get_active_step_by_position() helper method for clarity when multiple items share position after replace_step()'
+      refs: ['capstone/agent_v2/planning/todolist.py']
+      owner: 'dev'
+    - action: 'Consider adding validation to prevent duplicate positions in TodoList (non-blocking, current implementation handles this correctly via validation)'
+      refs: ['capstone/agent_v2/planning/todolist.py']
+      owner: 'dev'
+

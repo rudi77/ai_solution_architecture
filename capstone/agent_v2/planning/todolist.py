@@ -61,6 +61,7 @@ class TodoItem:
     execution_result: Optional[Dict[str, Any]] = None
     attempts: int = 0
     max_attempts: int = 3
+    replan_count: int = 0  # Track number of replanning attempts
 
     def to_json(self) -> str:
         """Serialize the TodoItem to a JSON string."""
@@ -79,6 +80,7 @@ class TodoItem:
             "execution_result": self.execution_result,
             "attempts": self.attempts,
             "max_attempts": self.max_attempts,
+            "replan_count": self.replan_count,
         }
 
 @dataclass
@@ -119,6 +121,7 @@ class TodoList:
                 execution_result=raw.get("execution_result"),
                 attempts=int(raw.get("attempts", 0)),
                 max_attempts=int(raw.get("max_attempts", 3)),
+                replan_count=int(raw.get("replan_count", 0)),
             )
             items.append(item)
 
@@ -143,6 +146,7 @@ class TodoList:
                 "execution_result": item.execution_result,
                 "attempts": item.attempts,
                 "max_attempts": item.max_attempts,
+                "replan_count": item.replan_count,
             }
 
         return {
@@ -155,6 +159,30 @@ class TodoList:
     def to_json(self) -> str:
         """Serialize the TodoList to a JSON string."""
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+
+    def get_step_by_position(self, position: int) -> Optional[TodoItem]:
+        """Get TodoItem by position."""
+        for item in self.items:
+            if item.position == position:
+                return item
+        return None
+    
+    def insert_step(self, step: TodoItem, at_position: Optional[int] = None) -> None:
+        """Insert a step at specified position, renumbering subsequent steps."""
+        if at_position is None:
+            at_position = step.position
+        
+        # Renumber existing steps at or after insert position
+        for item in self.items:
+            if item.position >= at_position:
+                item.position += 1
+        
+        # Set correct position and add
+        step.position = at_position
+        self.items.append(step)
+        
+        # Sort by position to maintain order
+        self.items.sort(key=lambda x: x.position)
 
     def to_markdown(self) -> str:
         """
@@ -633,6 +661,328 @@ Return JSON matching:
         todolist_path = self.get_todolist_path(todolist.todolist_id)
         todolist_path.parent.mkdir(parents=True, exist_ok=True)
         todolist_path.write_text(todolist.to_json(), encoding="utf-8")
+
+    def _validate_dependencies(self, todolist: TodoList) -> bool:
+        """
+        Validate that all dependencies are valid (no cycles, all positions exist).
+        
+        Skipped items are excluded from validation since they are not actively executed.
+        
+        Args:
+            todolist: The todolist to validate.
+            
+        Returns:
+            True if dependencies are valid, False otherwise.
+        """
+        # Only validate active items (not SKIPPED)
+        active_items = [item for item in todolist.items if item.status != TaskStatus.SKIPPED]
+        positions = {item.position for item in todolist.items}
+        
+        # Check all dependencies reference valid positions
+        for item in active_items:
+            for dep in item.dependencies:
+                if dep not in positions:
+                    self.logger.warning(
+                        "invalid_dependency",
+                        position=item.position,
+                        invalid_dep=dep
+                    )
+                    return False
+        
+        # Check for circular dependencies using DFS (only among active items)
+        def has_cycle(position: int, visited: set, rec_stack: set) -> bool:
+            visited.add(position)
+            rec_stack.add(position)
+            
+            item = todolist.get_step_by_position(position)
+            if item and item.status != TaskStatus.SKIPPED:
+                for dep in item.dependencies:
+                    # Find the item at dep position
+                    dep_item = todolist.get_step_by_position(dep)
+                    # Skip if dependency is SKIPPED
+                    if dep_item and dep_item.status == TaskStatus.SKIPPED:
+                        continue
+                    
+                    if dep not in visited:
+                        if has_cycle(dep, visited, rec_stack):
+                            return True
+                    elif dep in rec_stack:
+                        return True
+            
+            rec_stack.remove(position)
+            return False
+        
+        visited: set = set()
+        for item in active_items:
+            if item.position not in visited:
+                if has_cycle(item.position, visited, set()):
+                    self.logger.warning(
+                        "circular_dependency_detected",
+                        position=item.position
+                    )
+                    return False
+        
+        return True
+
+    async def modify_step(
+        self,
+        todolist_id: str,
+        step_position: int,
+        modifications: Dict[str, Any]
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Modify existing TodoItem parameters/tool.
+        
+        Args:
+            todolist_id: ID of the todolist to modify.
+            step_position: Position of the step to modify.
+            modifications: Dict of field names and new values.
+            
+        Returns:
+            Tuple of (success: bool, error: Optional[str])
+        """
+        todolist = await self.load_todolist(todolist_id)
+        step = todolist.get_step_by_position(step_position)
+        
+        if not step:
+            return False, f"Step at position {step_position} not found"
+        
+        # Check replan limit
+        if step.replan_count >= 2:
+            self.logger.warning(
+                "replan_limit_exceeded",
+                position=step_position,
+                replan_count=step.replan_count
+            )
+            return False, "Max replan attempts (2) exceeded"
+        
+        # Store original state for rollback
+        original_state = step.to_dict()
+        
+        try:
+            # Apply modifications
+            for key, value in modifications.items():
+                if hasattr(step, key):
+                    setattr(step, key, value)
+            
+            step.replan_count += 1
+            step.status = TaskStatus.PENDING  # Reset to retry
+            
+            # Validate dependencies still valid
+            if not self._validate_dependencies(todolist):
+                # Rollback
+                for key, value in original_state.items():
+                    if hasattr(step, key):
+                        setattr(step, key, value)
+                return False, "Modification would create invalid dependencies"
+            
+            # Persist
+            await self.update_todolist(todolist)
+            self.logger.info(
+                "step_modified",
+                position=step_position,
+                modifications=list(modifications.keys()),
+                replan_count=step.replan_count
+            )
+            
+            return True, None
+            
+        except Exception as e:
+            self.logger.error(
+                "modify_step_failed",
+                position=step_position,
+                error=str(e)
+            )
+            return False, f"Modification failed: {str(e)}"
+
+    async def decompose_step(
+        self,
+        todolist_id: str,
+        step_position: int,
+        subtasks: List[Dict[str, Any]]
+    ) -> Tuple[bool, List[int]]:
+        """
+        Split TodoItem into multiple subtasks.
+        
+        Args:
+            todolist_id: ID of the todolist to modify.
+            step_position: Position of the step to decompose.
+            subtasks: List of dicts with 'description' and 'acceptance_criteria'.
+            
+        Returns:
+            Tuple of (success: bool, new_task_ids: List[int])
+        """
+        if not subtasks:
+            return False, []
+        
+        todolist = await self.load_todolist(todolist_id)
+        original_step = todolist.get_step_by_position(step_position)
+        
+        if not original_step:
+            return False, []
+        
+        # Check replan limit
+        if original_step.replan_count >= 2:
+            self.logger.warning(
+                "replan_limit_exceeded",
+                position=step_position,
+                replan_count=original_step.replan_count
+            )
+            return False, []
+        
+        try:
+            # Store original dependencies before modification
+            original_deps = original_step.dependencies.copy()
+            
+            # Mark original as skipped FIRST (before inserting new steps)
+            original_step.status = TaskStatus.SKIPPED
+            original_step.execution_result = {"reason": "decomposed into subtasks"}
+            
+            # Create subtasks - they will be inserted and renumber existing steps
+            new_positions = []
+            insert_pos = step_position + 1  # Insert after the original step
+            
+            for i, subtask_data in enumerate(subtasks):
+                # First subtask depends on original's dependencies, rest depend on previous subtask
+                if i == 0:
+                    deps = original_deps
+                else:
+                    deps = [new_positions[-1]]  # Depend on the previous subtask
+                
+                subtask = TodoItem(
+                    position=insert_pos + i,
+                    description=subtask_data.get("description", ""),
+                    acceptance_criteria=subtask_data.get("acceptance_criteria", ""),
+                    dependencies=deps,
+                    status=TaskStatus.PENDING,
+                    replan_count=original_step.replan_count + 1
+                )
+                
+                # Manually add and renumber
+                for item in todolist.items:
+                    if item.position >= insert_pos + i and item != original_step:
+                        item.position += 1
+                
+                subtask.position = insert_pos + i
+                todolist.items.append(subtask)
+                new_positions.append(subtask.position)
+            
+            # Sort items by position
+            todolist.items.sort(key=lambda x: x.position)
+            
+            # Update dependents of original to depend on last subtask
+            last_subtask_pos = new_positions[-1]
+            for step in todolist.items:
+                if step == original_step:
+                    continue
+                if step_position in step.dependencies:
+                    step.dependencies.remove(step_position)
+                    if last_subtask_pos not in step.dependencies:
+                        step.dependencies.append(last_subtask_pos)
+            
+            # Validate and persist
+            if not self._validate_dependencies(todolist):
+                self.logger.error(
+                    "decompose_validation_failed",
+                    position=step_position
+                )
+                return False, []
+            
+            await self.update_todolist(todolist)
+            self.logger.info(
+                "step_decomposed",
+                position=step_position,
+                subtask_count=len(subtasks),
+                new_positions=new_positions
+            )
+            
+            return True, new_positions
+            
+        except Exception as e:
+            self.logger.error(
+                "decompose_step_failed",
+                position=step_position,
+                error=str(e)
+            )
+            return False, []
+
+    async def replace_step(
+        self,
+        todolist_id: str,
+        step_position: int,
+        new_step_data: Dict[str, Any]
+    ) -> Tuple[bool, Optional[int]]:
+        """
+        Replace TodoItem with alternative approach.
+        
+        Args:
+            todolist_id: ID of the todolist to modify.
+            step_position: Position of the step to replace.
+            new_step_data: Dict with 'description' and 'acceptance_criteria' for new step.
+            
+        Returns:
+            Tuple of (success: bool, new_task_id: Optional[int])
+        """
+        todolist = await self.load_todolist(todolist_id)
+        original_step = todolist.get_step_by_position(step_position)
+        
+        if not original_step:
+            return False, None
+        
+        # Check replan limit
+        if original_step.replan_count >= 2:
+            self.logger.warning(
+                "replan_limit_exceeded",
+                position=step_position,
+                replan_count=original_step.replan_count
+            )
+            return False, None
+        
+        try:
+            # Create replacement step with same position and dependencies
+            new_step = TodoItem(
+                position=step_position,
+                description=new_step_data.get("description", ""),
+                acceptance_criteria=new_step_data.get("acceptance_criteria", ""),
+                dependencies=original_step.dependencies.copy(),
+                status=TaskStatus.PENDING,
+                replan_count=original_step.replan_count + 1
+            )
+            
+            # Mark original as skipped
+            original_step.status = TaskStatus.SKIPPED
+            original_step.execution_result = {"reason": "replaced with alternative approach"}
+            
+            # Add new step
+            todolist.items.append(new_step)
+            
+            # Update dependents to point to new step (same position)
+            # No changes needed since position is preserved
+            
+            # Validate and persist
+            if not self._validate_dependencies(todolist):
+                self.logger.error(
+                    "replace_validation_failed",
+                    position=step_position
+                )
+                return False, None
+            
+            await self.update_todolist(todolist)
+            self.logger.info(
+                "step_replaced",
+                original_position=step_position,
+                new_position=new_step.position
+            )
+            
+            return True, new_step.position
+            
+        except Exception as e:
+            self.logger.error(
+                "replace_step_failed",
+                position=step_position,
+                error=str(e)
+            )
+            return False, None
 
 # Test function for complex mission requiring at least three tools and three steps
 def test_todolist_creation():
