@@ -15,6 +15,7 @@ import structlog
 from capstone.agent_v2.planning.todolist import TaskStatus, TodoItem, TodoList, TodoListManager
 from capstone.agent_v2.replanning import (
     ReplanStrategy,
+    StrategyType,
     REPLAN_PROMPT_TEMPLATE,
     validate_strategy,
     extract_failure_context,
@@ -848,13 +849,45 @@ class Agent:
                                        data={"step_failed": current_step.position,
                                              "reason": "acceptance_criteria_not_met"})
                 else:
-                    current_step.status = TaskStatus.FAILED
-                    self.logger.warning("step_failed", session_id=session_id,
-                                      step=current_step.position,
-                                      error=observation.get("error"))
-                    yield AgentEvent(type=AgentEventType.STATE_UPDATED,
-                                   data={"step_failed": current_step.position,
-                                         "error": observation.get("error")})
+                    # Tool execution failed - attempt automatic replanning before marking as FAILED
+                    replanned = False
+                    if current_step.replan_count < 2:
+                        self.logger.info("tool_failed_attempting_replan", 
+                                       session_id=session_id,
+                                       step=current_step.position,
+                                       replan_attempt=current_step.replan_count + 1)
+                        
+                        replan_success, replan_summary = await self._attempt_automatic_replan(
+                            current_step, 
+                            observation
+                        )
+                        
+                        if replan_success:
+                            self.logger.info("replan_successful", 
+                                           session_id=session_id,
+                                           step=current_step.position,
+                                           summary=replan_summary)
+                            replanned = True
+                            # Reload todolist to get updated plan
+                            todolist = await self.todo_list_manager.load_todolist(self.todolist_id)
+                            yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                                           data={"step_replanned": current_step.position,
+                                                 "summary": replan_summary})
+                        else:
+                            self.logger.warning("replan_failed", 
+                                              session_id=session_id,
+                                              step=current_step.position,
+                                              summary=replan_summary)
+                    
+                    # Only mark as FAILED if not replanned
+                    if not replanned:
+                        current_step.status = TaskStatus.FAILED
+                        self.logger.warning("step_failed", session_id=session_id,
+                                          step=current_step.position,
+                                          error=observation.get("error"))
+                        yield AgentEvent(type=AgentEventType.STATE_UPDATED,
+                                       data={"step_failed": current_step.position,
+                                             "error": observation.get("error")})
 
                 yield AgentEvent(type=AgentEventType.TOOL_RESULT, data=observation)
             
@@ -1305,7 +1338,7 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
 
     async def _replan(self, current_step: TodoItem, thought: Thought, todolist: TodoList) -> TodoList:
         """
-        Adjusts the plan based on current situation.
+        Adjusts the plan based on current situation (explicit LLM-requested replan).
         
         Args:
             current_step: The step that triggered replanning.
@@ -1315,12 +1348,144 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         Returns:
             Updated TodoList.
         """
-        # TODO: Implement intelligent replanning
-        # For now, just mark the step as skipped and continue
-        self.logger.warning("replan_requested", step=current_step.position, 
-                          rationale=thought.rationale)
-        current_step.status = TaskStatus.SKIPPED
+        # For explicit replan actions from LLM, attempt automatic replanning
+        error_context = current_step.execution_result or {}
+        success, summary = await self._attempt_automatic_replan(current_step, error_context)
+        
+        if not success:
+            # If replan fails, mark as skipped
+            self.logger.warning("replan_failed", step=current_step.position, 
+                              rationale=thought.rationale, summary=summary)
+            current_step.status = TaskStatus.SKIPPED
+        
         return todolist
+
+    async def _attempt_automatic_replan(
+        self, 
+        failed_step: TodoItem, 
+        error_context: Dict[str, Any]
+    ) -> tuple[bool, str]:
+        """
+        Attempt intelligent replanning for a failed TodoItem.
+        
+        This method implements the core replanning logic:
+        1. Generate replan strategy using LLM
+        2. Apply strategy to TodoList via TodoListManager
+        3. Update MessageHistory with replan context
+        4. Log metrics
+        
+        Args:
+            failed_step: The TodoItem that failed execution
+            error_context: Error details from tool execution
+            
+        Returns:
+            Tuple of (success: bool, summary: str)
+        """
+        # Check replan limit
+        if failed_step.replan_count >= 2:
+            self.logger.warning(
+                "replan_limit_exceeded",
+                step=failed_step.position,
+                replan_count=failed_step.replan_count
+            )
+            return False, "Max replan attempts (2) exceeded"
+        
+        self.logger.info(
+            "attempting_replan",
+            step=failed_step.position,
+            attempt=failed_step.replan_count + 1,
+            error=str(error_context.get("error", ""))[:100]
+        )
+        
+        # 1. Generate strategy
+        strategy = await self.generate_replan_strategy(failed_step, error_context)
+        
+        if not strategy or strategy.confidence < 0.6:
+            return False, "No viable replan strategy found"
+        
+        # 2. Apply strategy to TodoList via TodoListManager
+        success = False
+        new_task_ids = []
+        error_msg = None
+        
+        try:
+            if strategy.strategy_type == StrategyType.RETRY_WITH_PARAMS:
+                # Modify step with new parameters
+                success, error_msg = await self.todo_list_manager.modify_step(
+                    self.todolist_id,
+                    failed_step.position,
+                    strategy.modifications
+                )
+                
+            elif strategy.strategy_type == StrategyType.DECOMPOSE_TASK:
+                # Split into subtasks
+                subtasks = strategy.modifications.get("subtasks", [])
+                success, new_task_ids = await self.todo_list_manager.decompose_step(
+                    self.todolist_id,
+                    failed_step.position,
+                    subtasks
+                )
+                error_msg = f"Created {len(new_task_ids)} subtasks" if success else "Decomposition failed"
+                
+            elif strategy.strategy_type == StrategyType.SWAP_TOOL:
+                # Replace with alternative approach
+                success, new_id = await self.todo_list_manager.replace_step(
+                    self.todolist_id,
+                    failed_step.position,
+                    strategy.modifications
+                )
+                if success:
+                    new_task_ids = [new_id] if new_id else []
+                error_msg = f"Replaced with new step {new_id}" if success else "Replacement failed"
+            else:
+                return False, f"Unknown strategy type: {strategy.strategy_type}"
+                
+        except Exception as e:
+            self.logger.error(
+                "replan_application_failed",
+                step=failed_step.position,
+                strategy=strategy.strategy_type.value,
+                error=str(e),
+                exc_info=True
+            )
+            return False, f"Failed to apply strategy: {str(e)}"
+        
+        if not success:
+            return False, error_msg or f"Failed to apply {strategy.strategy_type.value}"
+        
+        # 3. Update MessageHistory with replan context
+        replan_msg = f"Replanned step {failed_step.position}: {strategy.strategy_type.value} - {strategy.rationale}"
+        self.message_history.add_message(replan_msg, "system")
+        
+        # 4. Log metrics
+        self._log_replan_metrics(strategy, success, new_task_ids)
+        
+        summary = f"{strategy.strategy_type.value}: {strategy.rationale}"
+        return True, summary
+
+    def _log_replan_metrics(
+        self, 
+        strategy: ReplanStrategy, 
+        success: bool,
+        new_task_ids: Optional[List[int]] = None
+    ) -> None:
+        """
+        Log replan metrics for observability.
+        
+        Args:
+            strategy: The replan strategy that was applied
+            success: Whether the strategy application succeeded
+            new_task_ids: List of new task IDs if decomposed/replaced
+        """
+        self.logger.info(
+            "replan_metrics",
+            strategy_type=strategy.strategy_type.value,
+            confidence=strategy.confidence,
+            success=success,
+            new_task_ids=new_task_ids or [],
+            modifications_count=len(strategy.modifications),
+            rationale=strategy.rationale[:100]  # Truncate for logging
+        )
 
 
     def _extract_failure_context(
