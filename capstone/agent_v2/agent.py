@@ -13,6 +13,13 @@ import uuid
 import structlog
 
 from capstone.agent_v2.planning.todolist import TaskStatus, TodoItem, TodoList, TodoListManager
+from capstone.agent_v2.replanning import (
+    ReplanStrategy,
+    REPLAN_PROMPT_TEMPLATE,
+    validate_strategy,
+    extract_failure_context,
+    STRATEGY_GENERATION_TIMEOUT,
+)
 from capstone.agent_v2.services.llm_service import LLMService
 from capstone.agent_v2.statemanager import StateManager
 from capstone.agent_v2.tool import Tool
@@ -1314,6 +1321,121 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
                           rationale=thought.rationale)
         current_step.status = TaskStatus.SKIPPED
         return todolist
+
+
+    def _extract_failure_context(
+        self,
+        failed_item: TodoItem,
+        error_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Extract structured failure context from a failed TodoItem.
+        
+        This method wraps the module-level extract_failure_context function
+        and adds agent-specific context like available tools.
+        
+        Args:
+            failed_item: The TodoItem that failed execution
+            error_context: Optional additional error context
+            
+        Returns:
+            Dictionary with failure context plus available tools list
+        """
+        # Use module-level extraction function
+        context = extract_failure_context(failed_item, error_context)
+        
+        # Add available tools for LLM decision making
+        context["available_tools"] = self._get_tools_description()
+        
+        return context
+
+
+    async def generate_replan_strategy(
+        self,
+        failed_item: TodoItem,
+        error_context: Optional[Dict[str, Any]] = None
+    ) -> Optional[ReplanStrategy]:
+        """Generate intelligent replan strategy from failure analysis.
+        
+        Uses LLM to analyze the failure and recommend one of three strategies:
+        - RETRY_WITH_PARAMS: Adjust parameters and retry same tool
+        - SWAP_TOOL: Use different tool to achieve same goal
+        - DECOMPOSE_TASK: Split task into smaller subtasks
+        
+        Args:
+            failed_item: The TodoItem that failed
+            error_context: Optional additional error context (traceback, etc.)
+            
+        Returns:
+            ReplanStrategy if generation succeeds and passes validation, None otherwise
+        """
+        self.logger.info(
+            "generate_replan_strategy_start",
+            task_position=failed_item.position,
+            tool=failed_item.chosen_tool,
+            attempts=failed_item.attempts
+        )
+        
+        try:
+            # Extract failure context
+            context = self._extract_failure_context(failed_item, error_context)
+            
+            # Build LLM prompt
+            prompt = REPLAN_PROMPT_TEMPLATE.format(**context)
+            
+            # Request strategy from LLM with timeout
+            self.logger.debug("requesting_strategy_from_llm", prompt_length=len(prompt))
+            
+            response = await self.llm_service.complete(
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                timeout=STRATEGY_GENERATION_TIMEOUT
+            )
+            
+            # Parse LLM response
+            if not response or not response.strip():
+                self.logger.warning("llm_returned_empty_response")
+                return None
+            
+            # Parse JSON response
+            try:
+                strategy_data = json.loads(response)
+            except json.JSONDecodeError as e:
+                self.logger.error("llm_response_not_json", error=str(e), response=response[:200])
+                return None
+            
+            # Create strategy object
+            try:
+                strategy = ReplanStrategy.from_dict(strategy_data)
+            except (ValueError, KeyError) as e:
+                self.logger.error("invalid_strategy_structure", error=str(e), data=strategy_data)
+                return None
+            
+            # Validate strategy
+            if not validate_strategy(strategy, self.logger):
+                self.logger.warning(
+                    "strategy_validation_failed",
+                    strategy_type=strategy.strategy_type.value,
+                    confidence=strategy.confidence
+                )
+                return None
+            
+            self.logger.info(
+                "replan_strategy_generated",
+                strategy_type=strategy.strategy_type.value,
+                confidence=strategy.confidence,
+                rationale=strategy.rationale[:100]  # Truncate for logging
+            )
+            
+            return strategy
+            
+        except Exception as e:
+            self.logger.error(
+                "generate_replan_strategy_failed",
+                error=str(e),
+                task_position=failed_item.position,
+                exc_info=True
+            )
+            return None
 
 
     def _get_tools_description(self) -> str:
