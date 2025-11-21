@@ -1,6 +1,7 @@
 # An Agent class
 
 from dataclasses import field, asdict, dataclass
+import asyncio
 import os
 from datetime import datetime
 from enum import Enum
@@ -30,6 +31,34 @@ from capstone.agent_v2.tools.git_tool import GitHubTool, GitTool
 from capstone.agent_v2.tools.llm_tool import LLMTool
 from capstone.agent_v2.tools.shell_tool import PowerShellTool
 from capstone.agent_v2.tools.web_tool import WebFetchTool, WebSearchTool
+
+LESSON_EXTRACTION_PROMPT = """
+Analyze this task execution history and extract a generalizable lesson.
+
+**Task Description:** {task_description}
+
+**Execution History:**
+{execution_history}
+
+**What happened:**
+- Attempts: {attempt_count}
+- Initial failure: {initial_error}
+- Final success: {final_result}
+- Tools used: {tools_used}
+
+Extract a lesson that would help in similar future situations.
+Focus on: what failed, what worked, why it worked, how to recognize similar situations.
+
+Respond with JSON:
+{{
+  "context": "Brief description of situation type (2-3 sentences)",
+  "what_failed": "What approach didn't work and why",
+  "what_worked": "What approach succeeded and why",
+  "lesson": "Generalizable takeaway for future tasks",
+  "tool_name": "Primary tool involved (if relevant)",
+  "confidence": 0.0-1.0
+}}
+"""
 
 GENERIC_SYSTEM_PROMPT = """
 You are a ReAct-style execution agent.
@@ -394,7 +423,9 @@ class Agent:
         state_manager: StateManager,
         llm_service: LLMService,
         llm=None,
-        approval_policy: ApprovalPolicy = ApprovalPolicy.PROMPT):
+        approval_policy: ApprovalPolicy = ApprovalPolicy.PROMPT,
+        memory_manager=None,
+        enable_lesson_extraction: bool = True):
         """
         Initializes the Agent with the given name, description, system prompt, mission, tools, and LLM service.
         
@@ -409,6 +440,8 @@ class Agent:
             llm_service: LLM service for completions
             llm: (Deprecated) Legacy LLM parameter for backward compatibility
             approval_policy: Policy for handling approval requests (default: PROMPT)
+            memory_manager: Memory manager for learned skills (optional)
+            enable_lesson_extraction: Enable automatic lesson extraction from execution outcomes
         """
 
         self.name = name
@@ -424,6 +457,9 @@ class Agent:
         self.state_manager = state_manager
         self.llm_service = llm_service
         self.approval_policy = approval_policy
+        self.memory_manager = memory_manager
+        self.enable_lesson_extraction = enable_lesson_extraction
+        self._planning_memories = []  # Track memories used in planning (Story 4.3)
         self.state = None
         # Initialize with mission-agnostic system prompt (Story CONV-HIST-002)
         # Mission is stored in self.mission but not embedded in system prompt
@@ -708,8 +744,13 @@ class Agent:
         todolist = await self.todo_list_manager.create_todolist(
                 mission=self.mission,
                 tools_desc=self.tools_description,
-                answers=answers
+                answers=answers,
+                memory_manager=self.memory_manager  # NEW: Pass memory manager (Story 4.3)
         )
+        
+        # Store retrieved memories for success tracking (Story 4.3)
+        if hasattr(todolist, 'retrieved_memories') and todolist.retrieved_memories:
+            self._planning_memories = todolist.retrieved_memories
 
         self.state["todolist_id"] = todolist.todolist_id
         await self.state_manager.save_state(session_id, self.state)
@@ -827,6 +868,13 @@ class Agent:
                 current_step.chosen_tool = thought.action.tool
                 current_step.tool_input = thought.action.tool_input
                 current_step.execution_result = observation
+                
+                # NEW: Track execution history for lesson extraction (Story 4.2)
+                current_step.execution_history.append({
+                    "tool": thought.action.tool,
+                    "success": observation.get("success", False),
+                    "error": observation.get("error")
+                })
                 current_step.attempts += 1
                 
                 # Status updaten
@@ -836,6 +884,21 @@ class Agent:
                         current_step.status = TaskStatus.COMPLETED
                         self.logger.info("step_completed", session_id=session_id,
                                        step=current_step.position)
+                        
+                        # NEW: Post-execution lesson extraction (Story 4.2)
+                        if self.enable_lesson_extraction and self.memory_manager:
+                            if self._has_learning_pattern(current_step):
+                                lesson = await self._extract_lesson(current_step)
+                                if lesson:
+                                    await self.memory_manager.store_memory(lesson)
+                                    self.logger.info("Lesson extracted and stored", lesson_id=lesson.id)
+                        
+                        # NEW: Memory success tracking (Story 4.3)
+                        if self.memory_manager and self._planning_memories:
+                            for memory in self._planning_memories:
+                                await self.memory_manager.update_success_count(memory.id, increment=1)
+                                self.logger.debug("Memory helped with successful execution", memory_id=memory.id)
+                        
                         # Emit step completed event
                         yield AgentEvent(type=AgentEventType.STATE_UPDATED,
                                        data={"step_completed": current_step.position,
@@ -1671,6 +1734,134 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
 
         return next((tool for tool in self.tools if tool.name == tool_name), None)
 
+    def _has_learning_pattern(self, step: TodoItem) -> bool:
+        """
+        Detect if TodoItem execution contains valuable learning patterns.
+        
+        Args:
+            step: TodoItem to analyze
+            
+        Returns:
+            True if learning pattern detected
+        """
+        # Pattern 1: Failed then succeeded (multiple attempts with eventual success)
+        if step.status == TaskStatus.COMPLETED and step.attempts > 1:
+            return True
+        
+        # Pattern 2: Replanning occurred (tried different approaches)
+        if step.status == TaskStatus.COMPLETED and step.replan_count > 0:
+            return True
+        
+        # Pattern 3: Tool substitution (changed tools during execution)
+        if hasattr(step, 'execution_history') and len(step.execution_history) > 1:
+            tools_used = [ex.get('tool') for ex in step.execution_history if ex.get('tool')]
+            if len(set(tools_used)) > 1:  # Multiple different tools tried
+                return True
+        
+        # Pattern 4: Error recovery (had errors but eventually succeeded)
+        if step.execution_history:
+            had_errors = any(ex.get('error') for ex in step.execution_history)
+            if had_errors and step.status == TaskStatus.COMPLETED:
+                return True
+        
+        return False
+
+    async def _extract_lesson(self, step: TodoItem) -> Optional[Any]:
+        """
+        Extract lesson from execution history using LLM.
+        
+        Args:
+            step: TodoItem with execution history
+            
+        Returns:
+            SkillMemory object or None if extraction fails
+        """
+        try:
+            from memory.memory_manager import SkillMemory
+            
+            # Build execution context
+            context = self._build_execution_context(step)
+            
+            # Generate extraction prompt
+            prompt = LESSON_EXTRACTION_PROMPT.format(**context)
+            
+            # Request lesson from LLM with timeout
+            response = await asyncio.wait_for(
+                self.llm_service.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"}
+                ),
+                timeout=5.0
+            )
+            
+            lesson_data = json.loads(response)
+            
+            # Validate quality
+            confidence = lesson_data.get("confidence", 0)
+            if confidence < 0.7:
+                self.logger.debug("Low confidence lesson, skipping", confidence=confidence)
+                return None
+            
+            # Create SkillMemory
+            memory = SkillMemory(
+                context=lesson_data.get("context", ""),
+                lesson=f"{lesson_data.get('what_failed', '')} → {lesson_data.get('what_worked', '')}. {lesson_data.get('lesson', '')}",
+                tool_name=lesson_data.get("tool_name"),
+                success_count=0,  # Will be incremented when used
+            )
+            
+            return memory
+            
+        except asyncio.TimeoutError:
+            self.logger.warning("Lesson extraction timed out")
+            return None
+        except Exception as e:
+            self.logger.error("Lesson extraction failed", error=str(e))
+            return None
+
+    def _build_execution_context(self, step: TodoItem) -> Dict[str, Any]:
+        """
+        Build context dict for lesson extraction prompt.
+        
+        Args:
+            step: TodoItem with execution history
+            
+        Returns:
+            Context dictionary for prompt formatting
+        """
+        # Extract execution history details
+        execution_history = []
+        for idx, attempt in enumerate(step.execution_history, 1):
+            execution_history.append({
+                "attempt": idx,
+                "tool": attempt.get("tool", "unknown"),
+                "success": attempt.get("success", False),
+                "error": attempt.get("error", "N/A")
+            })
+        
+        # Get initial error (first failure)
+        initial_error = "N/A"
+        if step.execution_history:
+            first_attempt = step.execution_history[0]
+            if first_attempt.get("error"):
+                initial_error = first_attempt["error"]
+        
+        # Get tools used
+        tools_used = list(set(
+            ex.get("tool", "unknown") 
+            for ex in step.execution_history 
+            if ex.get("tool")
+        ))
+        
+        return {
+            "task_description": step.description,
+            "execution_history": json.dumps(execution_history, indent=2),
+            "attempt_count": len(step.execution_history),
+            "initial_error": initial_error,
+            "final_result": str(step.execution_result),
+            "tools_used": ", ".join(tools_used)
+        }
+
 
     # create a static method to create an agent
     @staticmethod
@@ -1683,7 +1874,9 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         llm_service: LLMService,
         llm=None,
         tools: Optional[List[Tool]] = None,
-        approval_policy: ApprovalPolicy = ApprovalPolicy.PROMPT
+        approval_policy: ApprovalPolicy = ApprovalPolicy.PROMPT,
+        enable_memory: bool = False,
+        enable_lesson_extraction: bool = True
     ) -> "Agent":
         """
         Creates an agent with the given parameters.
@@ -1700,6 +1893,8 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
                    (WebSearchTool, WebFetchTool, PythonTool, GitHubTool, GitTool, FileReadTool,
                    FileWriteTool, PowerShellTool, LLMTool).
             approval_policy: Policy for handling approval requests (default: PROMPT).
+            enable_memory: Enable memory system for learned skills (default: False).
+            enable_lesson_extraction: Enable automatic lesson extraction (default: True).
 
         Returns:
             An Agent instance with the specified configuration.
@@ -1731,8 +1926,21 @@ NOTE: Each Python tool call has an ISOLATED namespace. Variables from previous s
         state_dir = work_dir / "states"
         state_dir.mkdir(exist_ok=True)
         state_manager = StateManager(state_dir=state_dir)
+        
+        # memory directory is work_dir/memory (Story 4.1)
+        memory_manager = None
+        if enable_memory:
+            from memory.memory_manager import MemoryManager
+            memory_dir = work_dir / "memory"
+            memory_dir.mkdir(exist_ok=True)
+            memory_manager = MemoryManager(
+                memory_dir=str(memory_dir),
+                enable_memory=True,
+                auto_prune=True,
+                openai_api_key=os.getenv("OPENAI_API_KEY")
+            )
 
-        return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm_service, llm, approval_policy)
+        return Agent(name, description, system_prompt, mission, tools, planner, state_manager, llm_service, llm, approval_policy, memory_manager, enable_lesson_extraction)
 
 
 # ============================================

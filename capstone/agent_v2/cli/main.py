@@ -38,6 +38,7 @@ from .commands.sessions import app as sessions_app
 from .commands.config import app as config_app
 from .commands.dev import app as dev_app
 from .commands.rag import app as rag_app
+from .commands.memory import memory_app  # NEW: Memory management commands (Story 4.3)
 from .plugin_manager import PluginManager
 from .config.settings import CLISettings
 
@@ -111,6 +112,7 @@ def initialize_cli():
     app.add_typer(config_app, name="config", help="Manage configuration")
     app.add_typer(dev_app, name="dev", help="Developer and debug tools")
     app.add_typer(rag_app, name="rag", help="RAG knowledge retrieval commands")
+    app.add_typer(memory_app, name="memory", help="Manage agent memory (learned skills)")
 
     # Add dev commands to dev CLI
     dev_cli.add_typer(dev_app, name="", help="Developer tools")
