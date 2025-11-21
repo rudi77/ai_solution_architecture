@@ -62,6 +62,7 @@ class TodoItem:
     attempts: int = 0
     max_attempts: int = 3
     replan_count: int = 0  # Track number of replanning attempts
+    execution_history: List[Dict[str, Any]] = field(default_factory=list)  # Track all execution attempts
 
     def to_json(self) -> str:
         """Serialize the TodoItem to a JSON string."""
@@ -347,7 +348,33 @@ class TodoListManager:
             )
             raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
 
-
+    def _format_memories_for_llm(self, memories: List) -> str:
+        """
+        Format memories for LLM context injection (Story 4.3).
+        
+        Args:
+            memories: List of SkillMemory objects
+            
+        Returns:
+            Formatted string for LLM context
+        """
+        if not memories:
+            return ""
+        
+        formatted = "## Past Lessons (from previous executions)\n\n"
+        
+        for i, memory in enumerate(memories, 1):
+            usage_info = f"✓ {memory.success_count}" if memory.success_count > 0 else "○ untested"
+            formatted += f"**Lesson {i} ({usage_info}):**\n"
+            formatted += f"- Context: {memory.context}\n"
+            formatted += f"- Learning: {memory.lesson}\n"
+            if memory.tool_name:
+                formatted += f"- Related to: {memory.tool_name}\n"
+            formatted += "\n"
+        
+        formatted += "*Consider these lessons when planning, but adapt to the current mission.*\n\n"
+        
+        return formatted
 
     def create_clarification_questions_prompts(self, mission: str, tools_desc: str) -> Tuple[str, str]:
         """
@@ -426,7 +453,8 @@ class TodoListManager:
         mission: str, 
         tools_desc: str, 
         answers: Any = None,
-        model: str = "fast"
+        model: str = "fast",
+        memory_manager = None
     ) -> TodoList:
         """
         Creates a new todolist based on the mission and tools_desc using LLM.
@@ -438,6 +466,7 @@ class TodoListManager:
             tools_desc: The description of the tools available.
             answers: Optional dict of question-answer pairs from clarification.
             model: Model alias to use (default: "fast")
+            memory_manager: Optional MemoryManager for retrieving relevant lessons (Story 4.3)
 
         Returns:
             A new todolist based on the mission and tools_desc.
@@ -448,13 +477,27 @@ class TodoListManager:
         """
         if not self.llm_service:
             raise RuntimeError("LLMService not configured for TodoListManager")
+        
+        # NEW: Retrieve relevant memories (Story 4.3)
+        memory_context = ""
+        retrieved_memories = []
+        if memory_manager and memory_manager.enable_memory:
+            retrieved_memories = await memory_manager.retrieve_relevant_memories(
+                query=mission, 
+                top_k=5
+            )
             
-        user_prompt, system_prompt = self.create_final_todolist_prompts(mission, tools_desc, answers or {})
+            if retrieved_memories:
+                memory_context = self._format_memories_for_llm(retrieved_memories)
+                self.logger.info(f"Retrieved {len(retrieved_memories)} relevant memories for planning")
+            
+        user_prompt, system_prompt = self.create_final_todolist_prompts(mission, tools_desc, answers or {}, memory_context)
         
         self.logger.info(
             "creating_todolist",
             mission_length=len(mission),
             answer_count=len(answers) if isinstance(answers, dict) else 0,
+            memories_count=len(retrieved_memories),
             model=model
         )
 
@@ -487,6 +530,10 @@ class TodoListManager:
             raise ValueError(f"Invalid JSON from model: {e}\nRaw: {raw[:500]}")
 
         todolist = TodoList.from_json(data)
+        
+        # Store retrieved memories for success tracking (Story 4.3)
+        todolist.retrieved_memories = retrieved_memories
+        
         self.__write_todolist(todolist)
         
         self.logger.info(
@@ -591,10 +638,16 @@ class TodoListManager:
         return Path(self.base_dir) / f"todolist_{todolist_id}.json"
 
 
-    def create_final_todolist_prompts(self, mission: str, tools_desc: str, answers: Any) -> Tuple[str, str]:
+    def create_final_todolist_prompts(self, mission: str, tools_desc: str, answers: Any, memory_context: str = "") -> Tuple[str, str]:
         """
         Creates a prompt for outcome-oriented TodoList planning.
         Returns (user_prompt, system_prompt).
+        
+        Args:
+            mission: The mission text
+            tools_desc: Description of available tools
+            answers: User-provided answers to clarification questions
+            memory_context: Optional formatted memories from past executions (Story 4.3)
         """
 
         structure = """
@@ -613,6 +666,9 @@ class TodoListManager:
 }
 """
         
+        # Build system prompt with optional memory context (Story 4.3)
+        memory_section = f"\n{memory_context}\n" if memory_context else ""
+        
         system_prompt = f"""You are a planning agent. Create a minimal, goal-oriented plan.
 
 Mission:
@@ -620,7 +676,7 @@ Mission:
 
 User Answers:
 {json.dumps(answers, indent=2)}
-
+{memory_section}
 Available Tools (for reference, DO NOT specify in plan):
 {tools_desc}
 
