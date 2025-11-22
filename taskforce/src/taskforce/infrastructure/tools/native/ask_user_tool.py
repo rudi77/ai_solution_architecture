@@ -7,10 +7,10 @@ Migrated from Agent V2 with full preservation of functionality.
 
 from typing import Any, Dict, List, Optional
 
-from taskforce.core.interfaces.tools import ApprovalRiskLevel
+from taskforce.core.interfaces.tools import ApprovalRiskLevel, ToolProtocol
 
 
-class AskUserTool:
+class AskUserTool(ToolProtocol):
     """Model-invoked prompt to request missing info from a human."""
 
     @property

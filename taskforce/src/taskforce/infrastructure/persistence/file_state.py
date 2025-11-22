@@ -22,8 +22,10 @@ from typing import Any
 import aiofiles
 import structlog
 
+from taskforce.core.interfaces.state import StateManagerProtocol
 
-class FileStateManager:
+
+class FileStateManager(StateManagerProtocol):
     """
     File-based state persistence implementing StateManagerProtocol.
 

@@ -8,10 +8,10 @@ Migrated from Agent V2 with full preservation of functionality.
 from pathlib import Path
 from typing import Any, Dict
 
-from taskforce.core.interfaces.tools import ApprovalRiskLevel
+from taskforce.core.interfaces.tools import ApprovalRiskLevel, ToolProtocol
 
 
-class FileReadTool:
+class FileReadTool(ToolProtocol):
     """Safe file reading with size limits and encoding detection."""
 
     @property
@@ -107,7 +107,7 @@ class FileReadTool:
         return True, None
 
 
-class FileWriteTool:
+class FileWriteTool(ToolProtocol):
     """Safe file writing with backup option and atomic writes."""
 
     @property

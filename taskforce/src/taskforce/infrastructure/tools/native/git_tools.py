@@ -16,10 +16,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import structlog
 
-from taskforce.core.interfaces.tools import ApprovalRiskLevel
+from taskforce.core.interfaces.tools import ApprovalRiskLevel, ToolProtocol
 
 
-class GitTool:
+class GitTool(ToolProtocol):
     """Comprehensive Git operations with subprocess handling."""
 
     @property
@@ -235,7 +235,7 @@ class GitTool:
         return True, None
 
 
-class GitHubTool:
+class GitHubTool(ToolProtocol):
     """GitHub operations using GitHub REST API (requires GITHUB_TOKEN)."""
 
     @property
