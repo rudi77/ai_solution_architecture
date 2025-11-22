@@ -1,0 +1,34 @@
+# Development Profile Configuration
+# Used for local development with file-based persistence
+
+profile: dev
+
+# Persistence configuration
+persistence:
+  type: file  # Use file-based state manager
+  work_dir: .taskforce  # Working directory for states and todolists
+
+# LLM configuration
+llm:
+  config_path: configs/llm_config.yaml  # Path to LLM config
+  default_model: main  # Default model alias
+
+# Logging configuration
+logging:
+  level: DEBUG  # Verbose logging for development
+  format: console  # Human-readable console output
+
+# Tool configuration (optional, for future extensibility)
+tools:
+  enabled:
+    - web_search
+    - web_fetch
+    - python
+    - git
+    - github
+    - file_read
+    - file_write
+    - powershell
+    - llm
+    - ask_user
+

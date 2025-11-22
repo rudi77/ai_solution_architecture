@@ -1,0 +1,386 @@
+"""
+Application Layer - Agent Factory
+
+This module provides dependency injection factory for creating Agent instances
+with different infrastructure adapters based on configuration profiles.
+
+The factory adapts logic from Agent V2's agent_factory.py and Agent.create_agent()
+to work with the new Clean Architecture structure.
+
+Key Responsibilities:
+- Load configuration profiles (dev/staging/prod)
+- Instantiate infrastructure adapters (state managers, LLM providers, tools)
+- Wire dependencies into core domain Agent
+- Support both generic and RAG agent types
+"""
+
+import os
+from pathlib import Path
+from typing import Any, Optional
+
+import structlog
+import yaml
+
+from taskforce.core.domain.agent import Agent
+from taskforce.core.domain.plan import PlanGenerator
+from taskforce.core.interfaces.llm import LLMProviderProtocol
+from taskforce.core.interfaces.state import StateManagerProtocol
+from taskforce.core.interfaces.tools import ToolProtocol
+
+
+class AgentFactory:
+    """
+    Factory for creating agents with dependency injection.
+
+    Wires core domain objects with infrastructure adapters based on
+    configuration profiles (dev/staging/prod).
+
+    The factory follows the Agent V2 pattern but adapts it to Clean Architecture:
+    - Reads YAML configuration profiles
+    - Instantiates appropriate infrastructure adapters
+    - Injects dependencies into core Agent
+    - Supports both generic and RAG agent types
+    """
+
+    def __init__(self, config_dir: str = "configs"):
+        """
+        Initialize AgentFactory with configuration directory.
+
+        Args:
+            config_dir: Path to directory containing profile YAML files
+        """
+        self.config_dir = Path(config_dir)
+        self.logger = structlog.get_logger().bind(component="agent_factory")
+
+    def create_agent(
+        self,
+        profile: str = "dev",
+        mission: Optional[str] = None,
+        work_dir: Optional[str] = None,
+    ) -> Agent:
+        """
+        Create generic problem-solving agent.
+
+        Creates an agent with standard tools (web, git, file, shell, python, llm).
+        Uses the generic system prompt for general-purpose problem solving.
+
+        Args:
+            profile: Configuration profile name (dev/staging/prod)
+            mission: Optional mission description
+            work_dir: Optional override for work directory
+
+        Returns:
+            Agent instance with injected dependencies
+
+        Raises:
+            FileNotFoundError: If profile YAML not found
+            ValueError: If configuration is invalid
+
+        Example:
+            >>> factory = AgentFactory()
+            >>> agent = factory.create_agent(profile="dev")
+            >>> result = await agent.execute("Analyze data.csv", "session-123")
+        """
+        config = self._load_profile(profile)
+
+        # Override work_dir if provided
+        if work_dir:
+            config.setdefault("persistence", {})["work_dir"] = work_dir
+
+        self.logger.info(
+            "creating_agent",
+            profile=profile,
+            agent_type="generic",
+            work_dir=config.get("persistence", {}).get("work_dir", ".taskforce"),
+        )
+
+        # Instantiate infrastructure adapters
+        state_manager = self._create_state_manager(config)
+        llm_provider = self._create_llm_provider(config)
+        tools = self._create_native_tools(config, llm_provider)
+        todolist_manager = self._create_todolist_manager(config, llm_provider)
+        system_prompt = self._load_system_prompt("generic")
+
+        # Create domain agent with injected dependencies
+        return Agent(
+            state_manager=state_manager,
+            llm_provider=llm_provider,
+            tools=tools,
+            todolist_manager=todolist_manager,
+            system_prompt=system_prompt,
+        )
+
+    def create_rag_agent(
+        self,
+        profile: str = "dev",
+        user_context: Optional[dict[str, Any]] = None,
+        work_dir: Optional[str] = None,
+    ) -> Agent:
+        """
+        Create RAG-enabled agent for document retrieval.
+
+        Creates an agent with RAG tools (semantic search, list documents, get document)
+        in addition to standard tools. Uses RAG-specific system prompt.
+
+        Args:
+            profile: Configuration profile name (dev/staging/prod)
+            user_context: User context for security filtering (user_id, org_id, scope)
+            work_dir: Optional override for work directory
+
+        Returns:
+            Agent instance with RAG capabilities
+
+        Raises:
+            FileNotFoundError: If profile YAML not found
+            ValueError: If RAG configuration is missing or invalid
+
+        Example:
+            >>> factory = AgentFactory()
+            >>> agent = factory.create_rag_agent(
+            ...     profile="dev",
+            ...     user_context={"user_id": "user123", "org_id": "org456"}
+            ... )
+            >>> result = await agent.execute("What does the manual say?", "session-123")
+        """
+        config = self._load_profile(profile)
+
+        # Override work_dir if provided
+        if work_dir:
+            config.setdefault("persistence", {})["work_dir"] = work_dir
+
+        self.logger.info(
+            "creating_rag_agent",
+            profile=profile,
+            agent_type="rag",
+            work_dir=config.get("persistence", {}).get("work_dir", ".taskforce"),
+            has_user_context=user_context is not None,
+        )
+
+        # Instantiate infrastructure adapters
+        state_manager = self._create_state_manager(config)
+        llm_provider = self._create_llm_provider(config)
+
+        # RAG agent includes RAG tools in addition to native tools
+        tools = self._create_native_tools(config, llm_provider)
+        tools.extend(self._create_rag_tools(config, user_context))
+
+        todolist_manager = self._create_todolist_manager(config, llm_provider)
+        system_prompt = self._load_system_prompt("rag")
+
+        return Agent(
+            state_manager=state_manager,
+            llm_provider=llm_provider,
+            tools=tools,
+            todolist_manager=todolist_manager,
+            system_prompt=system_prompt,
+        )
+
+    def _load_profile(self, profile: str) -> dict:
+        """
+        Load configuration profile from YAML file.
+
+        Args:
+            profile: Profile name (dev/staging/prod)
+
+        Returns:
+            Configuration dictionary
+
+        Raises:
+            FileNotFoundError: If profile YAML not found
+        """
+        profile_path = self.config_dir / f"{profile}.yaml"
+
+        if not profile_path.exists():
+            self.logger.error(
+                "profile_not_found",
+                profile=profile,
+                path=str(profile_path),
+                hint="Ensure profile YAML exists in configs directory",
+            )
+            raise FileNotFoundError(f"Profile not found: {profile_path}")
+
+        with open(profile_path) as f:
+            config = yaml.safe_load(f)
+
+        self.logger.debug("profile_loaded", profile=profile, config_keys=list(config.keys()))
+        return config
+
+    def _create_state_manager(self, config: dict) -> StateManagerProtocol:
+        """
+        Create state manager based on configuration.
+
+        Args:
+            config: Configuration dictionary
+
+        Returns:
+            StateManager implementation (file-based or database)
+        """
+        persistence_config = config.get("persistence", {})
+        persistence_type = persistence_config.get("type", "file")
+
+        if persistence_type == "file":
+            from taskforce.infrastructure.persistence.file_state import FileStateManager
+
+            work_dir = persistence_config.get("work_dir", ".taskforce")
+            return FileStateManager(work_dir=work_dir)
+
+        elif persistence_type == "database":
+            from taskforce.infrastructure.persistence.db_state import DbStateManager
+
+            # Get database URL from config or environment
+            db_url_env = persistence_config.get("db_url_env", "DATABASE_URL")
+            db_url = os.getenv(db_url_env)
+
+            if not db_url:
+                raise ValueError(
+                    f"Database URL not found in environment variable: {db_url_env}"
+                )
+
+            return DbStateManager(db_url=db_url)
+
+        else:
+            raise ValueError(f"Unknown persistence type: {persistence_type}")
+
+    def _create_llm_provider(self, config: dict) -> LLMProviderProtocol:
+        """
+        Create LLM provider based on configuration.
+
+        Args:
+            config: Configuration dictionary
+
+        Returns:
+            LLM provider implementation (OpenAI)
+        """
+        from taskforce.infrastructure.llm.openai_service import OpenAIService
+
+        llm_config = config.get("llm", {})
+        config_path = llm_config.get("config_path", "configs/llm_config.yaml")
+
+        return OpenAIService(config_path=config_path)
+
+    def _create_native_tools(
+        self, config: dict, llm_provider: LLMProviderProtocol
+    ) -> list[ToolProtocol]:
+        """
+        Create native tools (web, git, file, shell, python, llm).
+
+        Args:
+            config: Configuration dictionary
+            llm_provider: LLM provider for LLMTool
+
+        Returns:
+            List of native tool instances
+        """
+        from taskforce.infrastructure.tools.native.ask_user_tool import AskUserTool
+        from taskforce.infrastructure.tools.native.file_tools import (
+            FileReadTool,
+            FileWriteTool,
+        )
+        from taskforce.infrastructure.tools.native.git_tools import GitHubTool, GitTool
+        from taskforce.infrastructure.tools.native.llm_tool import LLMTool
+        from taskforce.infrastructure.tools.native.python_tool import PythonTool
+        from taskforce.infrastructure.tools.native.shell_tool import PowerShellTool
+        from taskforce.infrastructure.tools.native.web_tools import (
+            WebFetchTool,
+            WebSearchTool,
+        )
+
+        # Standard tool set matching Agent V2
+        return [
+            WebSearchTool(),
+            WebFetchTool(),
+            PythonTool(),
+            GitHubTool(),
+            GitTool(),
+            FileReadTool(),
+            FileWriteTool(),
+            PowerShellTool(),
+            LLMTool(llm_service=llm_provider),  # Note: uses llm_service parameter
+            AskUserTool(),
+        ]
+
+    def _create_rag_tools(
+        self, config: dict, user_context: Optional[dict[str, Any]]
+    ) -> list[ToolProtocol]:
+        """
+        Create RAG tools (semantic search, list documents, get document).
+
+        Args:
+            config: Configuration dictionary
+            user_context: User context for security filtering
+
+        Returns:
+            List of RAG tool instances
+
+        Raises:
+            ValueError: If RAG configuration is missing
+        """
+        from taskforce.infrastructure.tools.rag.get_document import GetDocumentTool
+        from taskforce.infrastructure.tools.rag.list_documents import ListDocumentsTool
+        from taskforce.infrastructure.tools.rag.semantic_search import (
+            SemanticSearchTool,
+        )
+
+        rag_config = config.get("rag", {})
+
+        if not rag_config:
+            self.logger.warning(
+                "rag_config_missing",
+                hint="Add 'rag' section to profile YAML for RAG agent configuration",
+            )
+
+        # RAG tools get Azure AI Search config from environment internally via AzureSearchBase
+        # They only need user_context parameter for security filtering
+        return [
+            SemanticSearchTool(user_context=user_context),
+            ListDocumentsTool(user_context=user_context),
+            GetDocumentTool(user_context=user_context),
+        ]
+
+    def _create_todolist_manager(
+        self, config: dict, llm_provider: LLMProviderProtocol
+    ) -> PlanGenerator:
+        """
+        Create TodoList manager (PlanGenerator).
+
+        Args:
+            config: Configuration dictionary
+            llm_provider: LLM provider for plan generation
+
+        Returns:
+            PlanGenerator instance
+        """
+        # PlanGenerator is pure domain logic, no persistence concerns
+        # Persistence is handled by infrastructure layer if needed
+        return PlanGenerator(llm_provider=llm_provider)
+
+    def _load_system_prompt(self, agent_type: str) -> str:
+        """
+        Load system prompt for agent type.
+
+        Args:
+            agent_type: Agent type ("generic" or "rag")
+
+        Returns:
+            System prompt string
+
+        Raises:
+            ValueError: If agent type is unknown
+        """
+        if agent_type == "generic":
+            # Load generic system prompt
+            from taskforce.core.prompts.generic_system_prompt import (
+                GENERIC_SYSTEM_PROMPT,
+            )
+
+            return GENERIC_SYSTEM_PROMPT
+
+        elif agent_type == "rag":
+            # Load RAG system prompt
+            from taskforce.core.prompts.rag_system_prompt import RAG_SYSTEM_PROMPT
+
+            return RAG_SYSTEM_PROMPT
+
+        else:
+            raise ValueError(f"Unknown agent type: {agent_type}")
+
