@@ -1,0 +1,40 @@
+# Staging Profile Configuration
+# Used for staging environment with database persistence
+
+profile: staging
+
+# Persistence configuration
+persistence:
+  type: database  # Use database state manager
+  db_url_env: DATABASE_URL  # Environment variable for database URL
+
+# LLM configuration
+llm:
+  config_path: configs/llm_config.yaml  # Path to LLM config
+  default_model: main  # Default model alias
+
+# RAG configuration (optional, for RAG agents)
+rag:
+  endpoint_env: AZURE_SEARCH_ENDPOINT  # Environment variable for Azure AI Search endpoint
+  api_key_env: AZURE_SEARCH_API_KEY  # Environment variable for API key
+  index_name: staging-docs  # Index name for staging documents
+
+# Logging configuration
+logging:
+  level: INFO  # Standard logging for staging
+  format: json  # Structured JSON logs for aggregation
+
+# Tool configuration (optional, for future extensibility)
+tools:
+  enabled:
+    - web_search
+    - web_fetch
+    - python
+    - git
+    - github
+    - file_read
+    - file_write
+    - powershell
+    - llm
+    - ask_user
+
