@@ -29,6 +29,8 @@ import litellm
 import structlog
 import yaml
 
+from taskforce.core.interfaces.llm import LLMProviderProtocol
+
 
 @dataclass
 class RetryPolicy:
@@ -40,7 +42,7 @@ class RetryPolicy:
     retry_on_errors: List[str] = field(default_factory=list)
 
 
-class OpenAIService:
+class OpenAIService(LLMProviderProtocol):
     """
     Centralized service for LLM interactions with model-aware parameter mapping.
 
