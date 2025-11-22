@@ -105,7 +105,32 @@ class Agent:
         state = await self.state_manager.load_state(session_id)
         execution_history: list[dict[str, Any]] = []
 
-        # 2. Get or create TodoList
+        # 2. Check if we have a completed todolist and should reset for new query
+        # (Multi-turn conversation support - don't reuse completed todolists)
+        if not state.get("pending_question"):  # Not answering a question
+            todolist_id = state.get("todolist_id")
+            if todolist_id:
+                try:
+                    existing_todolist = await self.todolist_manager.load_todolist(todolist_id)
+                    if self._is_plan_complete(existing_todolist):
+                        # Completed todolist detected - reset for new query
+                        self.logger.info(
+                            "completed_todolist_detected_resetting",
+                            session_id=session_id,
+                            old_todolist_id=todolist_id,
+                        )
+                        # Remove todolist reference to force creation of new one
+                        state.pop("todolist_id", None)
+                        await self.state_manager.save_state(session_id, state)
+                except FileNotFoundError:
+                    # Todolist file missing, will create new one anyway
+                    self.logger.warning(
+                        "todolist_file_not_found",
+                        session_id=session_id,
+                        todolist_id=todolist_id,
+                    )
+
+        # 3. Get or create TodoList
         todolist = await self._get_or_create_todolist(state, mission, session_id)
 
         # 3. Execute ReAct loop
@@ -152,12 +177,14 @@ class Agent:
             # Check if we need to pause for user input
             if observation.requires_user:
                 self.logger.info("execution_paused_for_user", session_id=session_id)
+                pending_q = state.get("pending_question")
                 return ExecutionResult(
                     session_id=session_id,
                     status="paused",
-                    final_message="Waiting for user input",
+                    final_message=pending_q.get("question", "Waiting for user input") if pending_q else "Waiting for user input",
                     execution_history=execution_history,
                     todolist_id=todolist.todolist_id,
+                    pending_question=pending_q,
                 )
 
             # Check for early completion
@@ -178,10 +205,11 @@ class Agent:
                     todolist_id=todolist.todolist_id,
                 )
 
-        # 4. Determine final status
+        # 4. Determine final status and extract final message
         if self._is_plan_complete(todolist):
             status = "completed"
-            final_message = "All tasks completed successfully"
+            # Try to extract meaningful response from last completed step
+            final_message = self._extract_final_message(todolist, execution_history)
         elif iteration >= self.MAX_ITERATIONS:
             status = "failed"
             final_message = f"Exceeded maximum iterations ({self.MAX_ITERATIONS})"
@@ -442,7 +470,7 @@ Error Message: {error.get('error', 'Unknown error')}
 
         try:
             self.logger.info("tool_execution_start", tool=action.tool, step=step.position)
-            result = await tool.execute(action.tool_input or {})
+            result = await tool.execute(**(action.tool_input or {}))
             self.logger.info("tool_execution_end", tool=action.tool, step=step.position)
 
             return Observation(success=result.get("success", False), data=result, error=result.get("error"))
@@ -516,4 +544,99 @@ Error Message: {error.get('error', 'Unknown error')}
     def _is_plan_complete(self, todolist: TodoList) -> bool:
         """Check if all steps are completed or skipped."""
         return all(s.status in (TaskStatus.COMPLETED, TaskStatus.SKIPPED) for s in todolist.items)
+
+    def _extract_final_message(
+        self, todolist: TodoList, execution_history: list[dict[str, Any]]
+    ) -> str:
+        """
+        Extract meaningful final message from completed plan.
+
+        Tries to find the actual response/result from the last completed step,
+        rather than just returning "All tasks completed successfully".
+
+        Args:
+            todolist: Completed TodoList
+            execution_history: Execution history with thoughts and observations
+
+        Returns:
+            Meaningful final message or default completion message
+        """
+        # Try to find the last completed step's result
+        for step in reversed(todolist.items):
+            if step.status == TaskStatus.COMPLETED and step.execution_result:
+                result = step.execution_result
+                
+                # Debug logging
+                self.logger.debug(
+                    "extracting_final_message",
+                    step_position=step.position,
+                    result_type=type(result).__name__,
+                    result_keys=list(result.keys()) if isinstance(result, dict) else None,
+                )
+                
+                # If it's a tool result with generated text (e.g., llm_generate)
+                if isinstance(result, dict):
+                    # Check for common result fields
+                    if "generated_text" in result:
+                        text = result["generated_text"]
+                        if text and isinstance(text, str) and len(text.strip()) > 0:
+                            return text.strip()
+                    if "response" in result:
+                        text = result["response"]
+                        if text and isinstance(text, str) and len(text.strip()) > 0:
+                            return text.strip()
+                    if "content" in result:
+                        text = result["content"]
+                        if text and isinstance(text, str) and len(text.strip()) > 0:
+                            return text.strip()
+                    if "result" in result and isinstance(result["result"], str):
+                        text = result["result"]
+                        if text and len(text.strip()) > 0:
+                            return text.strip()
+                    
+                    # Handle list-based results (e.g., rag_list_documents)
+                    if result.get("success"):
+                        # Check for documents list
+                        if "documents" in result:
+                            docs = result.get("documents", [])
+                            count = len(docs)
+                            if count == 0:
+                                return "No documents found in the knowledge base."
+                            elif count == 1:
+                                doc_title = docs[0].get("document_title", "Unknown")
+                                return f"Found 1 document: {doc_title}"
+                            else:
+                                titles = [doc.get("document_title", "Unknown") for doc in docs[:5]]
+                                titles_str = "\n".join(f"  - {title}" for title in titles)
+                                more = f"\n  ... and {count - 5} more" if count > 5 else ""
+                                return f"Found {count} documents:\n{titles_str}{more}"
+                        
+                        # Check for results list (e.g., semantic_search)
+                        if "results" in result:
+                            results_list = result.get("results", [])
+                            count = len(results_list)
+                            if count == 0:
+                                return "No results found."
+                            else:
+                                return f"Found {count} results."
+                    
+                    # For successful tool executions, try to extract meaningful data
+                    if result.get("success") and "data" in result:
+                        data = result["data"]
+                        if isinstance(data, dict):
+                            if "generated_text" in data:
+                                text = data["generated_text"]
+                                if text and isinstance(text, str) and len(text.strip()) > 0:
+                                    return text.strip()
+                            if "response" in data:
+                                text = data["response"]
+                                if text and isinstance(text, str) and len(text.strip()) > 0:
+                                    return text.strip()
+                            if "content" in data:
+                                text = data["content"]
+                                if text and isinstance(text, str) and len(text.strip()) > 0:
+                                    return text.strip()
+
+        # Fallback: return default message
+        return "All tasks completed successfully"
 
