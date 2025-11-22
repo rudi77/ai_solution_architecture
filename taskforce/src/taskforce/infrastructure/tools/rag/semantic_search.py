@@ -247,10 +247,25 @@ class SemanticSearchTool:
                 index_name=self.azure_base.content_index
             )
 
+            # Format result string for agent consumption
+            if not results:
+                result_text = "No relevant information found."
+            else:
+                count = len(results)
+                result_text = f"Found {count} relevant results:\n"
+                for i, res in enumerate(results[:5], 1):
+                    title = res.get('document_title', 'Unknown')
+                    content_preview = res.get('content', '')[:100] + "..." if res.get('content') else "[Image content]"
+                    result_text += f"{i}. {title} (Score: {res.get('score', 0):.2f})\n   {content_preview}\n"
+                
+                if count > 5:
+                    result_text += f"... and {count - 5} more results.\n"
+
             return {
                 "success": True,
                 "results": results,
-                "result_count": len(results)
+                "result_count": len(results),
+                "result": result_text  # Human-readable summary for agent
             }
 
         except Exception as e:
