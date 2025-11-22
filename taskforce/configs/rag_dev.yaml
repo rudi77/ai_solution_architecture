@@ -1,0 +1,80 @@
+# RAG Agent Development Configuration
+# This configuration creates an agent specialized for document retrieval and semantic search
+
+profile: rag_dev
+
+# Persistence configuration
+persistence:
+  type: file  # Use file-based state manager for development
+  work_dir: .taskforce_rag  # Working directory for RAG agent states
+
+# LLM configuration
+llm:
+  config_path: configs/llm_config.yaml  # Path to LLM config
+  default_model: powerful-1  # Use powerful model for RAG
+
+# RAG configuration
+rag:
+  endpoint_env: AZURE_SEARCH_ENDPOINT  # Environment variable for Azure AI Search endpoint
+  api_key_env: AZURE_SEARCH_API_KEY  # Environment variable for API key
+  index_name: dev-docs  # Index name for development documents
+
+# Logging configuration
+logging:
+  level: DEBUG  # Verbose logging for development
+  format: console  # Human-readable console output
+
+# Tool configuration for RAG agent
+# RAG agent includes semantic search tools plus standard tools
+tools:
+  # RAG-specific tools
+  - type: SemanticSearchTool
+    module: taskforce.infrastructure.tools.rag.semantic_search
+    params:
+      user_context:
+        user_id: "default_user"
+        org_id: "default_org"
+        scope: "shared"
+  
+  - type: ListDocumentsTool
+    module: taskforce.infrastructure.tools.rag.list_documents
+    params:
+      user_context:
+        user_id: "default_user"
+        org_id: "default_org"
+        scope: "shared"
+  
+  - type: GetDocumentTool
+    module: taskforce.infrastructure.tools.rag.get_document
+    params:
+      user_context:
+        user_id: "default_user"
+        org_id: "default_org"
+        scope: "shared"
+  
+  # Standard tools
+  - type: LLMTool
+    module: taskforce.infrastructure.tools.native.llm_tool
+    params:
+      model_alias: "powerful-1"  # Use powerful model for RAG agent
+  
+  - type: PythonTool
+    module: taskforce.infrastructure.tools.native.python_tool
+    params: {}
+  
+  - type: FileReadTool
+    module: taskforce.infrastructure.tools.native.file_tools
+    params: {}
+  
+  - type: FileWriteTool
+    module: taskforce.infrastructure.tools.native.file_tools
+    params: {}
+  
+  - type: PowerShellTool
+    module: taskforce.infrastructure.tools.native.shell_tool
+    params: {}
+  
+  - type: AskUserTool
+    module: taskforce.infrastructure.tools.native.ask_user_tool
+    params: {}
+

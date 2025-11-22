@@ -160,9 +160,9 @@ class AgentFactory:
         state_manager = self._create_state_manager(config)
         llm_provider = self._create_llm_provider(config)
 
-        # RAG agent includes RAG tools in addition to native tools
+        # RAG agent tools are now specified in config (includes RAG + native tools)
+        # user_context is injected into RAG tools via config params
         tools = self._create_native_tools(config, llm_provider)
-        tools.extend(self._create_rag_tools(config, user_context))
 
         todolist_manager = self._create_todolist_manager(config, llm_provider)
         system_prompt = self._load_system_prompt("rag")
@@ -262,7 +262,7 @@ class AgentFactory:
         self, config: dict, llm_provider: LLMProviderProtocol
     ) -> list[ToolProtocol]:
         """
-        Create native tools (web, git, file, shell, python, llm).
+        Create native tools from configuration.
 
         Args:
             config: Configuration dictionary
@@ -270,6 +270,30 @@ class AgentFactory:
 
         Returns:
             List of native tool instances
+        """
+        tools_config = config.get("tools", [])
+        
+        if not tools_config:
+            # Fallback to default tool set if no config provided
+            return self._create_default_tools(llm_provider)
+        
+        tools = []
+        for tool_spec in tools_config:
+            tool = self._instantiate_tool(tool_spec, llm_provider)
+            if tool:
+                tools.append(tool)
+        
+        return tools
+    
+    def _create_default_tools(self, llm_provider: LLMProviderProtocol) -> list[ToolProtocol]:
+        """
+        Create default tool set (fallback when no config provided).
+
+        Args:
+            llm_provider: LLM provider for LLMTool
+
+        Returns:
+            List of default tool instances
         """
         from taskforce.infrastructure.tools.native.ask_user_tool import AskUserTool
         from taskforce.infrastructure.tools.native.file_tools import (
@@ -295,47 +319,91 @@ class AgentFactory:
             FileReadTool(),
             FileWriteTool(),
             PowerShellTool(),
-            LLMTool(llm_service=llm_provider),  # Note: uses llm_service parameter
+            LLMTool(llm_service=llm_provider),
             AskUserTool(),
         ]
+    
+    def _instantiate_tool(
+        self, tool_spec: dict, llm_provider: LLMProviderProtocol
+    ) -> Optional[ToolProtocol]:
+        """
+        Instantiate a tool from configuration specification.
+
+        Args:
+            tool_spec: Tool specification dict with type, module, and params
+            llm_provider: LLM provider for tools that need it
+
+        Returns:
+            Tool instance or None if instantiation fails
+        """
+        import importlib
+        
+        tool_type = tool_spec.get("type")
+        tool_module = tool_spec.get("module")
+        tool_params = tool_spec.get("params", {})
+        
+        if not tool_type or not tool_module:
+            self.logger.warning(
+                "invalid_tool_spec",
+                tool_type=tool_type,
+                tool_module=tool_module,
+                hint="Tool spec must include 'type' and 'module'",
+            )
+            return None
+        
+        try:
+            # Import the module
+            module = importlib.import_module(tool_module)
+            
+            # Get the tool class
+            tool_class = getattr(module, tool_type)
+            
+            # Special handling for LLMTool - inject llm_service
+            if tool_type == "LLMTool":
+                tool_params["llm_service"] = llm_provider
+            
+            # Instantiate the tool with params
+            tool_instance = tool_class(**tool_params)
+            
+            self.logger.debug(
+                "tool_instantiated",
+                tool_type=tool_type,
+                tool_name=tool_instance.name,
+            )
+            
+            return tool_instance
+            
+        except Exception as e:
+            self.logger.error(
+                "tool_instantiation_failed",
+                tool_type=tool_type,
+                tool_module=tool_module,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
+            return None
 
     def _create_rag_tools(
         self, config: dict, user_context: Optional[dict[str, Any]]
     ) -> list[ToolProtocol]:
         """
-        Create RAG tools (semantic search, list documents, get document).
+        Create RAG tools from configuration (deprecated - tools now in config).
+
+        This method is kept for backward compatibility but RAG tools should
+        now be specified in the tools section of the config file.
 
         Args:
             config: Configuration dictionary
             user_context: User context for security filtering
 
         Returns:
-            List of RAG tool instances
-
-        Raises:
-            ValueError: If RAG configuration is missing
+            Empty list (tools should be in config)
         """
-        from taskforce.infrastructure.tools.rag.get_document import GetDocumentTool
-        from taskforce.infrastructure.tools.rag.list_documents import ListDocumentsTool
-        from taskforce.infrastructure.tools.rag.semantic_search import (
-            SemanticSearchTool,
+        self.logger.warning(
+            "rag_tools_deprecated",
+            hint="RAG tools should now be specified in the 'tools' section of config YAML",
         )
-
-        rag_config = config.get("rag", {})
-
-        if not rag_config:
-            self.logger.warning(
-                "rag_config_missing",
-                hint="Add 'rag' section to profile YAML for RAG agent configuration",
-            )
-
-        # RAG tools get Azure AI Search config from environment internally via AzureSearchBase
-        # They only need user_context parameter for security filtering
-        return [
-            SemanticSearchTool(user_context=user_context),
-            ListDocumentsTool(user_context=user_context),
-            GetDocumentTool(user_context=user_context),
-        ]
+        return []
 
     def _create_todolist_manager(
         self, config: dict, llm_provider: LLMProviderProtocol

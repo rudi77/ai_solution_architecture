@@ -11,9 +11,9 @@ persistence:
 # LLM configuration
 llm:
   config_path: configs/llm_config.yaml  # Path to LLM config
-  default_model: main  # Default model alias
+  default_model: main  # Use main model for staging
 
-# RAG configuration (optional, for RAG agents)
+# RAG configuration (for RAG agents)
 rag:
   endpoint_env: AZURE_SEARCH_ENDPOINT  # Environment variable for Azure AI Search endpoint
   api_key_env: AZURE_SEARCH_API_KEY  # Environment variable for API key
@@ -22,19 +22,51 @@ rag:
 # Logging configuration
 logging:
   level: INFO  # Standard logging for staging
-  format: json  # Structured JSON logs for aggregation
+  format: json  # Structured JSON logs
 
-# Tool configuration (optional, for future extensibility)
+# Tool configuration
+# Each tool requires:
+#   - type: The class name of the tool
+#   - module: The fully qualified Python module path
+#   - params: Dictionary of parameters to pass to the tool constructor
 tools:
-  enabled:
-    - web_search
-    - web_fetch
-    - python
-    - git
-    - github
-    - file_read
-    - file_write
-    - powershell
-    - llm
-    - ask_user
-
+  - type: WebSearchTool
+    module: taskforce.infrastructure.tools.native.web_tools
+    params: {}
+  
+  - type: WebFetchTool
+    module: taskforce.infrastructure.tools.native.web_tools
+    params: {}
+  
+  - type: PythonTool
+    module: taskforce.infrastructure.tools.native.python_tool
+    params: {}
+  
+  - type: GitHubTool
+    module: taskforce.infrastructure.tools.native.git_tools
+    params: {}
+  
+  - type: GitTool
+    module: taskforce.infrastructure.tools.native.git_tools
+    params: {}
+  
+  - type: FileReadTool
+    module: taskforce.infrastructure.tools.native.file_tools
+    params: {}
+  
+  - type: FileWriteTool
+    module: taskforce.infrastructure.tools.native.file_tools
+    params: {}
+  
+  - type: PowerShellTool
+    module: taskforce.infrastructure.tools.native.shell_tool
+    params: {}
+  
+  - type: LLMTool
+    module: taskforce.infrastructure.tools.native.llm_tool
+    params:
+      model_alias: "main"  # Use main model for staging
+  
+  - type: AskUserTool
+    module: taskforce.infrastructure.tools.native.ask_user_tool
+    params: {}
