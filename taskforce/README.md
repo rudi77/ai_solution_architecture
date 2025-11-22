@@ -9,9 +9,8 @@ Taskforce is a refactored and production-ready version of Agent V2, designed for
 - **Clean Architecture**: Strict layer separation (Core → Application → Infrastructure → API)
 - **Protocol-based Design**: Swappable implementations for state management, LLM providers, and tools
 - **Dual Interfaces**: CLI (Typer + Rich) and REST API (FastAPI)
-- **Production Persistence**: PostgreSQL with SQLAlchemy for state management
+- **Production Persistence**: PostgreSQL with SQLAlchemy for state management (or file-based for dev)
 - **RAG Capabilities**: Azure AI Search integration for semantic search
-- **Docker Compose Deployment**: Self-hosted multi-container orchestration
 
 ## Architecture
 
@@ -45,8 +44,6 @@ taskforce/
 
 - **Python**: 3.11 or higher
 - **Package Manager**: `uv` (not pip/venv)
-- **Docker**: 24.0+ (for production deployment)
-- **Docker Compose**: 2.23+ (for multi-container orchestration)
 
 ## Setup
 
@@ -75,68 +72,76 @@ cp .env.example .env
 # Edit .env and set required variables:
 # - OPENAI_API_KEY (required for LLM calls)
 # - GITHUB_TOKEN (optional, for GitHub API operations)
-# - DATABASE_URL (for production PostgreSQL)
+# - DATABASE_URL (optional, for production PostgreSQL)
 ```
 
 ## Usage
 
-### CLI Commands
+Taskforce can be used either as a Command Line Interface (CLI) tool or as a REST API service.
+
+### CLI Tool
+
+The `taskforce` command is available after activating the virtual environment.
 
 ```powershell
 # Activate virtual environment first
 .\.venv\Scripts\Activate.ps1
 
-# Show help
+# Show help and available commands
 taskforce --help
 
 # Run a mission
 taskforce run mission "Analyze sales data and create visualization"
 
+# Run a mission with specific profile and session resumption
+taskforce run mission "Analyze data" --profile dev --session <session-id>
+
 # Interactive chat mode
 taskforce chat
 
-# List available tools
+# Manage Tools
 taskforce tools list
-
-# Show tool details
 taskforce tools inspect python
 
-# List sessions
+# Manage Sessions
 taskforce sessions list
-
-# Show session details
 taskforce sessions show <session-id>
 
-# Show configuration
+# View Configuration
 taskforce config show
 ```
 
-### REST API
+### REST API Service
+
+The REST API allows you to integrate the agent into other applications.
+
+#### Start the Server
 
 ```powershell
-# Start API server
-uvicorn taskforce.api.server:app --reload --port 8000
+# Start API server using uvicorn
+uvicorn taskforce.api.server:app --host 0.0.0.0 --port 8000 --reload
 
-# API Documentation
+# Access API Documentation
 # http://localhost:8000/docs (Swagger UI)
 # http://localhost:8000/redoc (ReDoc)
 ```
 
-### Docker Compose Deployment
+#### Key Endpoints
 
-```powershell
-# Start all services (API + PostgreSQL)
-docker-compose up -d
+- **Execute Mission**: `POST /api/v1/execution/execute`
+  - Body: `{"mission": "...", "profile": "dev"}`
+  - Returns: Final result and session ID.
 
-# View logs
-docker-compose logs -f taskforce
+- **Execute Mission (Streaming)**: `POST /api/v1/execution/execute/stream`
+  - Body: `{"mission": "...", "profile": "dev"}`
+  - Returns: Server-Sent Events (SSE) stream of progress updates.
 
-# Run database migrations
-docker-compose exec taskforce alembic upgrade head
+- **Manage Sessions**:
+  - `GET /api/v1/sessions`: List all sessions.
+  - `GET /api/v1/sessions/{session_id}`: Get session details.
+  - `POST /api/v1/sessions`: Create a new session.
 
-# Stop services
-docker-compose down
-```
+- **Health Check**: `GET /health`
 
 ## Development
 
@@ -165,98 +170,18 @@ uv run black src/taskforce tests
 # Lint code
 uv run ruff check src/taskforce tests
 
-# Fix linting issues
-uv run ruff check --fix src/taskforce tests
-
 # Type checking
 uv run mypy src/taskforce
 ```
 
-### Project Structure
-
-- **Core Layer**: Pure business logic, no external dependencies
-- **Infrastructure Layer**: Implementations of protocols (DB, LLM, tools)
-- **Application Layer**: Orchestration and dependency injection
-- **API Layer**: CLI and REST interfaces
-
 ## Configuration Profiles
 
-Taskforce supports multiple deployment profiles:
+Taskforce supports multiple deployment profiles loaded from `configs/{profile}.yaml`:
 
-- **dev**: File-based state, local LLM, verbose logging
+- **dev**: File-based state, local LLM/OpenAI, verbose logging
 - **staging**: PostgreSQL state, cloud LLM, structured logging
 - **prod**: PostgreSQL state, cloud LLM, JSON logging, monitoring
-
-Profiles are loaded from `configs/{profile}.yaml` and can be overridden with environment variables.
-
-## Key Features
-
-### ReAct Agent Loop
-
-1. **Load State**: Restore session from persistence
-2. **Set Mission**: Define objective
-3. **Create Plan**: Generate TodoList via LLM
-4. **Execute Loop**: For each pending task:
-   - Generate **Thought** (reasoning)
-   - Execute **Action** (tool call, ask_user, replan, complete)
-   - Record **Observation** (result)
-   - Update state
-5. **Complete**: All tasks resolved or mission achieved
-
-### Available Tools
-
-**Native Tools**:
-- PythonTool: Execute Python code in isolated namespace
-- FileReadTool / FileWriteTool: File system operations
-- GitTool / GitHubTool: Git operations and GitHub API
-- PowerShellTool: Shell command execution (Windows-first)
-- WebSearchTool / WebFetchTool: HTTP requests and web scraping
-- LLMTool: Nested LLM calls for sub-tasks
-- AskUserTool: User interaction
-
-**RAG Tools** (optional):
-- SemanticSearchTool: Vector search in Azure AI Search
-- ListDocumentsTool: Document listing with metadata
-- GetDocumentTool: Document retrieval by ID
-
-### State Management
-
-- **Development**: File-based JSON state in `{work_dir}/states/`
-- **Production**: PostgreSQL with JSONB columns for flexibility
-- **Migration Path**: Protocol-based design enables seamless transition
-
-## Relationship to Agent V2
-
-Taskforce is a production refactoring of `capstone/agent_v2` with:
-
-- **Clean Architecture**: Strict layer separation vs. mixed concerns
-- **Production Persistence**: PostgreSQL vs. file-only
-- **Dual Interfaces**: CLI + REST API vs. CLI-only
-- **Protocol-based**: Swappable implementations vs. hardcoded
-- **Docker Deployment**: Container-first vs. local-only
-
-Agent V2 continues to function independently in `capstone/agent_v2` as the proof-of-concept.
-
-## Contributing
-
-1. Follow coding standards in `docs/architecture/coding-standards.md`
-2. Write tests for all new functionality (≥90% coverage for core domain)
-3. Use Black for formatting, Ruff for linting
-4. Update documentation for API changes
-5. Run full test suite before committing
 
 ## License
 
 MIT License - see LICENSE file for details
-
-## Support
-
-- **Documentation**: See `docs/` directory
-- **Architecture**: `docs/architecture.md`
-- **PRD**: `docs/prd.md`
-- **Stories**: `docs/stories/`
-
----
-
-Built with ❤️ using Python 3.11, LiteLLM, FastAPI, and Clean Architecture principles.
-
