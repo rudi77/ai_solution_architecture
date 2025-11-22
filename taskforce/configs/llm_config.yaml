@@ -84,7 +84,7 @@ providers:
   
   azure:
     # Set to true to enable Azure OpenAI (disables OpenAI provider)
-    enabled: false
+    enabled: true
     
     # -------------------------------------------------------------------------
     # Required Environment Variables
@@ -132,6 +132,9 @@ providers:
     deployment_mapping:
       main: "gpt-4.1"
       fast: "gpt-4.1-mini"
+      powerful: "gpt-5"
+      powerful-1: "gpt-5-1"
+      legacy: "gpt-4-turbo"
     
     # -------------------------------------------------------------------------
     # Hybrid Configuration Strategy
