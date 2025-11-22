@@ -30,6 +30,7 @@ dependencies = [
     "ruff>=0.1.0",
     "black>=23.0",
     "mypy>=1.7",
+    "azure-search-documents>=11.6.0",
 ]
 
 [project.scripts]
