@@ -1,0 +1,156 @@
+"""
+LLM Provider Protocol
+
+This module defines the protocol interface for LLM service implementations.
+LLM providers abstract access to language models (OpenAI, Azure OpenAI, Anthropic, etc.)
+with unified interfaces for completion and generation.
+
+Protocol implementations must handle:
+- Model alias resolution (e.g., "main" -> "gpt-4-turbo")
+- Parameter mapping between model families (GPT-4 vs GPT-5)
+- Retry logic with exponential backoff
+- Structured logging with token usage tracking
+"""
+
+from typing import Any, Protocol
+
+
+class LLMProviderProtocol(Protocol):
+    """
+    Protocol defining the contract for LLM service providers.
+
+    Implementations provide unified access to language models with:
+    - Model alias resolution (config-based mapping)
+    - Automatic parameter mapping for different model families
+    - Retry logic with configurable backoff
+    - Token usage tracking and logging
+    - Support for both chat completion and single-prompt generation
+
+    Configuration:
+        Implementations typically load configuration from YAML files containing:
+        - default_model: Default model alias (e.g., "main")
+        - models: Dict mapping aliases to actual model names
+        - model_params: Default parameters per model family
+        - retry_policy: Max attempts, backoff multiplier, timeout
+        - providers: Provider-specific settings (API keys, endpoints)
+
+    Thread Safety:
+        Implementations must be safe for concurrent use across multiple
+        async tasks (no shared mutable state without synchronization).
+
+    Error Handling:
+        Methods return Dict with "success": bool field. On failure:
+        - "success": False
+        - "error": Error message string
+        - "error_type": Exception class name
+        - Additional provider-specific error details
+    """
+
+    async def complete(
+        self, messages: list[dict[str, Any]], model: str | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        """
+        Perform LLM chat completion with retry logic.
+
+        The implementation should:
+        1. Resolve model alias to actual model name/deployment
+        2. Merge default parameters with provided kwargs
+        3. Map parameters for model family (GPT-4 vs GPT-5)
+        4. Call LLM API with retry logic (exponential backoff)
+        5. Extract content and usage statistics
+        6. Log token usage and latency
+        7. Return standardized result dictionary
+
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys.
+                     Roles: "system", "user", "assistant"
+            model: Model alias (e.g., "main", "fast") or None for default.
+                  Resolved via configuration to actual model name.
+            **kwargs: Additional parameters (temperature, max_tokens, etc.).
+                     Override default parameters for the model.
+
+        Returns:
+            Dictionary with:
+            - success: bool - True if completion succeeded
+            - content: str - Generated text (if successful)
+            - usage: Dict - Token counts (total_tokens, prompt_tokens, completion_tokens)
+            - model: str - Actual model name used
+            - latency_ms: int - Request latency in milliseconds
+            - error: str - Error message (if failed)
+            - error_type: str - Exception class name (if failed)
+
+        Example:
+            >>> result = await llm_provider.complete(
+            ...     messages=[
+            ...         {"role": "system", "content": "You are a helpful assistant"},
+            ...         {"role": "user", "content": "What is 2+2?"}
+            ...     ],
+            ...     model="main",
+            ...     temperature=0.7,
+            ...     max_tokens=100
+            ... )
+            >>> if result["success"]:
+            ...     print(f"Response: {result['content']}")
+            ...     print(f"Tokens: {result['usage']['total_tokens']}")
+            ... else:
+            ...     print(f"Error: {result['error']}")
+
+        Parameter Mapping:
+            GPT-4 models accept: temperature, top_p, max_tokens, frequency_penalty, presence_penalty
+            GPT-5 models accept: effort, reasoning, max_tokens
+
+            If temperature is provided for GPT-5, it's mapped to effort:
+            - temperature < 0.3 -> effort: "low"
+            - temperature 0.3-0.7 -> effort: "medium"
+            - temperature > 0.7 -> effort: "high"
+        """
+        ...
+
+    async def generate(
+        self,
+        prompt: str,
+        context: dict[str, Any] | None = None,
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """
+        Generate text from a single prompt (convenience wrapper around complete).
+
+        The implementation should:
+        1. Format prompt with context (if provided) as YAML
+        2. Create messages list with single user message
+        3. Call complete() method
+        4. Add "generated_text" alias for "content" field
+        5. Return result dictionary
+
+        Args:
+            prompt: The prompt text (user message)
+            context: Optional structured context to include before prompt.
+                    Formatted as YAML and prepended to prompt.
+            model: Model alias or None for default
+            **kwargs: Additional parameters passed to complete()
+
+        Returns:
+            Same as complete(), with additional field:
+            - generated_text: str - Alias for "content" field (if successful)
+
+        Example:
+            >>> result = await llm_provider.generate(
+            ...     prompt="Summarize the following data",
+            ...     context={"data": [1, 2, 3, 4, 5]},
+            ...     model="fast",
+            ...     max_tokens=200
+            ... )
+            >>> if result["success"]:
+            ...     print(result["generated_text"])
+
+        Context Formatting:
+            If context is provided, the full prompt becomes:
+            ```
+            Context:
+            <context as YAML>
+
+            Task: <prompt>
+            ```
+        """
+        ...
