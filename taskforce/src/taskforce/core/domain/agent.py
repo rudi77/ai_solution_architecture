@@ -1,0 +1,519 @@
+"""
+Core Agent Domain Logic
+
+This module implements the core ReAct (Reason + Act) execution loop for the agent.
+The Agent class orchestrates the execution of missions by:
+1. Loading/creating TodoLists (plans)
+2. Iterating through TodoItems
+3. For each item: Generate Thought → Execute Action → Record Observation
+4. Persisting state and plan updates
+
+The Agent is dependency-injected with protocol interfaces, making it testable
+without any infrastructure dependencies (no I/O, no external services).
+"""
+
+import json
+from dataclasses import asdict
+from typing import Any
+
+import structlog
+
+from taskforce.core.domain.events import Action, ActionType, Observation, Thought
+from taskforce.core.domain.models import ExecutionResult
+from taskforce.core.interfaces.llm import LLMProviderProtocol
+from taskforce.core.interfaces.state import StateManagerProtocol
+from taskforce.core.interfaces.todolist import (
+    TaskStatus,
+    TodoItem,
+    TodoList,
+    TodoListManagerProtocol,
+)
+from taskforce.core.interfaces.tools import ToolProtocol
+
+
+class Agent:
+    """
+    Core ReAct agent with protocol-based dependencies.
+
+    The Agent implements the ReAct (Reason + Act) execution pattern:
+    1. Load state and TodoList
+    2. For each pending TodoItem:
+       a. Generate Thought (reasoning + action decision)
+       b. Execute Action (tool call, ask user, complete, or replan)
+       c. Record Observation (success/failure + result data)
+    3. Update state and persist changes
+    4. Repeat until all items complete or mission goal achieved
+
+    All dependencies are injected via protocol interfaces, enabling
+    pure business logic testing without infrastructure concerns.
+    """
+
+    MAX_ITERATIONS = 50  # Safety limit to prevent infinite loops
+
+    def __init__(
+        self,
+        state_manager: StateManagerProtocol,
+        llm_provider: LLMProviderProtocol,
+        tools: list[ToolProtocol],
+        todolist_manager: TodoListManagerProtocol,
+        system_prompt: str,
+    ):
+        """
+        Initialize Agent with injected dependencies.
+
+        Args:
+            state_manager: Protocol for session state persistence
+            llm_provider: Protocol for LLM completions
+            tools: List of available tools implementing ToolProtocol
+            todolist_manager: Protocol for TodoList management
+            system_prompt: Base system prompt for LLM interactions
+        """
+        self.state_manager = state_manager
+        self.llm_provider = llm_provider
+        self.tools = {tool.name: tool for tool in tools}
+        self.todolist_manager = todolist_manager
+        self.system_prompt = system_prompt
+        self.logger = structlog.get_logger().bind(component="agent")
+
+    async def execute(self, mission: str, session_id: str) -> ExecutionResult:
+        """
+        Execute ReAct loop for given mission.
+
+        Main entry point for agent execution. Orchestrates the complete
+        ReAct cycle from mission initialization through plan execution
+        to final result.
+
+        Workflow:
+        1. Load or initialize session state
+        2. Create or load TodoList for mission
+        3. Execute ReAct loop until completion or pause
+        4. Return execution result with status and history
+
+        Args:
+            mission: User's mission description (what to accomplish)
+            session_id: Unique session identifier for state persistence
+
+        Returns:
+            ExecutionResult with status, message, and execution history
+
+        Raises:
+            RuntimeError: If LLM calls fail or critical errors occur
+        """
+        self.logger.info("execute_start", session_id=session_id, mission=mission[:100])
+
+        # 1. Load or initialize state
+        state = await self.state_manager.load_state(session_id)
+        execution_history: list[dict[str, Any]] = []
+
+        # 2. Get or create TodoList
+        todolist = await self._get_or_create_todolist(state, mission, session_id)
+
+        # 3. Execute ReAct loop
+        iteration = 0
+        while not self._is_plan_complete(todolist) and iteration < self.MAX_ITERATIONS:
+            iteration += 1
+            self.logger.info("react_iteration", session_id=session_id, iteration=iteration)
+
+            # Get next actionable step
+            current_step = self._get_next_actionable_step(todolist)
+            if not current_step:
+                self.logger.info("no_actionable_steps", session_id=session_id)
+                break
+
+            self.logger.info(
+                "step_start",
+                session_id=session_id,
+                step=current_step.position,
+                description=current_step.description[:50],
+            )
+
+            # Generate Thought
+            context = self._build_thought_context(current_step, todolist, state)
+            thought = await self._generate_thought(context)
+            execution_history.append(
+                {"type": "thought", "step": current_step.position, "data": asdict(thought)}
+            )
+
+            # Execute Action
+            observation = await self._execute_action(thought.action, current_step, state, session_id)
+            execution_history.append(
+                {
+                    "type": "observation",
+                    "step": current_step.position,
+                    "data": asdict(observation),
+                }
+            )
+
+            # Handle observation and update step status
+            await self._process_observation(
+                current_step, observation, thought.action, todolist, state, session_id
+            )
+
+            # Check if we need to pause for user input
+            if observation.requires_user:
+                self.logger.info("execution_paused_for_user", session_id=session_id)
+                return ExecutionResult(
+                    session_id=session_id,
+                    status="paused",
+                    final_message="Waiting for user input",
+                    execution_history=execution_history,
+                    todolist_id=todolist.todolist_id,
+                )
+
+            # Check for early completion
+            if thought.action.type == ActionType.COMPLETE:
+                self.logger.info("early_completion", session_id=session_id)
+                # Mark remaining pending steps as skipped
+                for step in todolist.items:
+                    if step.status == TaskStatus.PENDING:
+                        step.status = TaskStatus.SKIPPED
+                await self.todolist_manager.update_todolist(todolist)
+                await self.state_manager.save_state(session_id, state)
+
+                return ExecutionResult(
+                    session_id=session_id,
+                    status="completed",
+                    final_message=thought.action.summary or "Mission completed",
+                    execution_history=execution_history,
+                    todolist_id=todolist.todolist_id,
+                )
+
+        # 4. Determine final status
+        if self._is_plan_complete(todolist):
+            status = "completed"
+            final_message = "All tasks completed successfully"
+        elif iteration >= self.MAX_ITERATIONS:
+            status = "failed"
+            final_message = f"Exceeded maximum iterations ({self.MAX_ITERATIONS})"
+        else:
+            status = "failed"
+            final_message = "Execution stopped with incomplete tasks"
+
+        self.logger.info("execute_complete", session_id=session_id, status=status)
+
+        return ExecutionResult(
+            session_id=session_id,
+            status=status,
+            final_message=final_message,
+            execution_history=execution_history,
+            todolist_id=todolist.todolist_id,
+        )
+
+    async def _get_or_create_todolist(
+        self, state: dict[str, Any], mission: str, session_id: str
+    ) -> TodoList:
+        """Get existing TodoList or create new one."""
+        todolist_id = state.get("todolist_id")
+
+        if todolist_id:
+            try:
+                todolist = await self.todolist_manager.load_todolist(todolist_id)
+                self.logger.info("todolist_loaded", session_id=session_id, todolist_id=todolist_id)
+                return todolist
+            except FileNotFoundError:
+                self.logger.warning(
+                    "todolist_not_found", session_id=session_id, todolist_id=todolist_id
+                )
+
+        # Create new TodoList
+        tools_desc = self._get_tools_description()
+        answers = state.get("answers", {})
+        todolist = await self.todolist_manager.create_todolist(
+            mission=mission, tools_desc=tools_desc, answers=answers
+        )
+
+        state["todolist_id"] = todolist.todolist_id
+        await self.state_manager.save_state(session_id, state)
+
+        self.logger.info(
+            "todolist_created",
+            session_id=session_id,
+            todolist_id=todolist.todolist_id,
+            items=len(todolist.items),
+        )
+
+        return todolist
+
+    def _get_tools_description(self) -> str:
+        """Build formatted description of available tools."""
+        descriptions = []
+        for tool in self.tools.values():
+            params = json.dumps(tool.parameters_schema, indent=2)
+            descriptions.append(f"Tool: {tool.name}\nDescription: {tool.description}\nParameters: {params}")
+        return "\n\n".join(descriptions)
+
+    def _get_next_actionable_step(self, todolist: TodoList) -> TodoItem | None:
+        """Find next step that can be executed."""
+        for step in sorted(todolist.items, key=lambda s: s.position):
+            # Skip completed steps
+            if step.status == TaskStatus.COMPLETED:
+                continue
+
+            # Check if pending with dependencies met
+            if step.status == TaskStatus.PENDING:
+                deps_met = all(
+                    any(s.position == dep and s.status == TaskStatus.COMPLETED for s in todolist.items)
+                    for dep in step.dependencies
+                )
+                if deps_met:
+                    return step
+
+            # Check if failed but has retries remaining
+            if step.status == TaskStatus.FAILED and step.attempts < step.max_attempts:
+                return step
+
+        return None
+
+    def _build_thought_context(
+        self, step: TodoItem, todolist: TodoList, state: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Build context for thought generation."""
+        # Collect results from previous steps
+        previous_results = [
+            {
+                "step": s.position,
+                "description": s.description,
+                "tool": s.chosen_tool,
+                "result": s.execution_result,
+                "status": s.status.value,
+            }
+            for s in todolist.items
+            if s.execution_result and s.position < step.position
+        ]
+
+        # Extract error from current step if this is a retry
+        current_error = None
+        if step.execution_result and not step.execution_result.get("success"):
+            current_error = {
+                "error": step.execution_result.get("error"),
+                "type": step.execution_result.get("type"),
+                "hints": step.execution_result.get("hints", []),
+                "attempt": step.attempts,
+                "max_attempts": step.max_attempts,
+            }
+
+        return {
+            "current_step": step,
+            "current_error": current_error,
+            "previous_results": previous_results[-5:],  # Last 5 results
+            "available_tools": self._get_tools_description(),
+            "user_answers": state.get("answers", {}),
+        }
+
+    async def _generate_thought(self, context: dict[str, Any]) -> Thought:
+        """Generate thought using LLM."""
+        current_step = context["current_step"]
+
+        # Build prompt
+        schema_hint = {
+            "step_ref": "int",
+            "rationale": "string (<= 2 sentences)",
+            "action": {
+                "type": "tool_call|ask_user|complete|replan",
+                "tool": "string|null (for tool_call)",
+                "tool_input": "object (for tool_call)",
+                "question": "string (for ask_user)",
+                "answer_key": "string (for ask_user)",
+                "summary": "string (for complete)",
+            },
+            "expected_outcome": "string",
+            "confidence": "float (0-1, optional)",
+        }
+
+        # Build error context if retry
+        error_context = ""
+        if context.get("current_error"):
+            error = context["current_error"]
+            error_context = f"""
+PREVIOUS ATTEMPT FAILED (Attempt {error['attempt']}/{error['max_attempts']}):
+Error Type: {error.get('type', 'Unknown')}
+Error Message: {error.get('error', 'Unknown error')}
+"""
+            if error.get("hints"):
+                error_context += "\nHints to fix:\n"
+                for hint in error["hints"]:
+                    error_context += f"  - {hint}\n"
+
+        user_prompt = (
+            "You are the ReAct Execution Agent.\n"
+            "Analyze the current step and choose the best action.\n\n"
+            f"CURRENT_STEP:\n{json.dumps(asdict(current_step), indent=2)}\n\n"
+            f"{error_context}"
+            f"PREVIOUS_RESULTS:\n{json.dumps(context.get('previous_results', []), indent=2)}\n\n"
+            f"USER_ANSWERS:\n{json.dumps(context.get('user_answers', {}), indent=2)}\n\n"
+            f"AVAILABLE_TOOLS:\n{context.get('available_tools', '')}\n\n"
+            "Rules:\n"
+            "- Choose the appropriate tool to fulfill the step's acceptance criteria.\n"
+            "- If this is a retry, FIX the previous error using the hints provided.\n"
+            "- If information is missing, use ask_user action.\n"
+            "- If the step is already fulfilled, use complete action.\n"
+            "- Return STRICT JSON only matching this schema:\n"
+            f"{json.dumps(schema_hint, indent=2)}\n"
+        )
+
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        self.logger.info("llm_call_thought_start", step=current_step.position)
+
+        result = await self.llm_provider.complete(
+            messages=messages, model="main", response_format={"type": "json_object"}, temperature=0.2
+        )
+
+        if not result.get("success"):
+            self.logger.error(
+                "thought_generation_failed", step=current_step.position, error=result.get("error")
+            )
+            raise RuntimeError(f"LLM completion failed: {result.get('error')}")
+
+        raw_content = result["content"]
+        self.logger.info("llm_call_thought_end", step=current_step.position)
+
+        # Parse thought from JSON
+        try:
+            data = json.loads(raw_content)
+            action_data = data["action"]
+            action = Action(
+                type=ActionType(action_data["type"]),
+                tool=action_data.get("tool"),
+                tool_input=action_data.get("tool_input"),
+                question=action_data.get("question"),
+                answer_key=action_data.get("answer_key"),
+                summary=action_data.get("summary"),
+                replan_reason=action_data.get("replan_reason"),
+            )
+            thought = Thought(
+                step_ref=data["step_ref"],
+                rationale=data["rationale"],
+                action=action,
+                expected_outcome=data["expected_outcome"],
+                confidence=data.get("confidence", 1.0),
+            )
+            return thought
+        except (json.JSONDecodeError, KeyError) as e:
+            self.logger.error(
+                "thought_parse_failed",
+                step=current_step.position,
+                error=str(e),
+                raw_content=raw_content[:500],
+            )
+            raise RuntimeError(f"Failed to parse thought: {e}") from e
+
+    async def _execute_action(
+        self, action: Action, step: TodoItem, state: dict[str, Any], session_id: str
+    ) -> Observation:
+        """Execute action and return observation."""
+        if action.type == ActionType.TOOL_CALL:
+            return await self._execute_tool(action, step)
+
+        elif action.type == ActionType.ASK_USER:
+            # Store pending question in state
+            answer_key = action.answer_key or f"step_{step.position}_q{step.attempts}"
+            state["pending_question"] = {
+                "answer_key": answer_key,
+                "question": action.question,
+                "for_step": step.position,
+            }
+            await self.state_manager.save_state(session_id, state)
+
+            return Observation(
+                success=True,
+                data={"question": action.question, "answer_key": answer_key},
+                requires_user=True,
+            )
+
+        elif action.type == ActionType.COMPLETE:
+            return Observation(success=True, data={"summary": action.summary})
+
+        elif action.type == ActionType.REPLAN:
+            # Replanning would be handled by todolist_manager
+            return Observation(success=True, data={"replan_reason": action.replan_reason})
+
+        else:
+            return Observation(success=False, error=f"Unknown action type: {action.type}")
+
+    async def _execute_tool(self, action: Action, step: TodoItem) -> Observation:
+        """Execute tool and return observation."""
+        tool = self.tools.get(action.tool)
+        if not tool:
+            return Observation(success=False, error=f"Tool not found: {action.tool}")
+
+        try:
+            self.logger.info("tool_execution_start", tool=action.tool, step=step.position)
+            result = await tool.execute(action.tool_input or {})
+            self.logger.info("tool_execution_end", tool=action.tool, step=step.position)
+
+            return Observation(success=result.get("success", False), data=result, error=result.get("error"))
+        except Exception as e:
+            self.logger.error("tool_execution_exception", tool=action.tool, error=str(e))
+            return Observation(success=False, error=str(e))
+
+    async def _process_observation(
+        self,
+        step: TodoItem,
+        observation: Observation,
+        action: Action,
+        todolist: TodoList,
+        state: dict[str, Any],
+        session_id: str,
+    ) -> None:
+        """Process observation and update step status."""
+        # Update step with execution details
+        step.chosen_tool = action.tool
+        step.tool_input = action.tool_input
+        step.execution_result = observation.data
+        step.attempts += 1
+
+        # Initialize execution history if needed
+        if step.execution_history is None:
+            step.execution_history = []
+
+        # Track execution history
+        step.execution_history.append(
+            {
+                "tool": action.tool,
+                "success": observation.success,
+                "error": observation.error,
+                "attempt": step.attempts,
+            }
+        )
+
+        # Update status based on observation
+        if observation.success:
+            # Check acceptance criteria
+            if await self._check_acceptance(step, observation):
+                step.status = TaskStatus.COMPLETED
+                self.logger.info("step_completed", session_id=session_id, step=step.position)
+            else:
+                step.status = TaskStatus.FAILED
+                self.logger.warning(
+                    "acceptance_failed", session_id=session_id, step=step.position
+                )
+        else:
+            # Tool execution failed
+            if step.attempts >= step.max_attempts:
+                step.status = TaskStatus.FAILED
+                self.logger.error("step_exhausted", session_id=session_id, step=step.position)
+            else:
+                # Reset to PENDING for retry
+                step.status = TaskStatus.PENDING
+                self.logger.info(
+                    "retry_step", session_id=session_id, step=step.position, attempt=step.attempts
+                )
+
+        # Persist changes
+        await self.todolist_manager.update_todolist(todolist)
+        await self.state_manager.save_state(session_id, state)
+
+    async def _check_acceptance(self, step: TodoItem, observation: Observation) -> bool:
+        """Check if acceptance criteria are met."""
+        # Simple heuristic: if tool succeeded, step is fulfilled
+        # TODO: Later refine with LLM call for complex criteria
+        return observation.success
+
+    def _is_plan_complete(self, todolist: TodoList) -> bool:
+        """Check if all steps are completed or skipped."""
+        return all(s.status in (TaskStatus.COMPLETED, TaskStatus.SKIPPED) for s in todolist.items)
+
