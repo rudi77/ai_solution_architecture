@@ -208,3 +208,15 @@ def test_command_group_help():
     assert result.exit_code == 0
     assert "mission" in result.output
 
+
+def test_chat_with_rag_context():
+    """Test chat command with RAG user context parameters."""
+    result = runner.invoke(app, ["chat", "chat", "--help"])
+
+    # Should show help with RAG context options
+    assert result.exit_code == 0
+    assert "--user-id" in result.output
+    assert "--org-id" in result.output
+    assert "--scope" in result.output
+    assert "RAG context" in result.output
+
