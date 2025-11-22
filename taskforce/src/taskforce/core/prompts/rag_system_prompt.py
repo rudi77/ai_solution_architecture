@@ -43,6 +43,12 @@ Use this guide to select the right tool for the current task:
 → Use **rag_list_documents** with appropriate filters
 → Follow with **llm_generate** if user expects formatted list
 
+### For General Knowledge / Coding Tasks (Non-RAG)
+→ If the user asks for code generation, math, or general knowledge NOT specific to your documents:
+→ SKIP retrieval tools (rag_*)
+→ Use **llm_generate** directly to create the content (e.g., "Write a Python script...", "What is the capital of France?")
+→ Or use **python** for calculations/scripts
+
 ### For Synthesis Tasks (Any user question requiring an answer)
 → Always end with **llm_generate** to create the final response
 

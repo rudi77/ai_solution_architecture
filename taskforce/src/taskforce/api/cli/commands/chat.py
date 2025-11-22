@@ -57,83 +57,85 @@ def chat(
     console.print(f"[dim]Profile: {profile}[/dim]")
     console.print("[dim]Type 'exit' or 'quit' to end session[/dim]\n")
 
-    # Create agent once for the entire chat session
-    factory = AgentFactory()
+    async def run_chat_loop():
+        # Create agent once for the entire chat session
+        factory = AgentFactory()
+        
+        # If user context provided, create RAG agent with context
+        agent = None
+        if user_id or org_id or scope:
+            user_context = {}
+            if user_id:
+                user_context["user_id"] = user_id
+            if org_id:
+                user_context["org_id"] = org_id
+            if scope:
+                user_context["scope"] = scope
 
-    # If user context provided, create RAG agent with context
-    if user_id or org_id or scope:
-        user_context = {}
-        if user_id:
-            user_context["user_id"] = user_id
-        if org_id:
-            user_context["org_id"] = org_id
-        if scope:
-            user_context["scope"] = scope
-
-        try:
-            agent = factory.create_rag_agent(
-                profile=profile, user_context=user_context
-            )
-            console.print(
-                "[dim]RAG agent initialized with user context[/dim]\n"
-            )
-        except Exception as e:
-            console.print(
-                f"[yellow]Warning: Could not create RAG agent: {e}[/yellow]"
-            )
-            console.print("[dim]Falling back to standard agent[/dim]\n")
+            try:
+                agent = factory.create_rag_agent(
+                    profile=profile, user_context=user_context
+                )
+                console.print(
+                    "[dim]RAG agent initialized with user context[/dim]\n"
+                )
+            except Exception as e:
+                console.print(
+                    f"[yellow]Warning: Could not create RAG agent: {e}[/yellow]"
+                )
+                console.print("[dim]Falling back to standard agent[/dim]\n")
+        
+        if not agent:
             agent = factory.create_agent(profile=profile)
-    else:
-        agent = factory.create_agent(profile=profile)
-        console.print("[dim]Agent initialized[/dim]\n")
+            console.print("[dim]Agent initialized[/dim]\n")
 
-    session_id = None
+        session_id = None
 
-    while True:
-        # Get user input
-        try:
-            user_input = Prompt.ask("[bold green]You[/bold green]")
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]Goodbye![/dim]")
-            break
+        while True:
+            # Get user input (blocking, but that's okay in CLI)
+            try:
+                user_input = Prompt.ask("[bold green]You[/bold green]")
+            except (KeyboardInterrupt, EOFError):
+                console.print("\n[dim]Goodbye![/dim]")
+                break
 
-        # Check for exit commands
-        if user_input.lower() in ["exit", "quit", "bye"]:
-            console.print("[dim]Goodbye![/dim]")
-            break
+            # Check for exit commands
+            if user_input.lower() in ["exit", "quit", "bye"]:
+                console.print("[dim]Goodbye![/dim]")
+                break
 
-        if not user_input.strip():
-            continue
+            if not user_input.strip():
+                continue
 
-        # Execute mission
-        console.print("[bold cyan]Agent[/bold cyan]: ", end="")
+            # Execute mission
+            console.print("[bold cyan]Agent[/bold cyan]: ", end="")
 
-        try:
-            # Generate session ID on first message
-            if not session_id:
-                import uuid
-                session_id = str(uuid.uuid4())
+            try:
+                # Generate session ID on first message
+                if not session_id:
+                    import uuid
+                    session_id = str(uuid.uuid4())
 
-            # Execute with the same agent instance
-            result = asyncio.run(
-                agent.execute(mission=user_input, session_id=session_id)
-            )
+                # Execute with the same agent instance
+                result = await agent.execute(mission=user_input, session_id=session_id)
 
-            # Display result message
-            console.print(result.final_message)
+                # Display result message
+                console.print(result.final_message)
 
-            # If there's a pending question, show it prominently
-            if result.status == "paused" and result.pending_question:
-                question = result.pending_question.get("question", "")
-                if question and question != result.final_message:
-                    console.print(f"[yellow]Question: {question}[/yellow]")
+                # If there's a pending question, show it prominently
+                if result.status == "paused" and result.pending_question:
+                    question = result.pending_question.get("question", "")
+                    if question and question != result.final_message:
+                        console.print(f"[yellow]Question: {question}[/yellow]")
 
-            if verbose:
-                console.print(f"[dim]Session: {session_id}[/dim]")
+                if verbose:
+                    console.print(f"[dim]Session: {session_id}[/dim]")
 
-        except Exception as e:
-            console.print(f"[red]Error: {str(e)}[/red]")
-            if verbose:
-                import traceback
+            except Exception as e:
+                console.print(f"[red]Error: {str(e)}[/red]")
+                if verbose:
+                    import traceback
+                    console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
-                console.print(f"[dim]{traceback.format_exc()}[/dim]")
+    # Run the async loop
+    asyncio.run(run_chat_loop())

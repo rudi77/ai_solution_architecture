@@ -303,9 +303,27 @@ class GetDocumentTool:
                 search_latency_ms=latency_ms
             )
 
+            # Format result string for agent consumption
+            result_text = (
+                f"Document: {document['document_title']}\n"
+                f"ID: {document['document_id']}\n"
+                f"Type: {document['document_type']}\n"
+                f"Chunks: {document['chunk_count']}\n"
+                f"Content Types: {'Text' if has_text else ''} {'Images' if has_images else ''}"
+            )
+            
+            if include_chunk_content and chunks:
+                result_text += "\n\nContent Preview:\n"
+                # Add preview of first few chunks
+                for i, chunk in enumerate(chunks[:3]):
+                    content = chunk.get('content_text', '')
+                    if content:
+                        result_text += f"--- Chunk {i+1} ---\n{content[:200]}...\n"
+
             return {
                 "success": True,
-                "document": document
+                "document": document,
+                "result": result_text  # Human-readable summary for agent
             }
 
         except Exception as e:

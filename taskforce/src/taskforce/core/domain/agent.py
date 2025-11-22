@@ -190,10 +190,16 @@ class Agent:
             # Check for early completion
             if thought.action.type == ActionType.COMPLETE:
                 self.logger.info("early_completion", session_id=session_id)
+                
+                # Mark current step as completed and save summary as result
+                current_step.status = TaskStatus.COMPLETED
+                current_step.execution_result = {"response": thought.action.summary}
+                
                 # Mark remaining pending steps as skipped
                 for step in todolist.items:
                     if step.status == TaskStatus.PENDING:
                         step.status = TaskStatus.SKIPPED
+                
                 await self.todolist_manager.update_todolist(todolist)
                 await self.state_manager.save_state(session_id, state)
 
@@ -593,32 +599,6 @@ Error Message: {error.get('error', 'Unknown error')}
                         text = result["result"]
                         if text and len(text.strip()) > 0:
                             return text.strip()
-                    
-                    # Handle list-based results (e.g., rag_list_documents)
-                    if result.get("success"):
-                        # Check for documents list
-                        if "documents" in result:
-                            docs = result.get("documents", [])
-                            count = len(docs)
-                            if count == 0:
-                                return "No documents found in the knowledge base."
-                            elif count == 1:
-                                doc_title = docs[0].get("document_title", "Unknown")
-                                return f"Found 1 document: {doc_title}"
-                            else:
-                                titles = [doc.get("document_title", "Unknown") for doc in docs[:5]]
-                                titles_str = "\n".join(f"  - {title}" for title in titles)
-                                more = f"\n  ... and {count - 5} more" if count > 5 else ""
-                                return f"Found {count} documents:\n{titles_str}{more}"
-                        
-                        # Check for results list (e.g., semantic_search)
-                        if "results" in result:
-                            results_list = result.get("results", [])
-                            count = len(results_list)
-                            if count == 0:
-                                return "No results found."
-                            else:
-                                return f"Found {count} results."
                     
                     # For successful tool executions, try to extract meaningful data
                     if result.get("success") and "data" in result:

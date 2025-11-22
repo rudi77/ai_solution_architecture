@@ -296,10 +296,23 @@ class ListDocumentsTool:
                 search_latency_ms=latency_ms
             )
 
+            # Format result string for agent consumption
+            if not documents:
+                result_text = "No documents found in the knowledge base."
+            else:
+                count = len(documents)
+                result_text = f"Found {count} documents:\n"
+                for i, doc in enumerate(documents[:10], 1):
+                    result_text += f"{i}. {doc.get('document_title', 'Unknown')} (ID: {doc.get('document_id')})\n"
+                
+                if count > 10:
+                    result_text += f"... and {count - 10} more.\n"
+
             return {
                 "success": True,
                 "documents": documents,
-                "count": len(documents)
+                "count": len(documents),
+                "result": result_text  # Human-readable summary for agent
             }
 
         except Exception as e:

@@ -21,22 +21,12 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 import structlog
 
 from taskforce.core.interfaces.llm import LLMProviderProtocol
-
-
-class TaskStatus(str, Enum):
-    """Task execution status."""
-
-    PENDING = "PENDING"
-    IN_PROGRESS = "IN_PROGRESS"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    SKIPPED = "SKIPPED"
+from taskforce.core.interfaces.todolist import TaskStatus
 
 
 def parse_task_status(value: Any) -> TaskStatus:
@@ -62,6 +52,9 @@ def parse_task_status(value: Any) -> TaskStatus:
         "DONE": "COMPLETED",
         "COMPLETE": "COMPLETED",
         "FAIL": "FAILED",
+        "ERROR": "FAILED",
+        "SKIP": "SKIPPED",
+        "SKIPPED": "SKIPPED",
     }
     normalized = alias.get(text, text)
     try:
