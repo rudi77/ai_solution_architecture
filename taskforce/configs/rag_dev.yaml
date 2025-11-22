@@ -11,7 +11,7 @@ persistence:
 # LLM configuration
 llm:
   config_path: configs/llm_config.yaml  # Path to LLM config
-  default_model: powerful-1  # Use powerful model for RAG
+  default_model: main  # Use gpt-4.1 (powerful-1/gpt-5-1 deployment not available)
 
 # RAG configuration
 # RAG tools read directly from environment variables (see AzureSearchBase)
@@ -66,7 +66,7 @@ tools:
   - type: LLMTool
     module: taskforce.infrastructure.tools.native.llm_tool
     params:
-      model_alias: "powerful-1"  # Use powerful model for RAG agent
+      model_alias: "main"  # Use powerful model for RAG agent
   
   - type: PythonTool
     module: taskforce.infrastructure.tools.native.python_tool

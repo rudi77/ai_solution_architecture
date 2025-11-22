@@ -24,6 +24,7 @@ class ExecutionResult:
         final_message: Human-readable summary of execution outcome
         execution_history: List of execution events (thoughts, actions, observations)
         todolist_id: ID of the TodoList that was executed (if any)
+        pending_question: Question awaiting user response (if status is paused)
     """
 
     session_id: str
@@ -31,4 +32,5 @@ class ExecutionResult:
     final_message: str
     execution_history: list[dict[str, Any]] = field(default_factory=list)
     todolist_id: str | None = None
+    pending_question: dict[str, Any] | None = None
 

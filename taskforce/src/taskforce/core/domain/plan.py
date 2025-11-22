@@ -439,6 +439,190 @@ class PlanGenerator:
 
         return todolist
 
+    async def create_todolist(
+        self,
+        mission: str,
+        tools_desc: str,
+        answers: dict[str, Any] | None = None,
+        model: str = "fast",
+        memory_manager: Any | None = None,
+    ) -> TodoList:
+        """
+        Create a new TodoList from mission description using LLM.
+
+        This is an alias for generate_plan() to satisfy the
+        TodoListManagerProtocol. The memory_manager parameter is
+        accepted but not used in this implementation.
+
+        Args:
+            mission: User's mission description
+            tools_desc: Formatted description of available tools
+            answers: Dict of question keys -> user answers
+            model: Model alias to use (default: "fast")
+            memory_manager: Optional memory manager (not used)
+
+        Returns:
+            TodoList with generated items, empty open_questions, notes
+
+        Raises:
+            RuntimeError: If LLM generation fails
+            ValueError: If JSON parsing fails
+        """
+        return await self.generate_plan(
+            mission, tools_desc, answers, model
+        )
+
+    async def load_todolist(self, todolist_id: str) -> TodoList:
+        """
+        Load a TodoList from storage by ID.
+
+        Note: PlanGenerator is pure domain logic without persistence.
+        This method raises NotImplementedError. Use a proper
+        TodoListManager implementation with persistence support.
+
+        Args:
+            todolist_id: Unique identifier for the TodoList
+
+        Raises:
+            NotImplementedError: PlanGenerator lacks persistence
+        """
+        raise NotImplementedError(
+            "PlanGenerator is pure domain logic without persistence. "
+            "Use TodoListManager from infrastructure layer for "
+            "load/save operations."
+        )
+
+    async def update_todolist(self, todolist: TodoList) -> TodoList:
+        """
+        Persist TodoList changes to storage.
+
+        Note: PlanGenerator is pure domain logic without persistence.
+        This method is a no-op and returns the todolist unchanged.
+        Use a proper TodoListManager implementation with persistence.
+
+        Args:
+            todolist: TodoList object with modifications
+
+        Returns:
+            The same TodoList object unchanged
+        """
+        self.logger.warning(
+            "update_todolist_noop",
+            hint="PlanGenerator doesn't persist. Use TodoListManager.",
+        )
+        return todolist
+
+    async def get_todolist(self, todolist_id: str) -> TodoList:
+        """
+        Get a TodoList by ID (alias for load_todolist).
+
+        Args:
+            todolist_id: Unique identifier for the TodoList
+
+        Raises:
+            NotImplementedError: PlanGenerator lacks persistence
+        """
+        return await self.load_todolist(todolist_id)
+
+    async def delete_todolist(self, todolist_id: str) -> bool:
+        """
+        Delete a TodoList from storage.
+
+        Note: PlanGenerator is pure domain logic without persistence.
+        This method raises NotImplementedError.
+
+        Args:
+            todolist_id: Unique identifier for the TodoList
+
+        Raises:
+            NotImplementedError: PlanGenerator lacks persistence
+        """
+        raise NotImplementedError(
+            "PlanGenerator is pure domain logic without persistence. "
+            "Use TodoListManager from infrastructure layer for "
+            "delete operations."
+        )
+
+    async def modify_step(
+        self,
+        todolist_id: str,
+        step_position: int,
+        modifications: dict[str, Any],
+    ) -> tuple[bool, str | None]:
+        """
+        Modify existing TodoItem parameters (replanning).
+
+        Note: PlanGenerator is pure domain logic without persistence.
+        This method raises NotImplementedError.
+
+        Args:
+            todolist_id: ID of the TodoList to modify
+            step_position: Position of the step to modify
+            modifications: Dict of field names -> new values
+
+        Raises:
+            NotImplementedError: PlanGenerator lacks persistence
+        """
+        raise NotImplementedError(
+            "PlanGenerator is pure domain logic without persistence. "
+            "Use TodoListManager from infrastructure layer for "
+            "modify operations."
+        )
+
+    async def decompose_step(
+        self,
+        todolist_id: str,
+        step_position: int,
+        subtasks: list[dict[str, Any]],
+    ) -> tuple[bool, list[int]]:
+        """
+        Split a TodoItem into multiple subtasks (replanning).
+
+        Note: PlanGenerator is pure domain logic without persistence.
+        This method raises NotImplementedError.
+
+        Args:
+            todolist_id: ID of the TodoList to modify
+            step_position: Position of the step to decompose
+            subtasks: List of dicts with "description" and
+                     "acceptance_criteria"
+
+        Raises:
+            NotImplementedError: PlanGenerator lacks persistence
+        """
+        raise NotImplementedError(
+            "PlanGenerator is pure domain logic without persistence. "
+            "Use TodoListManager from infrastructure layer for "
+            "decompose operations."
+        )
+
+    async def replace_step(
+        self,
+        todolist_id: str,
+        step_position: int,
+        new_step_data: dict[str, Any],
+    ) -> tuple[bool, int | None]:
+        """
+        Replace a TodoItem with an alternative approach (replanning).
+
+        Note: PlanGenerator is pure domain logic without persistence.
+        This method raises NotImplementedError.
+
+        Args:
+            todolist_id: ID of the TodoList to modify
+            step_position: Position of the step to replace
+            new_step_data: Dict with "description" and
+                          "acceptance_criteria"
+
+        Raises:
+            NotImplementedError: PlanGenerator lacks persistence
+        """
+        raise NotImplementedError(
+            "PlanGenerator is pure domain logic without persistence. "
+            "Use TodoListManager from infrastructure layer for "
+            "replace operations."
+        )
+
     def validate_dependencies(self, plan: TodoList) -> bool:
         """
         Validate that all dependencies are valid (no cycles, all positions exist).
