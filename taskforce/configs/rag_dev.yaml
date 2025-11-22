@@ -14,10 +14,20 @@ llm:
   default_model: powerful-1  # Use powerful model for RAG
 
 # RAG configuration
+# RAG tools read directly from environment variables (see AzureSearchBase)
 rag:
-  endpoint_env: AZURE_SEARCH_ENDPOINT  # Environment variable for Azure AI Search endpoint
-  api_key_env: AZURE_SEARCH_API_KEY  # Environment variable for API key
-  index_name: dev-docs  # Index name for development documents
+  # Required environment variables:
+  # - AZURE_SEARCH_ENDPOINT: https://your-service.search.windows.net
+  # - AZURE_SEARCH_API_KEY: your-api-key
+  # 
+  # Optional environment variables (with defaults):
+  # - AZURE_SEARCH_CONTENT_INDEX: content-blocks (default) - for semantic search
+  # - AZURE_SEARCH_DOCUMENTS_INDEX: documents-metadata (default) - for document listing
+  #
+  # Example .env file:
+  # AZURE_SEARCH_ENDPOINT=https://ms-ai-search-dev-01.search.windows.net
+  # AZURE_SEARCH_API_KEY=your-key
+  # AZURE_SEARCH_CONTENT_INDEX=multimodal-rag-test-gpt5-with-hash
 
 # Logging configuration
 logging:
