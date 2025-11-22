@@ -11,10 +11,10 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from taskforce.core.interfaces.tools import ApprovalRiskLevel
+from taskforce.core.interfaces.tools import ApprovalRiskLevel, ToolProtocol
 
 
-class ShellTool:
+class ShellTool(ToolProtocol):
     """Execute shell commands with safety limits and timeout."""
 
     @property
@@ -145,7 +145,7 @@ class ShellTool:
         return True, None
 
 
-class PowerShellTool:
+class PowerShellTool(ToolProtocol):
     """Execute PowerShell commands with safety limits and timeout."""
 
     @property

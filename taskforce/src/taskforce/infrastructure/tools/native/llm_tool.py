@@ -9,10 +9,10 @@ from typing import Any, Dict, Optional
 
 import structlog
 
-from taskforce.core.interfaces.tools import ApprovalRiskLevel
+from taskforce.core.interfaces.tools import ApprovalRiskLevel, ToolProtocol
 
 
-class LLMTool:
+class LLMTool(ToolProtocol):
     """Generic LLM tool for natural language text generation using LLM service."""
 
     def __init__(self, llm_service: Any, model_alias: str = "main"):

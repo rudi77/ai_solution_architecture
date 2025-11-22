@@ -10,10 +10,10 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from taskforce.core.interfaces.tools import ApprovalRiskLevel
+from taskforce.core.interfaces.tools import ApprovalRiskLevel, ToolProtocol
 
 
-class PythonTool:
+class PythonTool(ToolProtocol):
     """Execute Python code in isolated namespace with pre-imported libraries."""
 
     @property

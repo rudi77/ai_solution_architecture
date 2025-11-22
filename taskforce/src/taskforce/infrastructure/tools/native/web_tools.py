@@ -11,10 +11,10 @@ from typing import Any, Dict
 
 import aiohttp
 
-from taskforce.core.interfaces.tools import ApprovalRiskLevel
+from taskforce.core.interfaces.tools import ApprovalRiskLevel, ToolProtocol
 
 
-class WebSearchTool:
+class WebSearchTool(ToolProtocol):
     """Web search using DuckDuckGo (no API key required)."""
 
     @property
@@ -138,7 +138,7 @@ class WebSearchTool:
         return True, None
 
 
-class WebFetchTool:
+class WebFetchTool(ToolProtocol):
     """Fetch and extract content from URLs."""
 
     @property
