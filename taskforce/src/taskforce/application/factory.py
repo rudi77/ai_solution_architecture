@@ -24,6 +24,7 @@ import yaml
 from taskforce.core.domain.agent import Agent
 from taskforce.core.domain.plan import PlanGenerator
 from taskforce.core.interfaces.llm import LLMProviderProtocol
+from taskforce.infrastructure.persistence.file_todolist import FileTodoListManager
 from taskforce.core.interfaces.state import StateManagerProtocol
 from taskforce.core.interfaces.tools import ToolProtocol
 
@@ -161,8 +162,8 @@ class AgentFactory:
         llm_provider = self._create_llm_provider(config)
 
         # RAG agent tools are now specified in config (includes RAG + native tools)
-        # user_context is injected into RAG tools via config params
-        tools = self._create_native_tools(config, llm_provider)
+        # user_context is injected into RAG tools
+        tools = self._create_native_tools(config, llm_provider, user_context=user_context)
 
         todolist_manager = self._create_todolist_manager(config, llm_provider)
         system_prompt = self._load_system_prompt("rag")
@@ -259,7 +260,7 @@ class AgentFactory:
         return OpenAIService(config_path=config_path)
 
     def _create_native_tools(
-        self, config: dict, llm_provider: LLMProviderProtocol
+        self, config: dict, llm_provider: LLMProviderProtocol, user_context: Optional[dict[str, Any]] = None
     ) -> list[ToolProtocol]:
         """
         Create native tools from configuration.
@@ -267,6 +268,7 @@ class AgentFactory:
         Args:
             config: Configuration dictionary
             llm_provider: LLM provider for LLMTool
+            user_context: Optional user context for RAG tools
 
         Returns:
             List of native tool instances
@@ -279,7 +281,7 @@ class AgentFactory:
         
         tools = []
         for tool_spec in tools_config:
-            tool = self._instantiate_tool(tool_spec, llm_provider)
+            tool = self._instantiate_tool(tool_spec, llm_provider, user_context=user_context)
             if tool:
                 tools.append(tool)
         
@@ -324,7 +326,7 @@ class AgentFactory:
         ]
     
     def _instantiate_tool(
-        self, tool_spec: dict, llm_provider: LLMProviderProtocol
+        self, tool_spec: dict, llm_provider: LLMProviderProtocol, user_context: Optional[dict[str, Any]] = None
     ) -> Optional[ToolProtocol]:
         """
         Instantiate a tool from configuration specification.
@@ -332,6 +334,7 @@ class AgentFactory:
         Args:
             tool_spec: Tool specification dict with type, module, and params
             llm_provider: LLM provider for tools that need it
+            user_context: Optional user context for RAG tools
 
         Returns:
             Tool instance or None if instantiation fails
@@ -340,7 +343,7 @@ class AgentFactory:
         
         tool_type = tool_spec.get("type")
         tool_module = tool_spec.get("module")
-        tool_params = tool_spec.get("params", {})
+        tool_params = tool_spec.get("params", {}).copy()  # Copy to avoid modifying original
         
         if not tool_type or not tool_module:
             self.logger.warning(
@@ -361,6 +364,11 @@ class AgentFactory:
             # Special handling for LLMTool - inject llm_service
             if tool_type == "LLMTool":
                 tool_params["llm_service"] = llm_provider
+            
+            # Special handling for RAG tools - inject user_context
+            if tool_type in ["SemanticSearchTool", "ListDocumentsTool", "GetDocumentTool"]:
+                if user_context:
+                    tool_params["user_context"] = user_context
             
             # Instantiate the tool with params
             tool_instance = tool_class(**tool_params)
@@ -407,20 +415,19 @@ class AgentFactory:
 
     def _create_todolist_manager(
         self, config: dict, llm_provider: LLMProviderProtocol
-    ) -> PlanGenerator:
+    ) -> FileTodoListManager:
         """
-        Create TodoList manager (PlanGenerator).
+        Create TodoList manager with file persistence.
 
         Args:
             config: Configuration dictionary
             llm_provider: LLM provider for plan generation
 
         Returns:
-            PlanGenerator instance
+            FileTodoListManager instance with persistence support
         """
-        # PlanGenerator is pure domain logic, no persistence concerns
-        # Persistence is handled by infrastructure layer if needed
-        return PlanGenerator(llm_provider=llm_provider)
+        work_dir = config.get("persistence", {}).get("work_dir", ".taskforce")
+        return FileTodoListManager(work_dir=work_dir, llm_provider=llm_provider)
 
     def _load_system_prompt(self, agent_type: str) -> str:
         """

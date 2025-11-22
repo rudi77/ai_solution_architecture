@@ -7,7 +7,6 @@ import typer
 from rich.console import Console
 from rich.prompt import Prompt
 
-from taskforce.application.executor import AgentExecutor
 from taskforce.application.factory import AgentFactory
 
 app = typer.Typer(help="Interactive chat mode")
@@ -58,8 +57,8 @@ def chat(
     console.print(f"[dim]Profile: {profile}[/dim]")
     console.print("[dim]Type 'exit' or 'quit' to end session[/dim]\n")
 
-    # Create executor with optional user context for RAG
-    executor = AgentExecutor()
+    # Create agent once for the entire chat session
+    factory = AgentFactory()
 
     # If user context provided, create RAG agent with context
     if user_id or org_id or scope:
@@ -71,10 +70,8 @@ def chat(
         if scope:
             user_context["scope"] = scope
 
-        # Create factory and RAG agent with user context
-        factory = AgentFactory()
         try:
-            _ = factory.create_rag_agent(
+            agent = factory.create_rag_agent(
                 profile=profile, user_context=user_context
             )
             console.print(
@@ -85,6 +82,10 @@ def chat(
                 f"[yellow]Warning: Could not create RAG agent: {e}[/yellow]"
             )
             console.print("[dim]Falling back to standard agent[/dim]\n")
+            agent = factory.create_agent(profile=profile)
+    else:
+        agent = factory.create_agent(profile=profile)
+        console.print("[dim]Agent initialized[/dim]\n")
 
     session_id = None
 
@@ -108,17 +109,24 @@ def chat(
         console.print("[bold cyan]Agent[/bold cyan]: ", end="")
 
         try:
+            # Generate session ID on first message
+            if not session_id:
+                import uuid
+                session_id = str(uuid.uuid4())
+
+            # Execute with the same agent instance
             result = asyncio.run(
-                executor.execute_mission(
-                    mission=user_input, profile=profile, session_id=session_id
-                )
+                agent.execute(mission=user_input, session_id=session_id)
             )
 
-            # Store session ID for continuity
-            if not session_id:
-                session_id = result.session_id
-
+            # Display result message
             console.print(result.final_message)
+
+            # If there's a pending question, show it prominently
+            if result.status == "paused" and result.pending_question:
+                question = result.pending_question.get("question", "")
+                if question and question != result.final_message:
+                    console.print(f"[yellow]Question: {question}[/yellow]")
 
             if verbose:
                 console.print(f"[dim]Session: {session_id}[/dim]")
@@ -129,5 +137,3 @@ def chat(
                 import traceback
 
                 console.print(f"[dim]{traceback.format_exc()}[/dim]")
-
-
