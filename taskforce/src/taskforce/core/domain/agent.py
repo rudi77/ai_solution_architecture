@@ -20,6 +20,13 @@ import structlog
 
 from taskforce.core.domain.events import Action, ActionType, Observation, Thought
 from taskforce.core.domain.models import ExecutionResult
+from taskforce.core.domain.replanning import (
+    REPLAN_PROMPT_TEMPLATE,
+    ReplanStrategy,
+    StrategyType,
+    extract_failure_context,
+    validate_strategy,
+)
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.core.interfaces.state import StateManagerProtocol
 from taskforce.core.interfaces.todolist import (
@@ -160,7 +167,28 @@ class Agent:
             )
 
             # Execute Action
-            observation = await self._execute_action(thought.action, current_step, state, session_id)
+            if thought.action.type == ActionType.REPLAN:
+                # SPECIAL HANDLING FOR REPLAN
+                self.logger.info("executing_replan", session_id=session_id)
+                todolist = await self._replan(current_step, thought, todolist, state, session_id)
+                
+                # Create observation for history
+                observation = Observation(success=True, data={"replan": "executed"})
+                execution_history.append(
+                    {
+                        "type": "observation", 
+                        "step": current_step.position, 
+                        "data": asdict(observation)
+                    }
+                )
+                
+                # Restart loop to evaluate new plan
+                continue
+            
+            else:
+                # STANDARD HANDLING
+                observation = await self._execute_action(thought.action, current_step, state, session_id)
+            
             execution_history.append(
                 {
                     "type": "observation",
@@ -232,6 +260,128 @@ class Agent:
             execution_history=execution_history,
             todolist_id=todolist.todolist_id,
         )
+
+    async def _replan(
+        self, current_step: TodoItem, thought: Thought, todolist: TodoList, state: dict[str, Any], session_id: str
+    ) -> TodoList:
+        """
+        Intelligent Replanning: Modifies the plan based on failure context.
+        """
+        self.logger.info("replanning_start", session_id=session_id, step=current_step.position)
+        
+        # 1. Ask LLM for a recovery strategy
+        strategy = await self._generate_replan_strategy(current_step, todolist)
+        
+        if not strategy:
+             self.logger.warning("replan_failed_no_strategy", session_id=session_id)
+             # Fallback to skip if strategy generation failed
+             current_step.status = TaskStatus.SKIPPED
+             await self.todolist_manager.update_todolist(todolist)
+             return todolist
+
+        self.logger.info("replan_strategy_selected", 
+                        session_id=session_id, 
+                        type=strategy.strategy_type.value,
+                        reasoning=strategy.rationale)
+
+        # 2. Apply the strategy to the TodoList entity (In-Memory)
+        if strategy.strategy_type == StrategyType.RETRY_WITH_PARAMS:
+            # Modify the current step (e.g. clarify description or criteria)
+            new_params = strategy.modifications.get("new_parameters", {})
+            if new_params:
+                 current_step.tool_input = new_params
+            current_step.status = TaskStatus.PENDING # Reset status
+            current_step.replan_count += 1
+            
+        elif strategy.strategy_type == StrategyType.SWAP_TOOL:
+             current_step.chosen_tool = strategy.modifications.get("new_tool")
+             current_step.tool_input = strategy.modifications.get("new_parameters", {})
+             current_step.status = TaskStatus.PENDING
+             current_step.replan_count += 1
+             
+        elif strategy.strategy_type == StrategyType.DECOMPOSE_TASK:
+            # Replace current step with multiple smaller steps
+            new_items = []
+            start_pos = current_step.position
+            
+            # Create new sub-items
+            subtasks = strategy.modifications.get("subtasks", [])
+            for i, item_data in enumerate(subtasks):
+                new_item = TodoItem(
+                    position=start_pos + i,
+                    description=item_data["description"],
+                    acceptance_criteria=item_data["acceptance_criteria"],
+                    dependencies=current_step.dependencies, # Inherit dependencies
+                    status=TaskStatus.PENDING
+                )
+                new_items.append(new_item)
+            
+            if new_items:
+                # Remove old item and insert new ones
+                # We need to shift positions of all subsequent items
+                shift_offset = len(new_items) - 1
+                
+                # 1. Remove current
+                if current_step in todolist.items:
+                    todolist.items.remove(current_step)
+                
+                # 2. Shift subsequent items
+                for item in todolist.items:
+                    if item.position > start_pos:
+                        item.position += shift_offset
+                        
+                # 3. Add new items
+                todolist.items.extend(new_items)
+                todolist.items.sort(key=lambda x: x.position)
+            
+        elif strategy.strategy_type == StrategyType.SKIP:
+            current_step.status = TaskStatus.SKIPPED
+            
+        # 3. Persist the modified plan
+        await self.todolist_manager.update_todolist(todolist)
+        
+        return todolist
+
+    async def _generate_replan_strategy(
+        self, current_step: TodoItem, todolist: TodoList
+    ) -> ReplanStrategy | None:
+        """
+        Asks the LLM how to fix the broken plan.
+        """
+        # Context building
+        context = extract_failure_context(current_step)
+        context["available_tools"] = self._get_tools_description()
+        
+        # Render prompt
+        user_prompt = REPLAN_PROMPT_TEMPLATE.format(**context)
+        
+        result = await self.llm_provider.complete(
+            messages=[
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            model="main", # Use the smart model for replanning
+            response_format={"type": "json_object"},
+            temperature=0.1
+        )
+        
+        if not result.get("success"):
+            self.logger.error("replan_llm_failed", error=result.get("error"))
+            return None
+            
+        try:
+            data = json.loads(result["content"])
+            strategy = ReplanStrategy.from_dict(data)
+            
+            if validate_strategy(strategy, self.logger):
+                return strategy
+            else:
+                self.logger.warning("invalid_replan_strategy", strategy=data)
+                return None
+                
+        except (json.JSONDecodeError, ValueError) as e:
+            self.logger.error("replan_parse_failed", error=str(e), content=result["content"])
+            return None
 
     async def _get_or_create_todolist(
         self, state: dict[str, Any], mission: str, session_id: str
@@ -367,6 +517,9 @@ Error Message: {error.get('error', 'Unknown error')}
                 error_context += "\nHints to fix:\n"
                 for hint in error["hints"]:
                     error_context += f"  - {hint}\n"
+            
+            # Add hint to replan if persistent failure
+            error_context += "\nIf the error persists or the tool is unsuitable, choose 'replan' action to modify the task structure.\n"
 
         user_prompt = (
             "You are the ReAct Execution Agent.\n"
@@ -619,4 +772,3 @@ Error Message: {error.get('error', 'Unknown error')}
 
         # Fallback: return default message
         return "All tasks completed successfully"
-
