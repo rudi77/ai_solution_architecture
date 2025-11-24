@@ -13,8 +13,15 @@ console = Console()
 
 
 @app.command("list")
-def list_tools(profile: str = typer.Option("dev", "--profile", "-p", help="Configuration profile")):
+def list_tools(
+    ctx: typer.Context,
+    profile: str = typer.Option(None, "--profile", "-p", help="Configuration profile (overrides global --profile)")
+):
     """List available tools."""
+    # Get global options from context, allow local override
+    global_opts = ctx.obj or {}
+    profile = profile or global_opts.get("profile", "dev")
+    
     factory = AgentFactory()
     agent = asyncio.run(factory.create_agent(profile=profile))
 
@@ -31,10 +38,15 @@ def list_tools(profile: str = typer.Option("dev", "--profile", "-p", help="Confi
 
 @app.command("inspect")
 def inspect_tool(
+    ctx: typer.Context,
     tool_name: str = typer.Argument(..., help="Tool name to inspect"),
-    profile: str = typer.Option("dev", "--profile", "-p", help="Configuration profile"),
+    profile: str = typer.Option(None, "--profile", "-p", help="Configuration profile (overrides global --profile)"),
 ):
     """Inspect tool details and parameters."""
+    # Get global options from context, allow local override
+    global_opts = ctx.obj or {}
+    profile = profile or global_opts.get("profile", "dev")
+    
     factory = AgentFactory()
     agent = asyncio.run(factory.create_agent(profile=profile))
 

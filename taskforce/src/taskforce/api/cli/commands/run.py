@@ -15,13 +15,18 @@ console = Console()
 
 @app.command("mission")
 def run_mission(
+    ctx: typer.Context,
     mission: str = typer.Argument(..., help="Mission description"),
-    profile: str = typer.Option("dev", "--profile", "-p", help="Configuration profile"),
+    profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Configuration profile (overrides global --profile)"),
     session_id: Optional[str] = typer.Option(
         None, "--session", "-s", help="Resume existing session"
     ),
 ):
     """Execute an agent mission."""
+    # Get global options from context, allow local override
+    global_opts = ctx.obj or {}
+    profile = profile or global_opts.get("profile", "dev")
+    
     console.print(f"[bold blue]Starting mission:[/bold blue] {mission}")
     console.print(f"[dim]Profile: {profile}[/dim]\n")
 
