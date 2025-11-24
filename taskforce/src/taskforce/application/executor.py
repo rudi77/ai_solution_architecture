@@ -16,7 +16,7 @@ The AgentExecutor:
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncIterator, Callable, Optional
+from typing import AsyncIterator, Callable, Optional, List, Dict, Any
 
 import structlog
 
@@ -74,6 +74,7 @@ class AgentExecutor:
         mission: str,
         profile: str = "dev",
         session_id: Optional[str] = None,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
         progress_callback: Optional[Callable[[ProgressUpdate], None]] = None,
     ) -> ExecutionResult:
         """Execute agent mission with comprehensive orchestration.
@@ -92,6 +93,7 @@ class AgentExecutor:
             mission: Mission description (what to accomplish)
             profile: Configuration profile (dev/staging/prod)
             session_id: Optional existing session to resume
+            conversation_history: Optional conversation history for chat context
             progress_callback: Optional callback for progress updates
         
         Returns:
@@ -116,6 +118,12 @@ class AgentExecutor:
         try:
             # Create agent with appropriate adapters
             agent = self._create_agent(profile)
+
+            # Store conversation history in state if provided
+            if conversation_history:
+                state = await agent.state_manager.load_state(session_id) or {}
+                state["conversation_history"] = conversation_history
+                await agent.state_manager.save_state(session_id, state)
 
             # Execute ReAct loop with progress tracking
             result = await self._execute_with_progress(
@@ -153,6 +161,7 @@ class AgentExecutor:
         mission: str,
         profile: str = "dev",
         session_id: Optional[str] = None,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[ProgressUpdate]:
         """Execute mission with streaming progress updates.
         
@@ -163,6 +172,7 @@ class AgentExecutor:
             mission: Mission description
             profile: Configuration profile (dev/staging/prod)
             session_id: Optional existing session to resume
+            conversation_history: Optional conversation history for chat context
             
         Yields:
             ProgressUpdate objects for each execution event
@@ -192,6 +202,12 @@ class AgentExecutor:
         try:
             # Create agent
             agent = self._create_agent(profile)
+
+            # Store conversation history in state if provided
+            if conversation_history:
+                state = await agent.state_manager.load_state(session_id) or {}
+                state["conversation_history"] = conversation_history
+                await agent.state_manager.save_state(session_id, state)
 
             # Execute with streaming
             async for update in self._execute_streaming(agent, mission, session_id):
