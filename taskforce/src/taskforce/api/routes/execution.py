@@ -3,7 +3,7 @@ from dataclasses import asdict
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from taskforce.application.executor import AgentExecutor
 
 router = APIRouter()
@@ -14,6 +14,15 @@ class ExecuteMissionRequest(BaseModel):
     mission: str
     profile: str = "dev"
     session_id: Optional[str] = None
+    conversation_history: Optional[List[Dict[str, Any]]] = None
+    """Optional conversation history for chat integration.
+    
+    Format: List of message dictionaries with 'role' and 'content' keys.
+    Example: [
+        {"role": "user", "content": "Previous user message"},
+        {"role": "assistant", "content": "Previous assistant response"}
+    ]
+    """
 
 class ExecuteMissionResponse(BaseModel):
     """Response from mission execution."""
@@ -28,7 +37,8 @@ async def execute_mission(request: ExecuteMissionRequest):
         result = await executor.execute_mission(
             mission=request.mission,
             profile=request.profile,
-            session_id=request.session_id
+            session_id=request.session_id,
+            conversation_history=request.conversation_history
         )
         
         return ExecuteMissionResponse(
@@ -47,7 +57,8 @@ async def execute_mission_stream(request: ExecuteMissionRequest):
         async for update in executor.execute_mission_streaming(
             mission=request.mission,
             profile=request.profile,
-            session_id=request.session_id
+            session_id=request.session_id,
+            conversation_history=request.conversation_history
         ):
             # Serialize dataclass to JSON, handling datetime
             data = json.dumps(asdict(update), default=str)

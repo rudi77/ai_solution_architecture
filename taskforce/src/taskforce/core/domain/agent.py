@@ -161,6 +161,9 @@ class Agent:
 
             # Generate Thought
             context = self._build_thought_context(current_step, todolist, state)
+            # Add conversation history to context if available in state
+            if state.get("conversation_history"):
+                context["conversation_history"] = state.get("conversation_history")
             thought = await self._generate_thought(context)
             execution_history.append(
                 {"type": "thought", "step": current_step.position, "data": asdict(thought)}
@@ -538,10 +541,19 @@ Error Message: {error.get('error', 'Unknown error')}
             f"{json.dumps(schema_hint, indent=2)}\n"
         )
 
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        # Build messages with optional conversation history
+        messages = [{"role": "system", "content": self.system_prompt}]
+        
+        # Add conversation history if available in context
+        conversation_history = context.get("conversation_history")
+        if conversation_history:
+            # Filter out system messages from history (we already have one)
+            for msg in conversation_history:
+                if msg.get("role") != "system":
+                    messages.append(msg)
+        
+        # Add current user prompt
+        messages.append({"role": "user", "content": user_prompt})
 
         self.logger.info("llm_call_thought_start", step=current_step.position)
 
