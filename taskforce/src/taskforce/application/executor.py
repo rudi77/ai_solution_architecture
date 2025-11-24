@@ -117,7 +117,7 @@ class AgentExecutor:
 
         try:
             # Create agent with appropriate adapters
-            agent = self._create_agent(profile)
+            agent = await self._create_agent(profile)
 
             # Store conversation history in state if provided
             if conversation_history:

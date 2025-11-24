@@ -22,7 +22,8 @@ def list_tools(profile: str = typer.Option("dev", "--profile", "-p", help="Confi
     table.add_column("Name", style="cyan")
     table.add_column("Description", style="white")
 
-    for tool in agent.tools:
+    # agent.tools is a dict, iterate over values
+    for tool in agent.tools.values():
         table.add_row(tool.name, tool.description)
 
     console.print(table)
@@ -37,12 +38,8 @@ def inspect_tool(
     factory = AgentFactory()
     agent = asyncio.run(factory.create_agent(profile=profile))
 
-    # Find tool by name
-    tool = None
-    for t in agent.tools:
-        if t.name == tool_name:
-            tool = t
-            break
+    # agent.tools is a dict, access by key
+    tool = agent.tools.get(tool_name)
 
     if not tool:
         console.print(f"[red]Tool '{tool_name}' not found[/red]")
