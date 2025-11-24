@@ -15,8 +15,9 @@ console = Console()
 
 @app.command()
 def chat(
-    profile: str = typer.Option(
-        "dev", "--profile", "-p", help="Configuration profile"
+    ctx: typer.Context,
+    profile: Optional[str] = typer.Option(
+        None, "--profile", "-p", help="Configuration profile (overrides global --profile)"
     ),
     user_id: Optional[str] = typer.Option(
         None, "--user-id", help="User ID for RAG context"
@@ -27,8 +28,8 @@ def chat(
     scope: Optional[str] = typer.Option(
         None, "--scope", help="Scope for RAG context (shared/org/user)"
     ),
-    verbose: bool = typer.Option(
-        False, "--verbose", help="Enable verbose output"
+    verbose: Optional[bool] = typer.Option(
+        None, "--verbose", help="Enable verbose output (overrides global --verbose)"
     ),
 ):
     """Start interactive chat session with agent.
@@ -37,11 +38,16 @@ def chat(
 
     Examples:
         # Standard chat
-        taskforce chat --profile dev
+        taskforce --profile dev chat
 
         # RAG chat with user context
-        taskforce chat --profile rag_dev --user-id ms-user --org-id MS-corp
+        taskforce --profile rag_dev chat --user-id ms-user --org-id MS-corp
     """
+    # Get global options from context, allow local override
+    global_opts = ctx.obj or {}
+    profile = profile or global_opts.get("profile", "dev")
+    verbose = verbose if verbose is not None else global_opts.get("verbose", False)
+    
     console.print("[bold blue]Taskforce Interactive Chat[/bold blue]")
 
     # Display context info if RAG parameters provided

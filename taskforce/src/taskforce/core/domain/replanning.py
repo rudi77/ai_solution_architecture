@@ -103,19 +103,19 @@ REPLAN_PROMPT_TEMPLATE = """You are analyzing a failed task execution to recomme
 
 **Strategy Options:**
 
-1. **RETRY_WITH_PARAMS**: Adjust parameters and retry the same tool
+1. **retry_with_params**: Adjust parameters and retry the same tool
    - Use when: Parameter values were incorrect, missing, or need refinement
    - Modifications format: {{"new_parameters": {{"param_name": "new_value", ...}}}}
 
-2. **SWAP_TOOL**: Use a different tool to achieve the same goal
+2. **swap_tool**: Use a different tool to achieve the same goal
    - Use when: The chosen tool is fundamentally unsuitable for the task
    - Modifications format: {{"new_tool": "tool_name", "new_parameters": {{...}}}}
 
-3. **DECOMPOSE_TASK**: Split the task into smaller, more manageable subtasks
+3. **decompose_task**: Split the task into smaller, more manageable subtasks
    - Use when: Task is too complex or requires multiple sequential steps
    - Modifications format: {{"subtasks": [{{"description": "...", "acceptance_criteria": "...", "suggested_tool": "..."}}]}}
 
-4. **SKIP**: Skip the current task
+4. **skip**: Skip the current task
    - Use when: The task is impossible to complete, irrelevant, or blocking progress without a viable workaround
    - Modifications format: {{}}
 
@@ -129,7 +129,7 @@ Analyze the failure context above and determine the SINGLE BEST recovery strateg
 
 Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 {{
-  "strategy_type": "RETRY_WITH_PARAMS" | "SWAP_TOOL" | "DECOMPOSE_TASK" | "SKIP",
+  "strategy_type": "retry_with_params" | "swap_tool" | "decompose_task" | "skip",
   "rationale": "2-3 sentence explanation of why this strategy is best",
   "modifications": {{...strategy-specific structure as defined above...}},
   "confidence": 0.0-1.0
