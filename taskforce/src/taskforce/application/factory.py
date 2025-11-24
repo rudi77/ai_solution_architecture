@@ -53,7 +53,7 @@ class AgentFactory:
         self.config_dir = Path(config_dir)
         self.logger = structlog.get_logger().bind(component="agent_factory")
 
-    def create_agent(
+    async def create_agent(
         self,
         profile: str = "dev",
         mission: Optional[str] = None,
@@ -99,19 +99,29 @@ class AgentFactory:
         state_manager = self._create_state_manager(config)
         llm_provider = self._create_llm_provider(config)
         tools = self._create_native_tools(config, llm_provider)
+        
+        # Load MCP tools if configured
+        mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
+        tools.extend(mcp_tools)
+        
         todolist_manager = self._create_todolist_manager(config, llm_provider)
         system_prompt = self._load_system_prompt("generic")
 
         # Create domain agent with injected dependencies
-        return Agent(
+        agent = Agent(
             state_manager=state_manager,
             llm_provider=llm_provider,
             tools=tools,
             todolist_manager=todolist_manager,
             system_prompt=system_prompt,
         )
+        
+        # Store MCP contexts on agent for lifecycle management
+        agent._mcp_contexts = mcp_contexts
+        
+        return agent
 
-    def create_rag_agent(
+    async def create_rag_agent(
         self,
         profile: str = "dev",
         user_context: Optional[dict[str, Any]] = None,
@@ -164,17 +174,26 @@ class AgentFactory:
         # RAG agent tools are now specified in config (includes RAG + native tools)
         # user_context is injected into RAG tools
         tools = self._create_native_tools(config, llm_provider, user_context=user_context)
+        
+        # Load MCP tools if configured
+        mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
+        tools.extend(mcp_tools)
 
         todolist_manager = self._create_todolist_manager(config, llm_provider)
         system_prompt = self._load_system_prompt("rag")
 
-        return Agent(
+        agent = Agent(
             state_manager=state_manager,
             llm_provider=llm_provider,
             tools=tools,
             todolist_manager=todolist_manager,
             system_prompt=system_prompt,
         )
+        
+        # Store MCP contexts on agent for lifecycle management
+        agent._mcp_contexts = mcp_contexts
+        
+        return agent
 
     def _load_profile(self, profile: str) -> dict:
         """
@@ -286,6 +305,146 @@ class AgentFactory:
                 tools.append(tool)
         
         return tools
+    
+    async def _create_mcp_tools(self, config: dict) -> tuple[list[ToolProtocol], list[Any]]:
+        """
+        Create MCP tools from configuration.
+
+        Connects to configured MCP servers (stdio or SSE), fetches available tools,
+        and wraps them in MCPToolWrapper to conform to ToolProtocol.
+
+        IMPORTANT: Returns both tools and client context managers that must be kept alive.
+        The caller is responsible for managing the lifecycle of these connections.
+
+        Args:
+            config: Configuration dictionary containing mcp_servers list
+
+        Returns:
+            Tuple of (list of MCP tool wrappers, list of client context managers)
+
+        Example config:
+            mcp_servers:
+              - type: stdio
+                command: python
+                args: ["server.py"]
+                env: {"API_KEY": "value"}
+              - type: sse
+                url: http://localhost:8000/sse
+        """
+        from taskforce.infrastructure.tools.mcp.client import MCPClient
+        from taskforce.infrastructure.tools.mcp.wrapper import MCPToolWrapper
+
+        mcp_servers_config = config.get("mcp_servers", [])
+        
+        if not mcp_servers_config:
+            self.logger.debug("no_mcp_servers_configured")
+            return [], []
+        
+        mcp_tools = []
+        client_contexts = []
+        
+        for server_config in mcp_servers_config:
+            server_type = server_config.get("type")
+            
+            try:
+                if server_type == "stdio":
+                    # Local stdio server
+                    command = server_config.get("command")
+                    args = server_config.get("args", [])
+                    env = server_config.get("env")
+                    
+                    if not command:
+                        self.logger.warning(
+                            "mcp_server_missing_command",
+                            server_config=server_config,
+                            hint="stdio server requires 'command' field",
+                        )
+                        continue
+                    
+                    self.logger.info(
+                        "connecting_to_mcp_server",
+                        server_type="stdio",
+                        command=command,
+                        args=args,
+                    )
+                    
+                    # Create context manager but don't enter yet
+                    ctx = MCPClient.create_stdio(command, args, env)
+                    client = await ctx.__aenter__()
+                    client_contexts.append(ctx)
+                    
+                    tools_list = await client.list_tools()
+                    
+                    self.logger.info(
+                        "mcp_server_connected",
+                        server_type="stdio",
+                        command=command,
+                        tools_count=len(tools_list),
+                        tool_names=[t["name"] for t in tools_list],
+                    )
+                    
+                    # Wrap each tool
+                    for tool_def in tools_list:
+                        wrapper = MCPToolWrapper(client, tool_def)
+                        mcp_tools.append(wrapper)
+                
+                elif server_type == "sse":
+                    # Remote SSE server
+                    url = server_config.get("url")
+                    
+                    if not url:
+                        self.logger.warning(
+                            "mcp_server_missing_url",
+                            server_config=server_config,
+                            hint="sse server requires 'url' field",
+                        )
+                        continue
+                    
+                    self.logger.info(
+                        "connecting_to_mcp_server",
+                        server_type="sse",
+                        url=url,
+                    )
+                    
+                    # Create context manager but don't enter yet
+                    ctx = MCPClient.create_sse(url)
+                    client = await ctx.__aenter__()
+                    client_contexts.append(ctx)
+                    
+                    tools_list = await client.list_tools()
+                    
+                    self.logger.info(
+                        "mcp_server_connected",
+                        server_type="sse",
+                        url=url,
+                        tools_count=len(tools_list),
+                        tool_names=[t["name"] for t in tools_list],
+                    )
+                    
+                    # Wrap each tool
+                    for tool_def in tools_list:
+                        wrapper = MCPToolWrapper(client, tool_def)
+                        mcp_tools.append(wrapper)
+                
+                else:
+                    self.logger.warning(
+                        "unknown_mcp_server_type",
+                        server_type=server_type,
+                        hint="Supported types: 'stdio', 'sse'",
+                    )
+            
+            except Exception as e:
+                # Log error but don't crash - graceful degradation
+                self.logger.warning(
+                    "mcp_server_connection_failed",
+                    server_type=server_type,
+                    server_config=server_config,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    hint="Agent will continue without this MCP server",
+                )
+        
+        return mcp_tools, client_contexts
     
     def _create_default_tools(self, llm_provider: LLMProviderProtocol) -> list[ToolProtocol]:
         """

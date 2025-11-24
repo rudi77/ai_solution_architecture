@@ -17,7 +17,7 @@ class SessionResponse(BaseModel):
 @router.get("/sessions", response_model=List[SessionResponse])
 async def list_sessions(profile: str = "dev"):
     """List all agent sessions."""
-    agent = factory.create_agent(profile=profile)
+    agent = await factory.create_agent(profile=profile)
     sessions = await agent.state_manager.list_sessions()
     
     # Load details for each session
@@ -37,7 +37,7 @@ async def list_sessions(profile: str = "dev"):
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
 async def get_session(session_id: str, profile: str = "dev"):
     """Get session details."""
-    agent = factory.create_agent(profile=profile)
+    agent = await factory.create_agent(profile=profile)
     state = await agent.state_manager.load_state(session_id)
     
     if not state:
@@ -53,7 +53,7 @@ async def get_session(session_id: str, profile: str = "dev"):
 @router.post("/sessions", response_model=SessionResponse)
 async def create_session(profile: str = "dev", mission: str = ""):
     """Create a new session."""
-    agent = factory.create_agent(profile=profile)
+    agent = await factory.create_agent(profile=profile)
     session_id = str(uuid.uuid4())
     initial_state = {
         "mission": mission,
