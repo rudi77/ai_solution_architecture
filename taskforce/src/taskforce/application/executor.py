@@ -201,7 +201,7 @@ class AgentExecutor:
 
         try:
             # Create agent
-            agent = self._create_agent(profile)
+            agent = await self._create_agent(profile)
 
             # Store conversation history in state if provided
             if conversation_history:
@@ -233,7 +233,7 @@ class AgentExecutor:
 
             raise
 
-    def _create_agent(self, profile: str) -> Agent:
+    async def _create_agent(self, profile: str) -> Agent:
         """Create agent using factory.
         
         Args:
@@ -243,7 +243,7 @@ class AgentExecutor:
             Agent instance with injected dependencies
         """
         self.logger.debug("creating_agent", profile=profile)
-        return self.factory.create_agent(profile=profile)
+        return await self.factory.create_agent(profile=profile)
 
     async def _execute_with_progress(
         self,

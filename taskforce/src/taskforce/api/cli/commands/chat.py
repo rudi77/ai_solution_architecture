@@ -73,7 +73,7 @@ def chat(
                 user_context["scope"] = scope
 
             try:
-                agent = factory.create_rag_agent(
+                agent = await factory.create_rag_agent(
                     profile=profile, user_context=user_context
                 )
                 console.print(
@@ -86,7 +86,7 @@ def chat(
                 console.print("[dim]Falling back to standard agent[/dim]\n")
         
         if not agent:
-            agent = factory.create_agent(profile=profile)
+            agent = await factory.create_agent(profile=profile)
             console.print("[dim]Agent initialized[/dim]\n")
 
         session_id = None

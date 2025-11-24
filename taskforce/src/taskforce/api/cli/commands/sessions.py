@@ -18,7 +18,7 @@ def list_sessions(
 ):
     """List all agent sessions."""
     factory = AgentFactory()
-    agent = factory.create_agent(profile=profile)
+    agent = asyncio.run(factory.create_agent(profile=profile))
 
     sessions = asyncio.run(agent.state_manager.list_sessions())
 
@@ -41,7 +41,7 @@ def show_session(
 ):
     """Show session details."""
     factory = AgentFactory()
-    agent = factory.create_agent(profile=profile)
+    agent = asyncio.run(factory.create_agent(profile=profile))
 
     state = asyncio.run(agent.state_manager.load_state(session_id))
 
