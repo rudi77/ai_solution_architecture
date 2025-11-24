@@ -1,5 +1,7 @@
 """Tools command - List and inspect available tools."""
 
+import asyncio
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -14,7 +16,7 @@ console = Console()
 def list_tools(profile: str = typer.Option("dev", "--profile", "-p", help="Configuration profile")):
     """List available tools."""
     factory = AgentFactory()
-    agent = factory.create_agent(profile=profile)
+    agent = asyncio.run(factory.create_agent(profile=profile))
 
     table = Table(title="Available Tools")
     table.add_column("Name", style="cyan")
@@ -33,7 +35,7 @@ def inspect_tool(
 ):
     """Inspect tool details and parameters."""
     factory = AgentFactory()
-    agent = factory.create_agent(profile=profile)
+    agent = asyncio.run(factory.create_agent(profile=profile))
 
     # Find tool by name
     tool = None

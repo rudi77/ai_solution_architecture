@@ -235,11 +235,12 @@ class TestAgentFactory:
         with pytest.raises(ValueError, match="Unknown agent type"):
             factory._load_system_prompt("invalid")
 
-    def test_create_agent_with_dev_profile(self):
+    @pytest.mark.asyncio
+    async def test_create_agent_with_dev_profile(self):
         """Test creating agent with dev profile."""
         factory = AgentFactory(config_dir="configs")
 
-        agent = factory.create_agent(profile="dev")
+        agent = await factory.create_agent(profile="dev")
 
         # Verify agent is created
         assert isinstance(agent, Agent)
@@ -249,16 +250,18 @@ class TestAgentFactory:
         assert agent.todolist_manager is not None
         assert agent.system_prompt is not None
 
-    def test_create_agent_with_work_dir_override(self):
+    @pytest.mark.asyncio
+    async def test_create_agent_with_work_dir_override(self):
         """Test creating agent with work_dir override."""
         factory = AgentFactory(config_dir="configs")
 
-        agent = factory.create_agent(profile="dev", work_dir=".test_work")
+        agent = await factory.create_agent(profile="dev", work_dir=".test_work")
 
         # Verify state manager uses overridden work_dir
         assert isinstance(agent.state_manager, FileStateManager)
         assert agent.state_manager.work_dir == Path(".test_work")
 
+    @pytest.mark.asyncio
     @patch.dict(
         os.environ,
         {
@@ -266,12 +269,12 @@ class TestAgentFactory:
             "AZURE_SEARCH_API_KEY": "test-key",
         },
     )
-    def test_create_rag_agent_with_dev_profile(self):
+    async def test_create_rag_agent_with_dev_profile(self):
         """Test creating RAG agent with dev profile."""
         factory = AgentFactory(config_dir="configs")
 
         # Use dev profile (file-based persistence) instead of staging (database)
-        agent = factory.create_rag_agent(
+        agent = await factory.create_rag_agent(
             profile="dev",
             user_context={"user_id": "test_user", "org_id": "test_org"},
             work_dir=".test_rag_work",
@@ -291,11 +294,12 @@ class TestAgentFactory:
         assert "rag_list_documents" in tool_names
         assert "rag_get_document" in tool_names
 
-    def test_create_rag_agent_has_more_tools_than_generic(self):
+    @pytest.mark.asyncio
+    async def test_create_rag_agent_has_more_tools_than_generic(self):
         """Test that RAG agent has more tools than generic agent."""
         factory = AgentFactory(config_dir="configs")
 
-        generic_agent = factory.create_agent(profile="dev")
+        generic_agent = await factory.create_agent(profile="dev")
 
         # Mock environment for RAG agent
         with patch.dict(
@@ -306,7 +310,7 @@ class TestAgentFactory:
             },
         ):
             # Use dev profile instead of staging to avoid database dependency
-            rag_agent = factory.create_rag_agent(
+            rag_agent = await factory.create_rag_agent(
                 profile="dev",
                 user_context={"user_id": "test", "org_id": "test"},
             )
@@ -318,33 +322,36 @@ class TestAgentFactory:
 class TestAgentFactoryIntegration:
     """Integration tests for AgentFactory with real dependencies."""
 
-    def test_agent_construction_time(self):
+    @pytest.mark.asyncio
+    async def test_agent_construction_time(self):
         """Test agent construction completes in <200ms (IV3)."""
         import time
 
         factory = AgentFactory(config_dir="configs")
 
         start = time.time()
-        agent = factory.create_agent(profile="dev")
+        agent = await factory.create_agent(profile="dev")
         duration = (time.time() - start) * 1000  # Convert to ms
 
         assert isinstance(agent, Agent)
         assert duration < 200, f"Agent construction took {duration:.2f}ms (>200ms)"
 
-    def test_agent_has_correct_tool_count(self):
+    @pytest.mark.asyncio
+    async def test_agent_has_correct_tool_count(self):
         """Test agent has expected number of tools."""
         factory = AgentFactory(config_dir="configs")
-        agent = factory.create_agent(profile="dev")
+        agent = await factory.create_agent(profile="dev")
 
         # Should have 10 native tools
         assert len(agent.tools) == 10
 
-    def test_multiple_agents_can_be_created(self):
+    @pytest.mark.asyncio
+    async def test_multiple_agents_can_be_created(self):
         """Test multiple agents can be created from same factory."""
         factory = AgentFactory(config_dir="configs")
 
-        agent1 = factory.create_agent(profile="dev", work_dir=".test_agent1")
-        agent2 = factory.create_agent(profile="dev", work_dir=".test_agent2")
+        agent1 = await factory.create_agent(profile="dev", work_dir=".test_agent1")
+        agent2 = await factory.create_agent(profile="dev", work_dir=".test_agent2")
 
         assert isinstance(agent1, Agent)
         assert isinstance(agent2, Agent)
