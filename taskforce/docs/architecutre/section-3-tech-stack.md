@@ -47,6 +47,8 @@
 | **Monitoring** | structlog (JSON output) | 24.2.0 | Structured logging | JSON logs for centralized aggregation (ELK, Splunk, Datadog) |
 | **YAML Parsing** | PyYAML | 6.0+ | Configuration file parsing | Loads YAML profiles (dev/staging/prod configs) |
 | **Data Validation** | Pydantic | 2.0.0+ | Runtime data validation | Validates API requests, configuration, data models; type coercion |
+| **MCP Integration** | mcp (Python SDK) | latest | Model Context Protocol client | Connects to external MCP servers (stdio/SSE); enables tool composition from external providers |
+| **Node.js Runtime** | Node.js | 20+ | MCP server execution | Required for running official MCP servers (e.g., @modelcontextprotocol/server-filesystem) |
 
 ---
 
@@ -341,9 +343,51 @@ test:
 7. ✅ **Clarified development workflow** for Docker Compose environment
 
 
-🏗️ **Correcting Data Models - Python Notation**
+---
 
-You're absolutely right! This is a Python backend. Let me revise with proper Python dataclasses and type hints:
+### **Model Context Protocol (MCP) Integration**
+
+**Overview:**
+Taskforce integrates with the Model Context Protocol (MCP) to enable dynamic tool composition from external providers. MCP allows the agent to connect to specialized servers that expose tools via a standardized protocol.
+
+**Supported Connection Types:**
+1. **stdio**: Local servers launched as subprocesses (e.g., filesystem, database tools)
+2. **SSE**: Remote servers accessed via Server-Sent Events (future support)
+
+**Configuration Example (configs/dev.yaml):**
+
+```yaml
+mcp_servers:
+  # Official MCP Filesystem Server
+  - type: stdio
+    command: npx
+    args:
+      - "-y"  # Auto-install if not present
+      - "@modelcontextprotocol/server-filesystem"
+      - ".mcp_test_data"  # Allowed directory (security boundary)
+    env: {}  # Optional environment variables
+```
+
+**Available Official MCP Servers:**
+- `@modelcontextprotocol/server-filesystem`: File operations (read, write, list, search)
+- `@modelcontextprotocol/server-github`: GitHub API integration
+- `@modelcontextprotocol/server-postgres`: PostgreSQL database operations
+- `@modelcontextprotocol/server-brave-search`: Web search via Brave API
+
+**Tool Precedence:**
+When MCP tools overlap with native tools (e.g., both provide `read_file`), the agent can use either based on context. Native tools are registered first, MCP tools are appended. The LLM chooses the most appropriate tool for each task.
+
+**Security Considerations:**
+- MCP filesystem server enforces directory boundaries (only accesses configured paths)
+- Environment variables can pass API keys securely
+- Each server runs in isolated subprocess with limited permissions
+
+**Requirements:**
+- Node.js 20+ (for running official MCP servers via npx)
+- Python `mcp` SDK (installed via `uv add mcp`)
+
+**Validation:**
+See `test_mcp_validation.py` for end-to-end integration tests.
 
 ---
-
+

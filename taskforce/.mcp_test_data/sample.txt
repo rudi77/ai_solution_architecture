@@ -1,0 +1,10 @@
+This is a sample text file for MCP filesystem server validation.
+
+It contains multiple lines to test file reading capabilities.
+The MCP filesystem server should be able to read this file successfully.
+
+Test data:
+- Line 1
+- Line 2
+- Line 3
+
