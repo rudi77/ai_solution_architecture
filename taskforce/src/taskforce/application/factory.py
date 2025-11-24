@@ -88,10 +88,13 @@ class AgentFactory:
         if work_dir:
             config.setdefault("persistence", {})["work_dir"] = work_dir
 
+        # Determine agent type from config or default to generic
+        agent_type = config.get("agent_type", "generic")
+
         self.logger.info(
             "creating_agent",
             profile=profile,
-            agent_type="generic",
+            agent_type=agent_type,
             work_dir=config.get("persistence", {}).get("work_dir", ".taskforce"),
         )
 
@@ -105,7 +108,7 @@ class AgentFactory:
         tools.extend(mcp_tools)
         
         todolist_manager = self._create_todolist_manager(config, llm_provider)
-        system_prompt = self._load_system_prompt("generic")
+        system_prompt = self._load_system_prompt(agent_type)
 
         # Create domain agent with injected dependencies
         agent = Agent(
@@ -614,6 +617,12 @@ class AgentFactory:
             from taskforce.core.prompts.rag_system_prompt import RAG_SYSTEM_PROMPT
 
             return RAG_SYSTEM_PROMPT
+
+        elif agent_type == "text2sql":
+            # Load Text2SQL system prompt
+            from taskforce.core.prompts.text2sql_system_prompt import TEXT2SQL_SYSTEM_PROMPT
+
+            return TEXT2SQL_SYSTEM_PROMPT
 
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
