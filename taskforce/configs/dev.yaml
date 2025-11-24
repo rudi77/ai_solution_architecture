@@ -65,17 +65,26 @@ tools:
     module: taskforce.infrastructure.tools.native.ask_user_tool
     params: {}
 
-# MCP Server Configuration (optional)
-# Uncomment and configure to enable MCP tools from external servers
-# mcp_servers:
-#   # Local MCP server (launched via stdio)
-#   - type: stdio
-#     command: python
-#     args:
-#       - path/to/mcp_server.py
-#     env:  # Optional environment variables
-#       API_KEY: ${MCP_API_KEY}
-#   
-#   # Remote MCP server (connected via SSE)
-#   - type: sse
-#     url: http://localhost:8000/sse
+# MCP Server Configuration
+# Enables external MCP tools from Model Context Protocol servers
+mcp_servers:
+  # Official MCP Filesystem Server
+  # Provides file operations (list_directory, read_file, write_file, etc.)
+  - type: stdio
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - ".mcp_test_data"  # Safe test directory for validation
+    env: {}  # No environment variables needed for filesystem server
+    #   # Local MCP server (launched via stdio)
+    #   - type: stdio
+    #     command: python
+    #     args:
+    #       - path/to/mcp_server.py
+    #     env:  # Optional environment variables
+    #       API_KEY: ${MCP_API_KEY}
+    #   
+    #   # Remote MCP server (connected via SSE)
+    #   - type: sse
+    #     url: http://localhost:8000/sse
