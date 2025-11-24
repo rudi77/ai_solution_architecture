@@ -26,13 +26,13 @@ app.add_typer(config.app, name="config", help="Configuration management")
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     profile: str = typer.Option("dev", "--profile", "-p", help="Configuration profile"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
 ):
     """Taskforce Agent CLI."""
-    # Store global options in app state
-    # Individual commands can access via ctx.obj
-    pass
+    # Store global options in context for subcommands
+    ctx.obj = {"profile": profile, "verbose": verbose}
 
 
 @app.command()
