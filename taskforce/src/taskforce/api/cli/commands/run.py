@@ -4,13 +4,12 @@ import asyncio
 from typing import Optional
 
 import typer
-from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from taskforce.api.cli.output_formatter import TaskforceConsole
 from taskforce.application.executor import AgentExecutor
 
 app = typer.Typer(help="Execute agent missions")
-console = Console()
 
 
 @app.command("mission")
@@ -21,24 +20,68 @@ def run_mission(
     session_id: Optional[str] = typer.Option(
         None, "--session", "-s", help="Resume existing session"
     ),
+    debug: Optional[bool] = typer.Option(
+        None, "--debug", help="Enable debug output (overrides global --debug)"
+    ),
 ):
-    """Execute an agent mission."""
+    """Execute an agent mission.
+    
+    Examples:
+        # Execute a simple mission
+        taskforce run mission "Analyze data.csv"
+        
+        # Resume a previous session
+        taskforce run mission "Continue analysis" --session abc-123
+        
+        # Debug mode to see agent internals
+        taskforce --debug run mission "Debug this task"
+    """
     # Get global options from context, allow local override
     global_opts = ctx.obj or {}
     profile = profile or global_opts.get("profile", "dev")
+    debug = debug if debug is not None else global_opts.get("debug", False)
     
-    console.print(f"[bold blue]Starting mission:[/bold blue] {mission}")
-    console.print(f"[dim]Profile: {profile}[/dim]\n")
+    # Configure logging level based on debug flag
+    import structlog
+    import logging
+    if debug:
+        logging.basicConfig(level=logging.DEBUG, format="%(message)s")
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING, format="%(message)s")
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+        )
+    
+    # Initialize fancy console
+    tf_console = TaskforceConsole(debug=debug)
+    
+    # Print banner
+    tf_console.print_banner()
+    
+    # Show mission info
+    tf_console.print_system_message(f"Mission: {mission}", "system")
+    if session_id:
+        tf_console.print_system_message(f"Resuming session: {session_id}", "info")
+    tf_console.print_system_message(f"Profile: {profile}", "info")
+    tf_console.print_divider()
 
     executor = AgentExecutor()
 
     with Progress(
-        SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console
+        SpinnerColumn(), 
+        TextColumn("[progress.description]{task.description}"), 
+        console=tf_console.console
     ) as progress:
-        task = progress.add_task("Executing mission...", total=None)
+        task = progress.add_task("[>] Executing mission...", total=None)
 
         def progress_callback(update):
-            progress.update(task, description=update.message)
+            if debug:
+                progress.update(task, description=f"[>] {update.message}")
+            else:
+                progress.update(task, description="[>] Working...")
 
         # Execute mission with progress tracking
         result = asyncio.run(
@@ -50,13 +93,15 @@ def run_mission(
             )
         )
 
+    tf_console.print_divider()
+    
     # Display results
     if result.status == "completed":
-        console.print(f"\n[bold green]✓ Mission completed![/bold green]")
-        console.print(f"Session ID: {result.session_id}")
-        console.print(f"\n{result.final_message}")
+        tf_console.print_success("Mission completed!")
+        tf_console.print_debug(f"Session ID: {result.session_id}")
+        tf_console.print_agent_message(result.final_message)
     else:
-        console.print(f"\n[bold red]✗ Mission failed[/bold red]")
-        console.print(f"Session ID: {result.session_id}")
-        console.print(f"\n{result.final_message}")
+        tf_console.print_error(f"Mission {result.status}")
+        tf_console.print_debug(f"Session ID: {result.session_id}")
+        tf_console.print_agent_message(result.final_message)
 

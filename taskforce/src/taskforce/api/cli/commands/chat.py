@@ -4,13 +4,11 @@ import asyncio
 from typing import Optional
 
 import typer
-from rich.console import Console
-from rich.prompt import Prompt
 
+from taskforce.api.cli.output_formatter import TaskforceConsole
 from taskforce.application.factory import AgentFactory
 
 app = typer.Typer(help="Interactive chat mode")
-console = Console()
 
 
 @app.command()
@@ -28,8 +26,8 @@ def chat(
     scope: Optional[str] = typer.Option(
         None, "--scope", help="Scope for RAG context (shared/org/user)"
     ),
-    verbose: Optional[bool] = typer.Option(
-        None, "--verbose", help="Enable verbose output (overrides global --verbose)"
+    debug: Optional[bool] = typer.Option(
+        None, "--debug", help="Enable debug output (overrides global --debug)"
     ),
 ):
     """Start interactive chat session with agent.
@@ -42,26 +40,53 @@ def chat(
 
         # RAG chat with user context
         taskforce --profile rag_dev chat --user-id ms-user --org-id MS-corp
+        
+        # Debug mode to see agent thoughts and actions
+        taskforce --debug chat
     """
     # Get global options from context, allow local override
     global_opts = ctx.obj or {}
     profile = profile or global_opts.get("profile", "dev")
-    verbose = verbose if verbose is not None else global_opts.get("verbose", False)
+    debug = debug if debug is not None else global_opts.get("debug", False)
     
-    console.print("[bold blue]Taskforce Interactive Chat[/bold blue]")
-
-    # Display context info if RAG parameters provided
+    # Configure logging level based on debug flag
+    import structlog
+    import logging
+    if debug:
+        logging.basicConfig(level=logging.DEBUG, format="%(message)s")
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING, format="%(message)s")
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+        )
+    
+    # Initialize our fancy console
+    tf_console = TaskforceConsole(debug=debug)
+    
+    # Print banner
+    tf_console.print_banner()
+    
+    # Build user context if provided
+    user_context = None
     if user_id or org_id or scope:
-        console.print("[dim]RAG Context:[/dim]")
+        user_context = {}
         if user_id:
-            console.print(f"[dim]  User ID: {user_id}[/dim]")
+            user_context["user_id"] = user_id
         if org_id:
-            console.print(f"[dim]  Org ID: {org_id}[/dim]")
+            user_context["org_id"] = org_id
         if scope:
-            console.print(f"[dim]  Scope: {scope}[/dim]")
+            user_context["scope"] = scope
 
-    console.print(f"[dim]Profile: {profile}[/dim]")
-    console.print("[dim]Type 'exit' or 'quit' to end session[/dim]\n")
+    # Show session info
+    import uuid
+    session_id = str(uuid.uuid4())
+    tf_console.print_session_info(session_id, profile, user_context)
+    
+    tf_console.print_system_message("Type 'exit', 'quit', or press Ctrl+C to end session", "info")
+    tf_console.print_divider()
 
     async def run_chat_loop():
         # Create agent once for the entire chat session
@@ -69,79 +94,89 @@ def chat(
         
         # If user context provided, create RAG agent with context
         agent = None
-        if user_id or org_id or scope:
-            user_context = {}
-            if user_id:
-                user_context["user_id"] = user_id
-            if org_id:
-                user_context["org_id"] = org_id
-            if scope:
-                user_context["scope"] = scope
-
+        if user_context:
             try:
                 agent = await factory.create_rag_agent(
                     profile=profile, user_context=user_context
                 )
-                console.print(
-                    "[dim]RAG agent initialized with user context[/dim]\n"
+                tf_console.print_system_message(
+                    "RAG agent initialized with user context", "success"
                 )
+                tf_console.print_divider()
             except Exception as e:
-                console.print(
-                    f"[yellow]Warning: Could not create RAG agent: {e}[/yellow]"
+                tf_console.print_warning(
+                    f"Could not create RAG agent: {e}. Falling back to standard agent."
                 )
-                console.print("[dim]Falling back to standard agent[/dim]\n")
         
         if not agent:
             agent = await factory.create_agent(profile=profile)
-            console.print("[dim]Agent initialized[/dim]\n")
-
-        session_id = None
+            tf_console.print_system_message("Agent initialized", "success")
+            tf_console.print_divider()
 
         while True:
             # Get user input (blocking, but that's okay in CLI)
             try:
-                user_input = Prompt.ask("[bold green]You[/bold green]")
+                user_input = tf_console.prompt()
             except (KeyboardInterrupt, EOFError):
-                console.print("\n[dim]Goodbye![/dim]")
+                tf_console.print_divider()
+                tf_console.print_system_message("Goodbye! 👋", "info")
                 break
 
             # Check for exit commands
             if user_input.lower() in ["exit", "quit", "bye"]:
-                console.print("[dim]Goodbye![/dim]")
+                tf_console.print_divider()
+                tf_console.print_system_message("Goodbye! 👋", "info")
                 break
 
             if not user_input.strip():
                 continue
 
-            # Execute mission
-            console.print("[bold cyan]Agent[/bold cyan]: ", end="")
+            # Show user message in panel
+            tf_console.print_user_message(user_input)
 
             try:
-                # Generate session ID on first message
-                if not session_id:
-                    import uuid
-                    session_id = str(uuid.uuid4())
-
+                # === CONVERSATION HISTORY MANAGEMENT ===
+                # Load current state and update conversation history with user message
+                state = await agent.state_manager.load_state(session_id) or {}
+                history = state.get("conversation_history", [])
+                
+                # Append user message to history
+                history.append({"role": "user", "content": user_input})
+                state["conversation_history"] = history
+                
+                # Save state so agent can access the updated history
+                await agent.state_manager.save_state(session_id, state)
+                
                 # Execute with the same agent instance
                 result = await agent.execute(mission=user_input, session_id=session_id)
+                
+                # Reload state (agent may have modified it) and append agent response
+                state = await agent.state_manager.load_state(session_id) or {}
+                history = state.get("conversation_history", [])
+                history.append({"role": "assistant", "content": result.final_message})
+                state["conversation_history"] = history
+                await agent.state_manager.save_state(session_id, state)
+                # === END CONVERSATION HISTORY MANAGEMENT ===
 
-                # Display result message
-                console.print(result.final_message)
+                # Extract thought if available (for debug mode)
+                thought = None
+                if debug and hasattr(result, 'thoughts') and result.thoughts:
+                    thought = result.thoughts[-1] if result.thoughts else None
+
+                # Display agent response
+                tf_console.print_agent_message(result.final_message, thought=thought)
 
                 # If there's a pending question, show it prominently
                 if result.status == "paused" and result.pending_question:
                     question = result.pending_question.get("question", "")
                     if question and question != result.final_message:
-                        console.print(f"[yellow]Question: {question}[/yellow]")
+                        tf_console.print_warning(f"Question: {question}")
 
-                if verbose:
-                    console.print(f"[dim]Session: {session_id}[/dim]")
+                # Debug info
+                tf_console.print_debug(f"Status: {result.status}")
 
             except Exception as e:
-                console.print(f"[red]Error: {str(e)}[/red]")
-                if verbose:
-                    import traceback
-                    console.print(f"[dim]{traceback.format_exc()}[/dim]")
+                tf_console.print_error(f"Execution failed: {str(e)}", exception=e if debug else None)
 
     # Run the async loop
     asyncio.run(run_chat_loop())

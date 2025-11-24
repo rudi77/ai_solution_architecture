@@ -3,6 +3,7 @@
 # Connects to remote MCP server for database operations
 
 profile: text2sql_dev
+agent_type: text2sql  # Use specialized Text2SQL system prompt
 
 # Persistence configuration
 persistence:

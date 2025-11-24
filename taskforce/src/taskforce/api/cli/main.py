@@ -28,19 +28,22 @@ app.add_typer(config.app, name="config", help="Configuration management")
 def main(
     ctx: typer.Context,
     profile: str = typer.Option("dev", "--profile", "-p", help="Configuration profile"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Enable debug output (shows agent thoughts, actions, observations)"),
 ):
     """Taskforce Agent CLI."""
     # Store global options in context for subcommands
-    ctx.obj = {"profile": profile, "verbose": verbose}
+    ctx.obj = {"profile": profile, "debug": debug}
 
 
 @app.command()
 def version():
     """Show Taskforce version."""
     from taskforce import __version__
+    from taskforce.api.cli.output_formatter import TaskforceConsole
 
-    console.print(f"[bold blue]Taskforce[/bold blue] version [cyan]{__version__}[/cyan]")
+    tf_console = TaskforceConsole()
+    tf_console.print_banner()
+    console.print(f"[bold blue]Version:[/bold blue] [cyan]{__version__}[/cyan]")
 
 
 if __name__ == "__main__":
