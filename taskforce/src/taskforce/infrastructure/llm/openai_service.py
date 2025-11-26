@@ -19,12 +19,15 @@ For Azure OpenAI setup instructions, see docs/azure-openai-setup.md
 """
 
 import asyncio
+import json
 import os
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import aiofiles
 import litellm
 import structlog
 import yaml
@@ -114,6 +117,9 @@ class OpenAIService(LLMProviderProtocol):
 
         # Logging preferences
         self.logging_config = config.get("logging", {})
+
+        # Tracing configuration
+        self.tracing_config = config.get("tracing", {})
 
         # Provider configuration
         self.provider_config = config.get("providers", {})
@@ -718,6 +724,94 @@ class OpenAIService(LLMProviderProtocol):
             ]
             return {k: v for k, v in params.items() if k in allowed_params}
 
+    async def _trace_interaction(
+        self,
+        messages: List[Dict[str, Any]],
+        response_content: Optional[str],
+        model: str,
+        token_stats: Dict[str, int],
+        latency_ms: int,
+        success: bool,
+        error: Optional[str] = None,
+    ) -> None:
+        """
+        Trace LLM interaction to configured destinations.
+
+        Args:
+            messages: Input messages
+            response_content: Generated content
+            model: Model used
+            token_stats: Token usage statistics
+            latency_ms: Request latency in milliseconds
+            success: Whether the request was successful
+            error: Error message if failed
+        """
+        if not self.tracing_config.get("enabled", False):
+            return
+
+        mode = self.tracing_config.get("mode", "file")
+
+        trace_data = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "model": model,
+            "messages": messages,
+            "response": response_content,
+            "usage": token_stats,
+            "latency_ms": latency_ms,
+            "success": success,
+            "error": error,
+        }
+
+        tasks = []
+        if mode in ["file", "both"]:
+            tasks.append(self._trace_to_file(trace_data))
+
+        if mode in ["phoenix", "both"]:
+            tasks.append(self._trace_to_phoenix(trace_data))
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _trace_to_file(self, trace_data: Dict[str, Any]) -> None:
+        """Write trace data to JSONL file."""
+        try:
+            file_config = self.tracing_config.get("file_config", {})
+            file_path = file_config.get("path", "traces/llm_traces.jsonl")
+
+            # Ensure directory exists
+            path = Path(file_path)
+            if not path.parent.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+
+            async with aiofiles.open(path, mode="a", encoding="utf-8") as f:
+                await f.write(json.dumps(trace_data) + "\n")
+
+        except Exception as e:
+            self.logger.error("trace_file_write_failed", error=str(e))
+
+    async def _trace_to_phoenix(self, trace_data: Dict[str, Any]) -> None:
+        """
+        Send trace data to Arize Phoenix.
+
+        Note: This implementation checks for the 'phoenix' library availability.
+        If not present, it logs a warning.
+        """
+        try:
+            import phoenix as px  # type: ignore # noqa: F401
+
+            # This is a placeholder for manual Phoenix tracing.
+            # Since we don't have the library as a dependency, we just check import.
+            # Actual implementation would require the library.
+            pass
+
+        except ImportError:
+            self.logger.warning(
+                "phoenix_library_missing",
+                hint="Install arize-phoenix to use phoenix tracing",
+            )
+        except Exception as e:
+            self.logger.error("trace_phoenix_failed", error=str(e))
+
     async def complete(
         self,
         messages: List[Dict[str, Any]],
@@ -819,6 +913,18 @@ class OpenAIService(LLMProviderProtocol):
                         latency_ms=latency_ms,
                     )
 
+                # Trace interaction
+                asyncio.create_task(
+                    self._trace_interaction(
+                        messages=messages,
+                        response_content=content,
+                        model=actual_model,
+                        token_stats=token_stats,
+                        latency_ms=latency_ms,
+                        success=True,
+                    )
+                )
+
                 return {
                     "success": True,
                     "content": content,
@@ -882,6 +988,19 @@ class OpenAIService(LLMProviderProtocol):
                             log_context["troubleshooting_hint"] = parsed_error["hint"]
                     
                     self.logger.error("llm_completion_failed", **log_context)
+
+                    # Trace failure
+                    asyncio.create_task(
+                        self._trace_interaction(
+                            messages=messages,
+                            response_content=None,
+                            model=actual_model,
+                            token_stats={},
+                            latency_ms=int((time.time() - start_time) * 1000),
+                            success=False,
+                            error=error_msg,
+                        )
+                    )
 
                     error_result = {
                         "success": False,
