@@ -162,3 +162,15 @@ logging:
   log_latency: true
   log_parameter_mapping: true
 
+tracing:
+  enabled: true
+  # Mode: 'file', 'phoenix', or 'both'
+  mode: "file"
+  file_config:
+    path: "traces/llm_traces.jsonl"
+  phoenix_config:
+    # Endpoint for Arize Phoenix collector if different from default
+    # collector_endpoint: "http://localhost:6006"
+    project_name: "taskforce"
+
+

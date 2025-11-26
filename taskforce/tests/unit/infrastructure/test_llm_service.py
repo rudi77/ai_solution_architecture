@@ -10,6 +10,7 @@ Tests cover:
 - Error handling and parsing
 """
 
+import asyncio
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -590,3 +591,116 @@ class TestRetryPolicy:
         assert policy.timeout == 60
         assert "RateLimitError" in policy.retry_on_errors
 
+
+@pytest.mark.asyncio
+class TestTracing:
+    """Test LLM interaction tracing."""
+
+    @pytest.fixture
+    def tracing_config_file(self, tmp_path):
+        """Create a config file with tracing enabled."""
+        config = {
+            "default_model": "main",
+            "models": {"main": "gpt-4.1"},
+            "providers": {"openai": {"api_key_env": "OPENAI_API_KEY"}},
+            "tracing": {
+                "enabled": True,
+                "mode": "file",
+                "file_config": {"path": str(tmp_path / "traces/llm_traces.jsonl")},
+            },
+            "logging": {},
+            "retry_policy": {},
+        }
+        config_path = tmp_path / "llm_config_tracing.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config, f)
+        return str(config_path)
+
+    async def test_tracing_enabled_file_mode(self, tracing_config_file):
+        """Test tracing writes to file on success."""
+        service = OpenAIService(config_path=tracing_config_file)
+
+        # Mock response
+        mock_response = MagicMock()
+        mock_response.choices = [
+            MagicMock(message=MagicMock(content="Traced response"))
+        ]
+        mock_response.usage = {"total_tokens": 10}
+
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = mock_response
+
+            with patch.object(
+                service, "_trace_to_file", new_callable=AsyncMock
+            ) as mock_trace_file:
+                await service.complete(
+                    messages=[{"role": "user", "content": "Trace me"}], model="main"
+                )
+
+                # Yield to event loop to let create_task run
+                await asyncio.sleep(0.1)
+
+                mock_trace_file.assert_called_once()
+                call_args = mock_trace_file.call_args[0][0]
+                assert call_args["success"] is True
+                assert call_args["response"] == "Traced response"
+
+    async def test_tracing_failure(self, tracing_config_file):
+        """Test tracing captures failures."""
+        service = OpenAIService(config_path=tracing_config_file)
+
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.side_effect = Exception("Trace failure")
+
+            with patch.object(
+                service, "_trace_to_file", new_callable=AsyncMock
+            ) as mock_trace_file:
+                await service.complete(
+                    messages=[{"role": "user", "content": "Fail me"}], model="main"
+                )
+
+                await asyncio.sleep(0.1)
+
+                mock_trace_file.assert_called_once()
+                call_args = mock_trace_file.call_args[0][0]
+                assert call_args["success"] is False
+                assert "Trace failure" in call_args["error"]
+
+    async def test_trace_to_file_implementation(self, tracing_config_file, tmp_path):
+        """Test actual file writing."""
+        service = OpenAIService(config_path=tracing_config_file)
+        trace_data = {"test": "data"}
+
+        await service._trace_to_file(trace_data)
+
+        trace_path = tmp_path / "traces/llm_traces.jsonl"
+        assert trace_path.exists()
+        content = trace_path.read_text(encoding="utf-8")
+        assert '{"test": "data"}' in content
+
+    async def test_tracing_disabled(self, tmp_path):
+        """Test tracing does nothing when disabled."""
+        config = {
+            "default_model": "main",
+            "models": {"main": "gpt-4.1"},
+            "providers": {"openai": {"api_key_env": "OPENAI_API_KEY"}},
+            "tracing": {"enabled": False},
+            "retry_policy": {},
+        }
+        config_path = tmp_path / "llm_config_disabled.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config, f)
+
+        service = OpenAIService(config_path=str(config_path))
+
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = MagicMock(
+                choices=[MagicMock(message=MagicMock(content="ok"))]
+            )
+
+            with patch.object(
+                service, "_trace_to_file", new_callable=AsyncMock
+            ) as mock_trace:
+                await service.complete([], model="main")
+                await asyncio.sleep(0.1)
+                mock_trace.assert_not_called()
