@@ -1,13 +1,13 @@
 # LLM Service Configuration
 # This file defines model aliases, parameters, retry policies, and provider settings
 
-default_model: "main"
+default_model: "powerful-1"
 
 models:
   main: "gpt-4.1"
   fast: "gpt-4.1-mini"
   powerful: "gpt-5"
-  powerful-1: "gpt-5-1"
+  powerful-1: "gpt-5-mini"
   legacy: "gpt-4-turbo"
 
 model_params:
@@ -32,7 +32,7 @@ model_params:
     reasoning: "balanced"
     max_tokens: 4000
 
-  gpt-5-1:
+  gpt-5-mini:
     effort: "low"
     reasoning: "minimal"
     max_tokens: 4000    
