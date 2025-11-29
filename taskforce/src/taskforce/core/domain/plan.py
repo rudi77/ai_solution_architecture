@@ -793,6 +793,7 @@ RULES:
 5. open_questions MUST be empty (all clarifications resolved)
 6. description: Clear, actionable outcome (1-2 sentences)
 7. acceptance_criteria: Specific, verifiable condition
+8. DYNAMIC REPLANNING (CRITICAL): If you just received a User Answer from a previous step, do NOT mark the mission as complete. You MUST generate NEW steps to fulfill the user's intent expressed in that answer.
 
 EXAMPLES:
 Good:
