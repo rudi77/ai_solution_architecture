@@ -395,16 +395,44 @@ class Agent:
         if todolist_id:
             try:
                 todolist = await self.todolist_manager.load_todolist(todolist_id)
-                self.logger.info("todolist_loaded", session_id=session_id, todolist_id=todolist_id)
-                return todolist
+                
+                # --- FIX START: Prüfen, ob die Liste schon fertig ist ---
+                # Wir prüfen, ob alle Items den Status COMPLETED haben (oder SKIPPED)
+                all_items_done = all(
+                    item.status.value in ["COMPLETED", "SKIPPED"] 
+                    for item in todolist.items
+                )
+
+                # Wenn die Liste noch NICHT fertig ist, machen wir damit weiter.
+                # (Das passiert z.B., wenn der Agent mehrere Steps nacheinander macht)
+                if not all_items_done:
+                    self.logger.info("todolist_loaded_resuming", session_id=session_id, todolist_id=todolist_id)
+                    return todolist
+                
+                # Wenn die Liste fertig IST, bedeutet der neue User-Input eine NEUE Mission.
+                # Wir ignorieren die alte Liste und lassen den Code unten eine neue erstellen.
+                self.logger.info("todolist_completed_starting_new_mission", session_id=session_id, old_id=todolist_id)
+                
+                # Optional: State bereinigen, damit wir sauber starten
+                # state["todolist_id"] = None 
+                
+                # --- FIX END ---
+
             except FileNotFoundError:
                 self.logger.warning(
                     "todolist_not_found", session_id=session_id, todolist_id=todolist_id
                 )
 
-        # Create new TodoList
+        # Create new TodoList (Wird ausgeführt, wenn keine ID da ist ODER die alte Liste fertig war)
+        self.logger.info("creating_new_todolist_for_mission", mission=mission)
+        
         tools_desc = self._get_tools_description()
+        
+        # WICHTIG: Wenn wir eine neue Mission starten, sollten wir evtl. 
+        # alte "answers" nicht blind übernehmen, es sei denn, es sind persistente Fakten.
+        # Für diesen Fix lassen wir es erstmal so.
         answers = state.get("answers", {})
+        
         todolist = await self.todolist_manager.create_todolist(
             mission=mission, tools_desc=tools_desc, answers=answers
         )
