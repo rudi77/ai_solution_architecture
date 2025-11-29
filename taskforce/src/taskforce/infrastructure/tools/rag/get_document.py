@@ -38,13 +38,11 @@ class GetDocumentTool:
     def description(self) -> str:
         """Tool description for the agent."""
         return (
-            "Retrieve detailed metadata for a specific document by "
-            "document title (filename). Returns complete document "
-            "information including title, type, chunk count, page count, "
-            "content types (text/images), and access control metadata. "
-            "Optionally include full chunk content for document "
-            "summarization. Use this after listing documents to get "
-            "detailed information about a specific document."
+            "Retrieve detailed metadata and content for a specific document using its ID. "
+            "Returns complete document information including title, type, chunk count, "
+            "and optionally the full content text. "
+            "CRITICAL: You MUST use the 'document_id' (UUID) returned by rag_list_documents, "
+            "NOT the filename, because filenames are not unique."
         )
 
     @property
@@ -60,9 +58,8 @@ class GetDocumentTool:
                 "document_id": {
                     "type": "string",
                     "description": (
-                        "The document title/filename "
-                        "(e.g., '30603b8a-9f41-47f4-9fe0-f329104faed5_"
-                        "eGECKO-Personalzeitmanagement.pdf')"
+                        "The unique document UUID (preferred) or document title/filename. "
+                        "Example: '30603b8a-9f41-47f4-9fe0-f329104faed5'"
                     )
                 },
                 "include_chunk_content": {
@@ -123,8 +120,7 @@ class GetDocumentTool:
         Execute document metadata retrieval from content-blocks index.
 
         Args:
-            document_id: The document title/filename
-                        (also accepts document_id for compatibility)
+            document_id: The document UUID or title/filename
             include_chunk_content: If True, returns full chunk content.
                                   If False (default), returns only chunk IDs
             user_context: Optional user context override for security
@@ -135,40 +131,8 @@ class GetDocumentTool:
             Dict with structure:
             {
                 "success": True,
-                "document": {
-                    "document_id": "...",
-                    "document_title": "...",
-                    "document_type": "application/pdf",
-                    "org_id": "...",
-                    "user_id": "...",
-                    "scope": "shared",
-                    "chunk_count": 15,
-                    "page_count": 7,
-                    "has_images": True,
-                    "has_text": True,
-                    "chunks": ["content_id_1", "content_id_2", ...] or
-                             [{"content_id": "...", "content_text": "...",
-                               "content_path": "...", ...}, ...]
-                }
+                "document": { ... }
             }
-
-        Example:
-            >>> tool = GetDocumentTool(user_context={"org_id": "MS-corp"})
-            >>> result = await tool.execute(
-            ...     document_id="30603b8a-9f41-47f4-9fe0-"
-            ...                 "f329104faed5_eGECKO-"
-            ...                 "Personalzeitmanagement.pdf"
-            ... )
-            >>> print(result["document"]["chunk_count"])
-            15
-            >>>
-            >>> # With full content for summarization
-            >>> result = await tool.execute(
-            ...     document_id="example.pdf",
-            ...     include_chunk_content=True
-            ... )
-            >>> print(result["document"]["chunks"][0]["content_text"])
-            "Full text content..."
         """
         start_time = time.time()
 
@@ -185,17 +149,15 @@ class GetDocumentTool:
             # Build security filter from user context
             security_filter = self.azure_base.build_security_filter(context)
 
-            # Build document filter - search by document_title (filename)
-            # Users typically provide the document name/title, not the
-            # internal UUID
-            sanitized_title = self.azure_base._sanitize_filter_value(
-                document_id
-            )
-            document_filter = f"document_title eq '{sanitized_title}'"
+            # Build document filter - Allow search by ID (primary) OR Title (fallback)
+            sanitized_val = self.azure_base._sanitize_filter_value(document_id)
+            
+            # Updated Logic: Check both document_id and document_title fields
+            document_filter = f"(document_id eq '{sanitized_val}' or document_title eq '{sanitized_val}')"
 
             self.logger.info(
-                "searching_by_document_title",
-                document_title=document_id
+                "searching_document",
+                search_term=document_id
             )
 
             # Combine with security filter
@@ -271,12 +233,12 @@ class GetDocumentTool:
                     latency_ms = int((time.time() - start_time) * 1000)
                     self.logger.warning(
                         "get_document_not_found",
-                        document_title=document_id,
+                        document_id=document_id,
                         search_latency_ms=latency_ms
                     )
                     return {
                         "success": False,
-                        "error": "Document not found",
+                        "error": f"Document not found with ID or Title: {document_id}",
                         "type": "NotFoundError"
                     }
 
@@ -314,11 +276,17 @@ class GetDocumentTool:
             
             if include_chunk_content and chunks:
                 result_text += "\n\nContent Preview:\n"
-                # Add preview of first few chunks
-                for i, chunk in enumerate(chunks[:3]):
+                # Add preview of first few chunks (or sort by page number first if needed)
+                # Simple sort by content_id usually keeps order mostly intact for basic preview
+                for i, chunk in enumerate(chunks[:5]): # Show up to 5 chunks preview
                     content = chunk.get('content_text', '')
+                    page = "Unknown"
+                    lm = chunk.get('locationMetadata')
+                    if lm and isinstance(lm, dict):
+                        page = lm.get('pageNumber', 'Unknown')
+                        
                     if content:
-                        result_text += f"--- Chunk {i+1} ---\n{content[:200]}...\n"
+                        result_text += f"--- Page {page} ---\n{content[:500]}...\n\n"
 
             return {
                 "success": True,
@@ -335,17 +303,8 @@ class GetDocumentTool:
         document_id: str,
         elapsed_time: float
     ) -> Dict[str, Any]:
-        """
-        Handle errors and return structured error response.
-
-        Args:
-            exception: The exception that occurred
-            document_id: The document ID being retrieved
-            elapsed_time: Time elapsed before error
-
-        Returns:
-            Structured error dict matching agent's expected format
-        """
+        # (Fehlerbehandlung bleibt gleich wie in deiner Originaldatei, 
+        # da sie hier nicht das Problem war)
         from azure.core.exceptions import (
             HttpResponseError,
             ServiceRequestError
@@ -414,4 +373,3 @@ class GetDocumentTool:
             "type": error_type,
             "hints": hints
         }
-
