@@ -624,6 +624,12 @@ class AgentFactory:
 
             return TEXT2SQL_SYSTEM_PROMPT
 
+        elif agent_type == "devops_wiki":
+            # Load DevOps Wiki system prompt
+            from taskforce.core.prompts.wiki_system_prompt import WIKI_SYSTEM_PROMPT
+            
+            return WIKI_SYSTEM_PROMPT
+
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
 
