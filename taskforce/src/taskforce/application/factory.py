@@ -11,7 +11,8 @@ Key Responsibilities:
 - Load configuration profiles (dev/staging/prod)
 - Instantiate infrastructure adapters (state managers, LLM providers, tools)
 - Wire dependencies into core domain Agent
-- Support both generic and RAG agent types
+- Support specialist profiles (generic, coding, rag) with layered prompts
+- Inject appropriate toolsets based on specialist profile
 """
 
 import os
@@ -22,7 +23,6 @@ import structlog
 import yaml
 
 from taskforce.core.domain.agent import Agent
-from taskforce.core.domain.plan import PlanGenerator
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.infrastructure.persistence.file_todolist import FileTodoListManager
 from taskforce.core.interfaces.state import StateManagerProtocol
@@ -56,17 +56,25 @@ class AgentFactory:
     async def create_agent(
         self,
         profile: str = "dev",
+        specialist: Optional[str] = None,
         mission: Optional[str] = None,
         work_dir: Optional[str] = None,
     ) -> Agent:
         """
-        Create generic problem-solving agent.
+        Create agent with specified specialist profile.
 
-        Creates an agent with standard tools (web, git, file, shell, python, llm).
-        Uses the generic system prompt for general-purpose problem solving.
+        Creates an agent with the autonomous kernel prompt plus specialist-specific
+        instructions and toolset. The specialist profile determines both the
+        additional prompt instructions and the available tools.
+
+        Specialist Profiles:
+        - "generic": Full toolset with kernel prompt only (default)
+        - "coding": FileReadTool, FileWriteTool, PowerShellTool, AskUserTool
+        - "rag": SemanticSearchTool, ListDocumentsTool, GetDocumentTool, AskUserTool
 
         Args:
-            profile: Configuration profile name (dev/staging/prod)
+            profile: Configuration profile name (dev/staging/prod/coding_dev/rag_dev)
+            specialist: Specialist profile override. If None, reads from config YAML.
             mission: Optional mission description
             work_dir: Optional override for work directory
 
@@ -75,12 +83,14 @@ class AgentFactory:
 
         Raises:
             FileNotFoundError: If profile YAML not found
-            ValueError: If configuration is invalid
+            ValueError: If configuration or specialist is invalid
 
         Example:
             >>> factory = AgentFactory()
-            >>> agent = factory.create_agent(profile="dev")
-            >>> result = await agent.execute("Analyze data.csv", "session-123")
+            >>> # Load specialist from config
+            >>> agent = await factory.create_agent(profile="coding_dev")
+            >>> # Or override specialist
+            >>> agent = await factory.create_agent(profile="dev", specialist="coding")
         """
         config = self._load_profile(profile)
 
@@ -88,27 +98,35 @@ class AgentFactory:
         if work_dir:
             config.setdefault("persistence", {})["work_dir"] = work_dir
 
-        # Determine agent type from config or default to generic
-        agent_type = config.get("agent_type", "generic")
+        # Determine specialist: parameter > config > default
+        effective_specialist = specialist or config.get("specialist", "generic")
 
         self.logger.info(
             "creating_agent",
             profile=profile,
-            agent_type=agent_type,
+            specialist=effective_specialist,
             work_dir=config.get("persistence", {}).get("work_dir", ".taskforce"),
         )
 
         # Instantiate infrastructure adapters
         state_manager = self._create_state_manager(config)
         llm_provider = self._create_llm_provider(config)
-        tools = self._create_native_tools(config, llm_provider)
-        
-        # Load MCP tools if configured
-        mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
-        tools.extend(mcp_tools)
-        
+
+        # Select tools based on specialist profile
+        if effective_specialist in ("coding", "rag"):
+            tools = self._create_specialist_tools(
+                effective_specialist, config, llm_provider
+            )
+            mcp_contexts = []
+        else:
+            # Generic: use config-based tools or defaults
+            tools = self._create_native_tools(config, llm_provider)
+            # Load MCP tools if configured
+            mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
+            tools.extend(mcp_tools)
+
         todolist_manager = self._create_todolist_manager(config, llm_provider)
-        system_prompt = self._load_system_prompt(agent_type)
+        system_prompt = self._assemble_system_prompt(effective_specialist)
 
         # Create domain agent with injected dependencies
         agent = Agent(
@@ -118,10 +136,10 @@ class AgentFactory:
             todolist_manager=todolist_manager,
             system_prompt=system_prompt,
         )
-        
+
         # Store MCP contexts on agent for lifecycle management
         agent._mcp_contexts = mcp_contexts
-        
+
         return agent
 
     async def create_rag_agent(
@@ -486,6 +504,85 @@ class AgentFactory:
             LLMTool(llm_service=llm_provider),
             AskUserTool(),
         ]
+
+    def _create_specialist_tools(
+        self,
+        specialist: str,
+        config: dict,
+        llm_provider: LLMProviderProtocol,
+        user_context: Optional[dict[str, Any]] = None,
+    ) -> list[ToolProtocol]:
+        """
+        Create tools specific to a specialist profile.
+
+        Each specialist profile has a focused toolset:
+        - coding: FileReadTool, FileWriteTool, PowerShellTool, AskUserTool
+        - rag: SemanticSearchTool, ListDocumentsTool, GetDocumentTool, AskUserTool
+
+        Args:
+            specialist: Specialist profile ("coding" or "rag")
+            config: Configuration dictionary (for RAG tools configuration)
+            llm_provider: LLM provider (unused for specialist tools currently)
+            user_context: Optional user context for RAG tools
+
+        Returns:
+            List of specialist tool instances
+
+        Raises:
+            ValueError: If specialist profile is unknown
+        """
+        from taskforce.infrastructure.tools.native.ask_user_tool import AskUserTool
+
+        if specialist == "coding":
+            from taskforce.infrastructure.tools.native.file_tools import (
+                FileReadTool,
+                FileWriteTool,
+            )
+            from taskforce.infrastructure.tools.native.shell_tool import PowerShellTool
+
+            self.logger.debug(
+                "creating_specialist_tools",
+                specialist="coding",
+                tools=["FileReadTool", "FileWriteTool", "PowerShellTool", "AskUserTool"],
+            )
+
+            return [
+                FileReadTool(),
+                FileWriteTool(),
+                PowerShellTool(),
+                AskUserTool(),
+            ]
+
+        elif specialist == "rag":
+            from taskforce.infrastructure.tools.rag.get_document import GetDocumentTool
+            from taskforce.infrastructure.tools.rag.list_documents import (
+                ListDocumentsTool,
+            )
+            from taskforce.infrastructure.tools.rag.semantic_search import (
+                SemanticSearchTool,
+            )
+
+            self.logger.debug(
+                "creating_specialist_tools",
+                specialist="rag",
+                tools=[
+                    "SemanticSearchTool",
+                    "ListDocumentsTool",
+                    "GetDocumentTool",
+                    "AskUserTool",
+                ],
+                has_user_context=user_context is not None,
+            )
+
+            return [
+                SemanticSearchTool(user_context=user_context),
+                ListDocumentsTool(user_context=user_context),
+                GetDocumentTool(user_context=user_context),
+                AskUserTool(),
+            ]
+
+        else:
+            raise ValueError(f"Unknown specialist profile: {specialist}")
     
     def _instantiate_tool(
         self, tool_spec: dict, llm_provider: LLMProviderProtocol, user_context: Optional[dict[str, Any]] = None
@@ -591,12 +688,60 @@ class AgentFactory:
         work_dir = config.get("persistence", {}).get("work_dir", ".taskforce")
         return FileTodoListManager(work_dir=work_dir, llm_provider=llm_provider)
 
-    def _load_system_prompt(self, agent_type: str) -> str:
+    def _assemble_system_prompt(self, specialist: str) -> str:
         """
-        Load system prompt for agent type.
+        Assemble system prompt from Kernel + Specialist profile.
+
+        The prompt is composed of:
+        1. GENERAL_AUTONOMOUS_KERNEL_PROMPT (shared by all agents)
+        2. Specialist-specific prompt (based on profile)
 
         Args:
-            agent_type: Agent type ("generic" or "rag")
+            specialist: Specialist profile ("generic", "coding", "rag")
+
+        Returns:
+            Assembled system prompt string
+
+        Raises:
+            ValueError: If specialist profile is unknown
+        """
+        from taskforce.core.prompts.autonomous_prompts import (
+            CODING_SPECIALIST_PROMPT,
+            GENERAL_AUTONOMOUS_KERNEL_PROMPT,
+            RAG_SPECIALIST_PROMPT,
+        )
+
+        # Start with the autonomous kernel
+        system_prompt = GENERAL_AUTONOMOUS_KERNEL_PROMPT
+
+        # Append specialist-specific instructions
+        if specialist == "coding":
+            system_prompt += "\n\n" + CODING_SPECIALIST_PROMPT
+        elif specialist == "rag":
+            system_prompt += "\n\n" + RAG_SPECIALIST_PROMPT
+        elif specialist == "generic":
+            # Generic uses just the kernel (or could use legacy prompt)
+            pass
+        else:
+            raise ValueError(f"Unknown specialist profile: {specialist}")
+
+        self.logger.debug(
+            "system_prompt_assembled",
+            specialist=specialist,
+            prompt_length=len(system_prompt),
+        )
+
+        return system_prompt
+
+    def _load_system_prompt(self, agent_type: str) -> str:
+        """
+        Load system prompt for agent type (legacy method).
+
+        This method is kept for backward compatibility with existing code
+        that uses agent_type instead of specialist profiles.
+
+        Args:
+            agent_type: Agent type ("generic", "rag", "text2sql", "devops_wiki")
 
         Returns:
             System prompt string

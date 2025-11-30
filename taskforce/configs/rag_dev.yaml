@@ -2,6 +2,7 @@
 # This configuration creates an agent specialized for document retrieval and semantic search
 
 profile: rag_dev
+specialist: rag
 
 # Persistence configuration
 persistence:
