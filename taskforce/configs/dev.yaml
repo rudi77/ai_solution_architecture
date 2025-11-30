@@ -2,6 +2,7 @@
 # Used for local development with file-based persistence
 
 profile: dev
+specialist: generic  # Full toolset with autonomous kernel prompt
 
 # Persistence configuration
 persistence:

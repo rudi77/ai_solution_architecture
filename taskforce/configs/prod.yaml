@@ -2,6 +2,7 @@
 # Used for production environment with database persistence
 
 profile: prod
+specialist: generic  # Full toolset with autonomous kernel prompt
 
 # Persistence configuration
 persistence:

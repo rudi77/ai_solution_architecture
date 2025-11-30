@@ -319,6 +319,213 @@ class TestAgentFactory:
         assert len(rag_agent.tools) == len(generic_agent.tools) + 3
 
 
+class TestSpecialistProfiles:
+    """Tests for specialist profile functionality (Kernel + Specialist prompts)."""
+
+    def test_assemble_system_prompt_generic(self):
+        """Test assembling system prompt for generic specialist."""
+        factory = AgentFactory(config_dir="configs")
+
+        prompt = factory._assemble_system_prompt("generic")
+
+        assert isinstance(prompt, str)
+        assert len(prompt) > 0
+        # Should contain kernel prompt content
+        assert "Autonomous Agent" in prompt or "autonomous" in prompt.lower()
+
+    def test_assemble_system_prompt_coding(self):
+        """Test assembling system prompt for coding specialist."""
+        factory = AgentFactory(config_dir="configs")
+
+        prompt = factory._assemble_system_prompt("coding")
+
+        assert isinstance(prompt, str)
+        assert len(prompt) > 0
+        # Should contain both kernel and coding specialist content
+        assert "Autonomous Agent" in prompt or "autonomous" in prompt.lower()
+        assert "Coding Specialist" in prompt or "file" in prompt.lower()
+
+    def test_assemble_system_prompt_rag(self):
+        """Test assembling system prompt for RAG specialist."""
+        factory = AgentFactory(config_dir="configs")
+
+        prompt = factory._assemble_system_prompt("rag")
+
+        assert isinstance(prompt, str)
+        assert len(prompt) > 0
+        # Should contain both kernel and RAG specialist content
+        assert "Autonomous Agent" in prompt or "autonomous" in prompt.lower()
+        assert "RAG Specialist" in prompt or "semantic" in prompt.lower()
+
+    def test_assemble_system_prompt_invalid(self):
+        """Test error for invalid specialist profile."""
+        factory = AgentFactory(config_dir="configs")
+
+        with pytest.raises(ValueError, match="Unknown specialist profile"):
+            factory._assemble_system_prompt("invalid")
+
+    def test_create_specialist_tools_coding(self):
+        """Test creating tools for coding specialist."""
+        factory = AgentFactory(config_dir="configs")
+        config = {}
+        mock_llm = MagicMock()
+
+        tools = factory._create_specialist_tools("coding", config, mock_llm)
+
+        # Coding specialist should have 4 tools
+        assert len(tools) == 4
+
+        tool_names = [tool.name for tool in tools]
+        expected_tools = ["file_read", "file_write", "powershell", "ask_user"]
+
+        for expected in expected_tools:
+            assert expected in tool_names, f"Tool {expected} not found"
+
+    @patch.dict(
+        os.environ,
+        {
+            "AZURE_SEARCH_ENDPOINT": "https://test.search.windows.net",
+            "AZURE_SEARCH_API_KEY": "test-key",
+        },
+    )
+    def test_create_specialist_tools_rag(self):
+        """Test creating tools for RAG specialist."""
+        factory = AgentFactory(config_dir="configs")
+        config = {}  # RAG tools get config from environment
+        mock_llm = MagicMock()
+        user_context = {"user_id": "test_user", "org_id": "test_org"}
+
+        tools = factory._create_specialist_tools(
+            "rag", config, mock_llm, user_context=user_context
+        )
+
+        # RAG specialist should have 4 tools
+        assert len(tools) == 4
+
+        tool_names = [tool.name for tool in tools]
+        expected_tools = [
+            "rag_semantic_search",
+            "rag_list_documents",
+            "rag_get_document",
+            "ask_user",
+        ]
+
+        for expected in expected_tools:
+            assert expected in tool_names, f"Tool {expected} not found"
+
+    def test_create_specialist_tools_invalid(self):
+        """Test error for invalid specialist profile."""
+        factory = AgentFactory(config_dir="configs")
+        config = {}
+        mock_llm = MagicMock()
+
+        with pytest.raises(ValueError, match="Unknown specialist profile"):
+            factory._create_specialist_tools("invalid", config, mock_llm)
+
+    @pytest.mark.asyncio
+    async def test_create_agent_with_coding_specialist(self):
+        """Test creating agent with coding specialist profile."""
+        factory = AgentFactory(config_dir="configs")
+
+        agent = await factory.create_agent(
+            profile="dev",
+            specialist="coding",
+            work_dir=".test_coding_agent",
+        )
+
+        assert isinstance(agent, Agent)
+        assert len(agent.tools) == 4  # 4 coding tools
+
+        tool_names = list(agent.tools.keys())
+        assert "file_read" in tool_names
+        assert "file_write" in tool_names
+        assert "powershell" in tool_names
+        assert "ask_user" in tool_names
+
+    @pytest.mark.asyncio
+    @patch.dict(
+        os.environ,
+        {
+            "AZURE_SEARCH_ENDPOINT": "https://test.search.windows.net",
+            "AZURE_SEARCH_API_KEY": "test-key",
+        },
+    )
+    async def test_create_agent_with_rag_specialist(self):
+        """Test creating agent with RAG specialist profile."""
+        factory = AgentFactory(config_dir="configs")
+
+        agent = await factory.create_agent(
+            profile="dev",
+            specialist="rag",
+            work_dir=".test_rag_agent",
+        )
+
+        assert isinstance(agent, Agent)
+        assert len(agent.tools) == 4  # 4 RAG tools
+
+        tool_names = list(agent.tools.keys())
+        assert "rag_semantic_search" in tool_names
+        assert "rag_list_documents" in tool_names
+        assert "rag_get_document" in tool_names
+        assert "ask_user" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_create_agent_generic_has_more_tools_than_coding(self):
+        """Test that generic agent has more tools than coding specialist."""
+        factory = AgentFactory(config_dir="configs")
+
+        generic_agent = await factory.create_agent(profile="dev", specialist="generic")
+        coding_agent = await factory.create_agent(profile="dev", specialist="coding")
+
+        # Generic has 10+ tools (native + MCP), coding has 4
+        assert len(generic_agent.tools) > len(coding_agent.tools)
+        assert len(generic_agent.tools) >= 10  # At least 10 native tools
+        assert len(coding_agent.tools) == 4
+
+    @pytest.mark.asyncio
+    async def test_specialist_prompt_is_longer_than_kernel_only(self):
+        """Test that specialist prompts add content to the kernel."""
+        factory = AgentFactory(config_dir="configs")
+
+        generic_agent = await factory.create_agent(profile="dev", specialist="generic")
+        coding_agent = await factory.create_agent(profile="dev", specialist="coding")
+
+        # Coding prompt should be longer (kernel + specialist)
+        assert len(coding_agent.system_prompt) > len(generic_agent.system_prompt)
+
+    @pytest.mark.asyncio
+    async def test_create_agent_loads_specialist_from_config(self):
+        """Test that specialist is loaded from config YAML when not provided."""
+        factory = AgentFactory(config_dir="configs")
+
+        # coding_dev.yaml has specialist: coding
+        agent = await factory.create_agent(profile="coding_dev")
+
+        # Should have coding tools (4 tools)
+        assert len(agent.tools) == 4
+        tool_names = list(agent.tools.keys())
+        assert "file_read" in tool_names
+        assert "file_write" in tool_names
+        assert "powershell" in tool_names
+        assert "ask_user" in tool_names
+
+        # Should have coding specialist prompt
+        assert "Coding Specialist" in agent.system_prompt
+
+    @pytest.mark.asyncio
+    async def test_create_agent_specialist_param_overrides_config(self):
+        """Test that specialist parameter overrides config value."""
+        factory = AgentFactory(config_dir="configs")
+
+        # dev.yaml has specialist: generic, but we override with coding
+        agent = await factory.create_agent(profile="dev", specialist="coding")
+
+        # Should have coding tools despite dev config having generic
+        assert len(agent.tools) == 4
+        assert "file_read" in agent.tools
+        assert "Coding Specialist" in agent.system_prompt
+
+
 class TestAgentFactoryIntegration:
     """Integration tests for AgentFactory with real dependencies."""
 
