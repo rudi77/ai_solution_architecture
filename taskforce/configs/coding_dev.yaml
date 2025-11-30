@@ -1,0 +1,28 @@
+# Coding Agent Development Configuration
+# Specialized agent for software development tasks with focused toolset
+
+profile: coding_dev
+specialist: coding
+
+# Persistence configuration
+persistence:
+  type: file
+  work_dir: .taskforce_coding
+
+# LLM configuration
+llm:
+  config_path: configs/llm_config.yaml
+  default_model: main
+
+# Logging configuration
+logging:
+  level: DEBUG
+  format: console
+
+# Note: Tools are determined by specialist profile
+# Coding specialist includes:
+# - FileReadTool: Read source files
+# - FileWriteTool: Write/modify source files
+# - PowerShellTool: Run build, test, git commands
+# - AskUserTool: Request clarification when blocked
+
