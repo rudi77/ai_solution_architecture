@@ -22,6 +22,7 @@ class ActionType(str, Enum):
     ASK_USER = "ask_user"
     COMPLETE = "complete"
     REPLAN = "replan"
+    FINISH_STEP = "finish_step"
 
 
 @dataclass
@@ -35,9 +36,10 @@ class Action:
     - ask_user: Requires question and answer_key
     - complete: Requires summary
     - replan: Requires replan_reason
+    - finish_step: No additional fields; signals explicit step completion
 
     Attributes:
-        type: Type of action (tool_call, ask_user, complete, replan)
+        type: Type of action (tool_call, ask_user, complete, replan, finish_step)
         tool: Tool name to execute (for tool_call)
         tool_input: Parameters for tool execution (for tool_call)
         question: Question to ask user (for ask_user)
