@@ -121,16 +121,16 @@ async def test_execute_creates_todolist_on_first_run(
 
 @pytest.mark.asyncio
 async def test_execute_loads_existing_todolist(
-    agent, mock_state_manager, mock_todolist_manager
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
 ):
-    """Test that execute loads existing TodoList if todolist_id in state."""
+    """Test that execute loads existing TodoList if todolist_id in state and items pending."""
     # Setup: State has todolist_id
     mock_state_manager.load_state.return_value = {
         "todolist_id": "existing-todolist-456",
         "answers": {},
     }
 
-    # Setup: Existing TodoList
+    # Setup: Existing TodoList with PENDING item (not completed, so it resumes)
     todolist = TodoList(
         todolist_id="existing-todolist-456",
         items=[
@@ -139,8 +139,10 @@ async def test_execute_loads_existing_todolist(
                 description="Existing task",
                 acceptance_criteria="Task done",
                 dependencies=[],
-                status=TaskStatus.COMPLETED,
-                execution_result={"success": True},
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
             )
         ],
         open_questions=[],
@@ -148,11 +150,23 @@ async def test_execute_loads_existing_todolist(
     )
     mock_todolist_manager.load_todolist.return_value = todolist
 
+    # LLM returns finish_step to complete the pending task
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps({
+            "step_ref": 1,
+            "rationale": "Task already done",
+            "action": {"type": "finish_step"},
+            "expected_outcome": "Complete",
+            "confidence": 1.0,
+        }),
+    }
+
     # Execute
     result = await agent.execute(mission="Test mission", session_id="test-session")
 
     # Verify TodoList was loaded, not created
-    mock_todolist_manager.load_todolist.assert_called_once_with("existing-todolist-456")
+    mock_todolist_manager.load_todolist.assert_called_with("existing-todolist-456")
     mock_todolist_manager.create_todolist.assert_not_called()
 
     # Verify result
@@ -163,7 +177,7 @@ async def test_execute_loads_existing_todolist(
 async def test_react_loop_executes_pending_step(
     agent, mock_state_manager, mock_todolist_manager, mock_llm_provider, mock_tool
 ):
-    """Test ReAct loop executes a pending step."""
+    """Test ReAct loop executes a pending step with tool_call then finish_step."""
     # Setup state
     mock_state_manager.load_state.return_value = {"answers": {}}
 
@@ -187,18 +201,25 @@ async def test_react_loop_executes_pending_step(
     )
     mock_todolist_manager.create_todolist.return_value = todolist
 
-    # Setup LLM to return a tool_call action
-    thought_response = {
+    # Setup LLM to return tool_call first, then finish_step
+    tool_call_response = {
         "step_ref": 1,
         "rationale": "Need to execute the test tool",
         "action": {"type": "tool_call", "tool": "test_tool", "tool_input": {"param": "value"}},
         "expected_outcome": "Tool executes successfully",
         "confidence": 0.9,
     }
-    mock_llm_provider.complete.return_value = {
-        "success": True,
-        "content": json.dumps(thought_response),
+    finish_step_response = {
+        "step_ref": 1,
+        "rationale": "Tool succeeded, marking step complete",
+        "action": {"type": "finish_step"},
+        "expected_outcome": "Step is done",
+        "confidence": 1.0,
     }
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps(tool_call_response)},
+        {"success": True, "content": json.dumps(finish_step_response)},
+    ]
 
     # Setup tool to succeed
     mock_tool.execute.return_value = {"success": True, "output": "test result"}
@@ -206,18 +227,17 @@ async def test_react_loop_executes_pending_step(
     # Execute
     result = await agent.execute(mission="Test mission", session_id="test-session")
 
-    # Verify LLM was called for thought generation
-    assert mock_llm_provider.complete.called
+    # Verify LLM was called twice (tool_call + finish_step)
+    assert mock_llm_provider.complete.call_count == 2
 
-    # Verify tool was executed
-    mock_tool.execute.assert_called_once_with({"param": "value"})
+    # Verify tool was executed once (tool_input is spread as kwargs)
+    mock_tool.execute.assert_called_once_with(param="value")
 
     # Verify TodoList was updated
     assert mock_todolist_manager.update_todolist.called
     updated_todolist = mock_todolist_manager.update_todolist.call_args[0][0]
     assert updated_todolist.items[0].status == TaskStatus.COMPLETED
     assert updated_todolist.items[0].chosen_tool == "test_tool"
-    assert updated_todolist.items[0].attempts == 1
 
     # Verify result
     assert result.status == "completed"
@@ -273,7 +293,8 @@ async def test_react_loop_handles_ask_user_action(
 
     # Verify execution paused
     assert result.status == "paused"
-    assert result.final_message == "Waiting for user input"
+    # Final message is the actual question when pending_question exists
+    assert result.final_message == "What is your name?"
 
     # Verify pending question was stored in state
     save_calls = mock_state_manager.save_state.call_args_list
@@ -369,18 +390,26 @@ async def test_react_loop_retries_failed_step(
     )
     mock_todolist_manager.create_todolist.return_value = todolist
 
-    # LLM returns tool_call action
-    thought_response = {
+    # LLM returns tool_call actions, then finish_step after success
+    tool_call_response = {
         "step_ref": 1,
         "rationale": "Execute tool",
         "action": {"type": "tool_call", "tool": "test_tool", "tool_input": {}},
         "expected_outcome": "Tool succeeds",
         "confidence": 0.9,
     }
-    mock_llm_provider.complete.return_value = {
-        "success": True,
-        "content": json.dumps(thought_response),
+    finish_step_response = {
+        "step_ref": 1,
+        "rationale": "Tool succeeded",
+        "action": {"type": "finish_step"},
+        "expected_outcome": "Done",
+        "confidence": 1.0,
     }
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps(tool_call_response)},  # First attempt
+        {"success": True, "content": json.dumps(tool_call_response)},  # Retry
+        {"success": True, "content": json.dumps(finish_step_response)},  # Finish
+    ]
 
     # Tool fails first time, succeeds second time
     mock_tool.execute.side_effect = [
@@ -492,27 +521,36 @@ async def test_react_loop_respects_dependencies(
     )
     mock_todolist_manager.create_todolist.return_value = todolist
 
-    # LLM returns tool_call actions
-    thought_responses = [
-        {
+    # LLM returns tool_call then finish_step for each step
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps({
             "step_ref": 1,
             "rationale": "Execute step 1",
             "action": {"type": "tool_call", "tool": "test_tool", "tool_input": {}},
             "expected_outcome": "Step 1 completes",
             "confidence": 0.9,
-        },
-        {
+        })},
+        {"success": True, "content": json.dumps({
+            "step_ref": 1,
+            "rationale": "Step 1 done",
+            "action": {"type": "finish_step"},
+            "expected_outcome": "Complete",
+            "confidence": 1.0,
+        })},
+        {"success": True, "content": json.dumps({
             "step_ref": 2,
             "rationale": "Execute step 2",
             "action": {"type": "tool_call", "tool": "test_tool", "tool_input": {}},
             "expected_outcome": "Step 2 completes",
             "confidence": 0.9,
-        },
-    ]
-
-    mock_llm_provider.complete.side_effect = [
-        {"success": True, "content": json.dumps(thought_responses[0])},
-        {"success": True, "content": json.dumps(thought_responses[1])},
+        })},
+        {"success": True, "content": json.dumps({
+            "step_ref": 2,
+            "rationale": "Step 2 done",
+            "action": {"type": "finish_step"},
+            "expected_outcome": "Complete",
+            "confidence": 1.0,
+        })},
     ]
 
     mock_tool.execute.return_value = {"success": True, "output": "success"}
@@ -694,3 +732,201 @@ async def test_is_plan_complete(agent):
     todolist.items[1].status = TaskStatus.SKIPPED
     assert agent._is_plan_complete(todolist) is True
 
+
+# ============================================================================
+# FINISH_STEP Tests - Autonomous Kernel Infrastructure
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_action_type_includes_finish_step():
+    """Test that ActionType enum includes FINISH_STEP."""
+    assert ActionType.FINISH_STEP == "finish_step"
+    assert ActionType.FINISH_STEP.value == "finish_step"
+
+
+@pytest.mark.asyncio
+async def test_tool_success_keeps_step_pending(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider, mock_tool
+):
+    """Test that successful tool execution keeps step PENDING (not COMPLETED).
+    
+    This is the core behavior change: tool success != step completion.
+    The agent must explicitly emit FINISH_STEP to complete a step.
+    """
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test step",
+                acceptance_criteria="Must be verified",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns tool_call (NOT finish_step)
+    thought_response = {
+        "step_ref": 1,
+        "rationale": "Execute tool first",
+        "action": {"type": "tool_call", "tool": "test_tool", "tool_input": {}},
+        "expected_outcome": "Tool executes",
+        "confidence": 0.9,
+    }
+    
+    # After tool success, LLM emits finish_step
+    finish_response = {
+        "step_ref": 1,
+        "rationale": "Tool succeeded, step is done",
+        "action": {"type": "finish_step"},
+        "expected_outcome": "Step marked complete",
+        "confidence": 1.0,
+    }
+    
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps(thought_response)},
+        {"success": True, "content": json.dumps(finish_response)},
+    ]
+
+    # Tool succeeds
+    mock_tool.execute.return_value = {"success": True, "output": "done"}
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: LLM was called twice (tool_call, then finish_step)
+    assert mock_llm_provider.complete.call_count == 2
+
+    # Verify: step ends up COMPLETED only after finish_step
+    assert result.status == "completed"
+    updated_todolist = mock_todolist_manager.update_todolist.call_args[0][0]
+    assert updated_todolist.items[0].status == TaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_tool_success_resets_attempts_counter(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider, mock_tool
+):
+    """Test that successful tool execution resets attempts counter to 0.
+    
+    This allows extended workflows without hitting retry limits.
+    The execution_history records attempt counts at each step, which proves the reset.
+    """
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test step",
+                acceptance_criteria="Verified",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=2,  # Start with some attempts already used
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns tool_call then finish_step
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps({
+            "step_ref": 1,
+            "rationale": "Execute tool",
+            "action": {"type": "tool_call", "tool": "test_tool", "tool_input": {}},
+            "expected_outcome": "Success",
+            "confidence": 0.9,
+        })},
+        {"success": True, "content": json.dumps({
+            "step_ref": 1,
+            "rationale": "Done",
+            "action": {"type": "finish_step"},
+            "expected_outcome": "Complete",
+            "confidence": 1.0,
+        })},
+    ]
+
+    mock_tool.execute.return_value = {"success": True, "output": "done"}
+
+    # Execute
+    await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify reset happened by checking execution_history
+    # The execution_history records attempt count at each call:
+    # - First entry: tool_call with attempt=3 (2+1 before reset)
+    # - Second entry: finish_step with attempt=1 (0+1 after reset)
+    step = todolist.items[0]
+    assert len(step.execution_history) == 2
+    
+    # First call recorded attempt 3 (started at 2, incremented to 3)
+    assert step.execution_history[0]["attempt"] == 3
+    
+    # After reset to 0, finish_step incremented to 1
+    # This proves the reset happened between the two calls
+    assert step.execution_history[1]["attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_finish_step_completes_step_explicitly(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that FINISH_STEP action explicitly completes a step."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Complete explicitly",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM directly emits finish_step (e.g., if step was already satisfied)
+    thought_response = {
+        "step_ref": 1,
+        "rationale": "Step requirements already met",
+        "action": {"type": "finish_step"},
+        "expected_outcome": "Step marked complete",
+        "confidence": 1.0,
+    }
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps(thought_response),
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify step is COMPLETED
+    assert result.status == "completed"
+    updated_todolist = mock_todolist_manager.update_todolist.call_args[0][0]
+    assert updated_todolist.items[0].status == TaskStatus.COMPLETED

@@ -524,7 +524,7 @@ class Agent:
             "step_ref": "int",
             "rationale": "string (<= 2 sentences)",
             "action": {
-                "type": "tool_call|ask_user|complete|replan",
+                "type": "tool_call|ask_user|complete|replan|finish_step",
                 "tool": "string|null (for tool_call)",
                 "tool_input": "object (for tool_call)",
                 "question": "string (for ask_user)",
@@ -564,7 +564,9 @@ Error Message: {error.get('error', 'Unknown error')}
             "- Choose the appropriate tool to fulfill the step's acceptance criteria.\n"
             "- If this is a retry, FIX the previous error using the hints provided.\n"
             "- If information is missing, use ask_user action.\n"
-            "- If the step is already fulfilled, use complete action.\n"
+            "- If the entire mission is already fulfilled, use complete action.\n"
+            "- IMPORTANT: After a tool succeeds, you may continue iterating (e.g., run tests).\n"
+            "  Only use finish_step when you have VERIFIED the step's acceptance criteria are met.\n"
             "- Return STRICT JSON only matching this schema:\n"
             f"{json.dumps(schema_hint, indent=2)}\n"
         )
@@ -658,6 +660,10 @@ Error Message: {error.get('error', 'Unknown error')}
             # Replanning would be handled by todolist_manager
             return Observation(success=True, data={"replan_reason": action.replan_reason})
 
+        elif action.type == ActionType.FINISH_STEP:
+            # Explicit signal that agent has verified and completed the step
+            return Observation(success=True, data={"finish_step": True})
+
         else:
             return Observation(success=False, error=f"Unknown action type: {action.type}")
 
@@ -686,10 +692,18 @@ Error Message: {error.get('error', 'Unknown error')}
         state: dict[str, Any],
         session_id: str,
     ) -> None:
-        """Process observation and update step status."""
-        # Update step with execution details
-        step.chosen_tool = action.tool
-        step.tool_input = action.tool_input
+        """
+        Process observation and update step status.
+
+        Key behavior: Tool success does NOT auto-complete a step. The agent must
+        explicitly emit FINISH_STEP to mark a step as completed. This allows
+        the agent to iterate (e.g., run tests after writing code) and self-heal
+        errors before declaring the task done.
+        """
+        # Update step with execution details (only set tool/input if action has them)
+        if action.tool:
+            step.chosen_tool = action.tool
+            step.tool_input = action.tool_input
         step.execution_result = observation.data
         step.attempts += 1
 
@@ -707,17 +721,26 @@ Error Message: {error.get('error', 'Unknown error')}
             }
         )
 
-        # Update status based on observation
-        if observation.success:
-            # Check acceptance criteria
-            if await self._check_acceptance(step, observation):
-                step.status = TaskStatus.COMPLETED
-                self.logger.info("step_completed", session_id=session_id, step=step.position)
-            else:
-                step.status = TaskStatus.FAILED
-                self.logger.warning(
-                    "acceptance_failed", session_id=session_id, step=step.position
-                )
+        # Update status based on action type and observation
+        if action.type == ActionType.FINISH_STEP:
+            # Explicit completion signal from agent
+            step.status = TaskStatus.COMPLETED
+            self.logger.info(
+                "step_completed_explicitly",
+                session_id=session_id,
+                step=step.position,
+                total_attempts=step.attempts,
+            )
+        elif observation.success:
+            # Tool succeeded but step is NOT complete - agent must continue iterating
+            step.status = TaskStatus.PENDING
+            step.attempts = 0  # Reset attempts for extended workflows
+            self.logger.info(
+                "tool_success_continuing_iteration",
+                session_id=session_id,
+                step=step.position,
+                tool=action.tool,
+            )
         else:
             # Tool execution failed
             if step.attempts >= step.max_attempts:
@@ -733,12 +756,6 @@ Error Message: {error.get('error', 'Unknown error')}
         # Persist changes
         await self.todolist_manager.update_todolist(todolist)
         await self.state_manager.save_state(session_id, state)
-
-    async def _check_acceptance(self, step: TodoItem, observation: Observation) -> bool:
-        """Check if acceptance criteria are met."""
-        # Simple heuristic: if tool succeeded, step is fulfilled
-        # TODO: Later refine with LLM call for complex criteria
-        return observation.success
 
     def _is_plan_complete(self, todolist: TodoList) -> bool:
         """Check if all steps are completed or skipped."""
