@@ -644,13 +644,28 @@ Error Message: {error.get('error', 'Unknown error')}
             )
             return thought
         except (json.JSONDecodeError, KeyError) as e:
-            self.logger.error(
-                "thought_parse_failed",
+            # FALLBACK: LLM responded with plain text instead of JSON.
+            # Model "broke character" and answered directly.
+            # We treat the entire text as a COMPLETE action summary.
+            self.logger.warning(
+                "thought_parse_failed_using_fallback",
                 step=current_step.position,
                 error=str(e),
-                raw_content=raw_content[:500],
+                raw_preview=raw_content[:100],
             )
-            raise RuntimeError(f"Failed to parse thought: {e}") from e
+
+            fallback_action = Action(
+                type=ActionType.COMPLETE,
+                summary=raw_content,  # The LLM's text becomes the answer
+            )
+
+            return Thought(
+                step_ref=current_step.position,
+                rationale="LLM provided direct text response instead of JSON. Treating as completion.",
+                action=fallback_action,
+                expected_outcome="User receives the text answer.",
+                confidence=1.0,
+            )
 
     async def _execute_action(
         self, action: Action, step: TodoItem, state: dict[str, Any], session_id: str
@@ -684,7 +699,8 @@ Error Message: {error.get('error', 'Unknown error')}
 
         elif action.type == ActionType.FINISH_STEP:
             # Explicit signal that agent has verified and completed the step
-            return Observation(success=True, data={"finish_step": True})
+            # Pass through the summary so _extract_final_message can find it
+            return Observation(success=True, data={"summary": action.summary})
 
         else:
             return Observation(success=False, error=f"Unknown action type: {action.type}")
@@ -796,65 +812,58 @@ Error Message: {error.get('error', 'Unknown error')}
         """
         Extract meaningful final message from completed plan.
 
-        Tries to find the actual response/result from the last completed step,
-        rather than just returning "All tasks completed successfully".
+        Aggregates summaries from all completed steps to form a cohesive answer.
+        For multi-step plans, combines results with step headers.
 
         Args:
             todolist: Completed TodoList
             execution_history: Execution history with thoughts and observations
 
         Returns:
-            Meaningful final message or default completion message
+            Aggregated message from all steps or default completion message
         """
-        # Try to find the last completed step's result
-        for step in reversed(todolist.items):
+        messages = []
+        # Priority list of keys to extract text from
+        # 'summary' is top priority because FINISH_STEP uses it
+        keys_to_check = [
+            "summary", "generated_text", "response", "content", "result"
+        ]
+
+        # Iterate through ALL completed steps to gather the full story
+        for step in todolist.items:
             if step.status == TaskStatus.COMPLETED and step.execution_result:
                 result = step.execution_result
-                
-                # Debug logging
-                self.logger.debug(
-                    "extracting_final_message",
-                    step_position=step.position,
-                    result_type=type(result).__name__,
-                    result_keys=list(result.keys()) if isinstance(result, dict) else None,
-                )
-                
-                # If it's a tool result with generated text (e.g., llm_generate)
+                text = None
+
                 if isinstance(result, dict):
-                    # Check for common result fields
-                    if "generated_text" in result:
-                        text = result["generated_text"]
-                        if text and isinstance(text, str) and len(text.strip()) > 0:
-                            return text.strip()
-                    if "response" in result:
-                        text = result["response"]
-                        if text and isinstance(text, str) and len(text.strip()) > 0:
-                            return text.strip()
-                    if "content" in result:
-                        text = result["content"]
-                        if text and isinstance(text, str) and len(text.strip()) > 0:
-                            return text.strip()
-                    if "result" in result and isinstance(result["result"], str):
-                        text = result["result"]
-                        if text and len(text.strip()) > 0:
-                            return text.strip()
-                    
-                    # For successful tool executions, try to extract meaningful data
-                    if result.get("success") and "data" in result:
-                        data = result["data"]
+                    # Check top-level keys
+                    for key in keys_to_check:
+                        if key in result:
+                            val = result[key]
+                            if isinstance(val, str) and val.strip():
+                                text = val.strip()
+                                break
+
+                    # Check inside 'data' sub-dict (standard tool result format)
+                    if not text and result.get("success"):
+                        data = result.get("data")
                         if isinstance(data, dict):
-                            if "generated_text" in data:
-                                text = data["generated_text"]
-                                if text and isinstance(text, str) and len(text.strip()) > 0:
-                                    return text.strip()
-                            if "response" in data:
-                                text = data["response"]
-                                if text and isinstance(text, str) and len(text.strip()) > 0:
-                                    return text.strip()
-                            if "content" in data:
-                                text = data["content"]
-                                if text and isinstance(text, str) and len(text.strip()) > 0:
-                                    return text.strip()
+                            for key in keys_to_check:
+                                if key in data:
+                                    val = data[key]
+                                    if isinstance(val, str) and val.strip():
+                                        text = val.strip()
+                                        break
+
+                if text:
+                    # Add step header for multi-step plans
+                    if len(todolist.items) > 1:
+                        messages.append(f"**Step {step.position}:** {text}")
+                    else:
+                        messages.append(text)
+
+        if messages:
+            return "\n\n".join(messages)
 
         # Fallback: return default message
-        return "All tasks completed successfully"
+        return "All tasks completed successfully."
