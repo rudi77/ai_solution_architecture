@@ -18,7 +18,13 @@ from typing import Any
 
 import structlog
 
-from taskforce.core.domain.events import Action, ActionType, Observation, Thought
+from taskforce.core.domain.events import (
+    Action,
+    ActionType,
+    Observation,
+    Thought
+)
+
 from taskforce.core.domain.models import ExecutionResult
 from taskforce.core.domain.replanning import (
     REPLAN_PROMPT_TEMPLATE,
@@ -140,7 +146,23 @@ class Agent:
         # 3. Get or create TodoList
         todolist = await self._get_or_create_todolist(state, mission, session_id)
 
-        # 3. Execute ReAct loop
+        # 3a. Empty plan recovery - inject a recovery step if plan is empty
+        if not todolist.items:
+            self.logger.warning(
+                "empty_plan_detected_injecting_recovery",
+                session_id=session_id,
+                todolist_id=todolist.todolist_id,
+            )
+            recovery_step = TodoItem(
+                position=1,
+                description="Analyze the mission and create a valid execution plan.",
+                acceptance_criteria="A plan with at least one actionable step is created.",
+                status=TaskStatus.PENDING,
+            )
+            todolist.items.append(recovery_step)
+            await self.todolist_manager.update_todolist(todolist)
+
+        # 4. Execute ReAct loop
         iteration = 0
         while not self._is_plan_complete(todolist) and iteration < self.MAX_ITERATIONS:
             iteration += 1
@@ -242,7 +264,7 @@ class Agent:
                     todolist_id=todolist.todolist_id,
                 )
 
-        # 4. Determine final status and extract final message
+        # 5. Determine final status and extract final message
         if self._is_plan_complete(todolist):
             status = "completed"
             # Try to extract meaningful response from last completed step
@@ -758,7 +780,14 @@ Error Message: {error.get('error', 'Unknown error')}
         await self.state_manager.save_state(session_id, state)
 
     def _is_plan_complete(self, todolist: TodoList) -> bool:
-        """Check if all steps are completed or skipped."""
+        """Check if all steps are completed or skipped.
+        
+        An empty plan is NOT complete - it indicates a planning failure
+        that requires recovery.
+        """
+        if not todolist.items:
+            return False  # Empty plan is broken, not complete
+            
         return all(s.status in (TaskStatus.COMPLETED, TaskStatus.SKIPPED) for s in todolist.items)
 
     def _extract_final_message(

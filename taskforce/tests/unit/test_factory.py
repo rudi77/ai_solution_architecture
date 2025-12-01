@@ -423,24 +423,26 @@ class TestSpecialistProfiles:
             factory._create_specialist_tools("invalid", config, mock_llm)
 
     @pytest.mark.asyncio
-    async def test_create_agent_with_coding_specialist(self):
-        """Test creating agent with coding specialist profile."""
+    async def test_create_agent_with_coding_specialist_from_config(self):
+        """Test creating agent with coding specialist using coding_dev config."""
         factory = AgentFactory(config_dir="configs")
 
+        # coding_dev.yaml has specialist: coding AND tools defined
         agent = await factory.create_agent(
-            profile="dev",
-            specialist="coding",
+            profile="coding_dev",
             work_dir=".test_coding_agent",
         )
 
         assert isinstance(agent, Agent)
-        assert len(agent.tools) == 4  # 4 coding tools
+        assert len(agent.tools) == 4  # 4 coding tools from config
 
         tool_names = list(agent.tools.keys())
         assert "file_read" in tool_names
         assert "file_write" in tool_names
         assert "powershell" in tool_names
         assert "ask_user" in tool_names
+        # Prompt should still be coding specialist
+        assert "Coding Specialist" in agent.system_prompt
 
     @pytest.mark.asyncio
     @patch.dict(
@@ -450,37 +452,43 @@ class TestSpecialistProfiles:
             "AZURE_SEARCH_API_KEY": "test-key",
         },
     )
-    async def test_create_agent_with_rag_specialist(self):
-        """Test creating agent with RAG specialist profile."""
+    async def test_create_agent_with_rag_specialist_from_config(self):
+        """Test creating agent with RAG specialist using rag_dev config."""
         factory = AgentFactory(config_dir="configs")
 
+        # rag_dev.yaml has specialist: rag AND tools defined
         agent = await factory.create_agent(
-            profile="dev",
-            specialist="rag",
+            profile="rag_dev",
             work_dir=".test_rag_agent",
         )
 
         assert isinstance(agent, Agent)
-        assert len(agent.tools) == 4  # 4 RAG tools
+        # rag_dev has RAG tools + standard tools in config
+        assert len(agent.tools) >= 4
 
         tool_names = list(agent.tools.keys())
         assert "rag_semantic_search" in tool_names
         assert "rag_list_documents" in tool_names
         assert "rag_get_document" in tool_names
-        assert "ask_user" in tool_names
+        # Prompt should be RAG specialist
+        assert "RAG Specialist" in agent.system_prompt
 
     @pytest.mark.asyncio
-    async def test_create_agent_generic_has_more_tools_than_coding(self):
-        """Test that generic agent has more tools than coding specialist."""
+    async def test_config_tools_override_specialist_defaults(self):
+        """Test that config tools override specialist defaults (Option B)."""
         factory = AgentFactory(config_dir="configs")
 
-        generic_agent = await factory.create_agent(profile="dev", specialist="generic")
-        coding_agent = await factory.create_agent(profile="dev", specialist="coding")
+        # dev.yaml has tools defined AND specialist: generic
+        # Even if we specify specialist="coding", it should use config tools
+        generic_agent = await factory.create_agent(profile="dev")
+        
+        # coding_dev.yaml has tools defined
+        coding_agent = await factory.create_agent(profile="coding_dev")
 
-        # Generic has 10+ tools (native + MCP), coding has 4
+        # Both configs have tools, so tools come from config (not specialist defaults)
+        # dev has more tools than coding_dev
         assert len(generic_agent.tools) > len(coding_agent.tools)
-        assert len(generic_agent.tools) >= 10  # At least 10 native tools
-        assert len(coding_agent.tools) == 4
+        assert len(coding_agent.tools) == 4  # coding_dev has 4 tools in config
 
     @pytest.mark.asyncio
     async def test_specialist_prompt_is_longer_than_kernel_only(self):
@@ -513,16 +521,19 @@ class TestSpecialistProfiles:
         assert "Coding Specialist" in agent.system_prompt
 
     @pytest.mark.asyncio
-    async def test_create_agent_specialist_param_overrides_config(self):
-        """Test that specialist parameter overrides config value."""
+    async def test_specialist_param_overrides_config_for_prompt(self):
+        """Test that specialist parameter overrides config for prompt selection."""
         factory = AgentFactory(config_dir="configs")
 
-        # dev.yaml has specialist: generic, but we override with coding
+        # dev.yaml has specialist: generic AND tools defined
+        # Override specialist to "coding" - this affects the PROMPT, not tools
+        # (because dev.yaml has tools defined, those are used)
         agent = await factory.create_agent(profile="dev", specialist="coding")
 
-        # Should have coding tools despite dev config having generic
-        assert len(agent.tools) == 4
+        # Tools come from config (dev.yaml has tools)
+        assert len(agent.tools) >= 10  # dev has 10+ tools
         assert "file_read" in agent.tools
+        # But prompt should be coding specialist (parameter override)
         assert "Coding Specialist" in agent.system_prompt
 
 
