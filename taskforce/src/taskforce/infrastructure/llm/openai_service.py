@@ -721,8 +721,19 @@ class OpenAIService(LLMProviderProtocol):
                 "max_tokens",
                 "frequency_penalty",
                 "presence_penalty",
+                "response_format",
             ]
-            return {k: v for k, v in params.items() if k in allowed_params}
+            filtered = {k: v for k, v in params.items() if k in allowed_params}
+            
+            # Ensure response_format is properly formatted for LiteLLM
+            # Azure requires response_format as a simple dict, not Pydantic model
+            if "response_format" in filtered:
+                rf = filtered["response_format"]
+                if isinstance(rf, dict):
+                    # Ensure it's a clean dict (not a Pydantic model dump)
+                    filtered["response_format"] = {"type": rf.get("type", "json_object")}
+            
+            return filtered
 
     async def _trace_interaction(
         self,

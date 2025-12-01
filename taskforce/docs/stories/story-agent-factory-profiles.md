@@ -63,20 +63,25 @@ Claude Opus 4.5
 - Added `_create_specialist_tools()` method for profile-specific tool injection
 - Updated prompts `__init__.py` to export new prompt constants
 - **Config-based specialist loading**: Factory now reads `specialist` from YAML config if not provided as parameter
-- Created `coding_dev.yaml` config with `specialist: coding`
+- **Option B: Config tools override specialist defaults**:
+  - If config has `tools:` defined → use those tools (regardless of specialist)
+  - If config has NO `tools:` → use specialist default tools
+  - The `specialist` field always determines the system prompt
+- Created `coding_dev.yaml` config with `specialist: coding` and explicit tools
 - Updated all config profiles to include `specialist` field (generic/coding/rag)
 - Added 13 new tests in `TestSpecialistProfiles` class covering:
   - Prompt assembly for generic/coding/rag profiles
   - Tool creation for coding/rag profiles
-  - Agent creation with specialist profiles
-  - Config-based specialist loading
-  - Parameter override of config specialist
+  - Agent creation from specialist configs
+  - Config tools override specialist defaults
+  - Specialist parameter overrides config for prompt
   - Validation of invalid profiles
 
 ### Completion Notes
 - All 13 specialist profile tests pass
 - The `specialist` parameter was used instead of `profile` to avoid confusion with the existing `profile` parameter (which controls dev/staging/prod config)
 - Agents can now be created simply via `factory.create_agent(profile="coding_dev")` to get a coding specialist
+- **Tool Override Logic**: Config tools take precedence over specialist defaults, allowing full customization per config while maintaining specialist prompts
 - Pre-existing test failures in the test suite were not addressed as they are unrelated to this story (deprecated `_create_rag_tools` method tests)
 
 ### Debug Log References
