@@ -33,9 +33,9 @@ model_params:
     max_tokens: 4000
 
   gpt-5-mini:
-    effort: "low"
-    reasoning: "minimal"
-    max_tokens: 4000    
+    effort: "medium"
+    reasoning: "balanced"
+    max_tokens: 10000    
 
 default_params:
   temperature: 0.7

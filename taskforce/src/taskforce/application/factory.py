@@ -27,6 +27,7 @@ from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.infrastructure.persistence.file_todolist import FileTodoListManager
 from taskforce.core.interfaces.state import StateManagerProtocol
 from taskforce.core.interfaces.tools import ToolProtocol
+from taskforce.core.prompts import build_system_prompt, format_tools_description
 
 
 class AgentFactory:
@@ -112,21 +113,40 @@ class AgentFactory:
         state_manager = self._create_state_manager(config)
         llm_provider = self._create_llm_provider(config)
 
-        # Select tools based on specialist profile
-        if effective_specialist in ("coding", "rag"):
+        # Select tools: config tools override specialist defaults
+        tools_config = config.get("tools", [])
+        has_config_tools = bool(tools_config)
+
+        if has_config_tools:
+            # Config defines tools explicitly - use those
+            self.logger.debug(
+                "using_config_tools",
+                specialist=effective_specialist,
+                tool_count=len(tools_config),
+            )
+            tools = self._create_native_tools(config, llm_provider)
+            # Load MCP tools if configured
+            mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
+            tools.extend(mcp_tools)
+        elif effective_specialist in ("coding", "rag"):
+            # No config tools - use specialist defaults
+            self.logger.debug(
+                "using_specialist_defaults",
+                specialist=effective_specialist,
+            )
             tools = self._create_specialist_tools(
                 effective_specialist, config, llm_provider
             )
             mcp_contexts = []
         else:
-            # Generic: use config-based tools or defaults
-            tools = self._create_native_tools(config, llm_provider)
+            # Generic without config - use default tools
+            tools = self._create_default_tools(llm_provider)
             # Load MCP tools if configured
             mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
             tools.extend(mcp_tools)
 
         todolist_manager = self._create_todolist_manager(config, llm_provider)
-        system_prompt = self._assemble_system_prompt(effective_specialist)
+        system_prompt = self._assemble_system_prompt(effective_specialist, tools)
 
         # Create domain agent with injected dependencies
         agent = Agent(
@@ -201,7 +221,7 @@ class AgentFactory:
         tools.extend(mcp_tools)
 
         todolist_manager = self._create_todolist_manager(config, llm_provider)
-        system_prompt = self._load_system_prompt("rag")
+        system_prompt = self._assemble_system_prompt("rag", tools)
 
         agent = Agent(
             state_manager=state_manager,
@@ -688,19 +708,26 @@ class AgentFactory:
         work_dir = config.get("persistence", {}).get("work_dir", ".taskforce")
         return FileTodoListManager(work_dir=work_dir, llm_provider=llm_provider)
 
-    def _assemble_system_prompt(self, specialist: str) -> str:
+    def _assemble_system_prompt(
+        self, specialist: str, tools: list[ToolProtocol]
+    ) -> str:
         """
-        Assemble system prompt from Kernel + Specialist profile.
+        Assemble system prompt from Kernel + Specialist profile + Tools.
 
-        The prompt is composed of:
+        The prompt is dynamically composed of:
         1. GENERAL_AUTONOMOUS_KERNEL_PROMPT (shared by all agents)
         2. Specialist-specific prompt (based on profile)
+        3. Dynamic tools description (injected at runtime)
+
+        This approach ensures the LLM always has accurate information about
+        available tools and their parameters, making tool calls more reliable.
 
         Args:
             specialist: Specialist profile ("generic", "coding", "rag")
+            tools: List of available tools to inject into the prompt
 
         Returns:
-            Assembled system prompt string
+            Assembled system prompt string with tools description
 
         Raises:
             ValueError: If specialist profile is unknown
@@ -712,22 +739,32 @@ class AgentFactory:
         )
 
         # Start with the autonomous kernel
-        system_prompt = GENERAL_AUTONOMOUS_KERNEL_PROMPT
+        base_prompt = GENERAL_AUTONOMOUS_KERNEL_PROMPT
 
         # Append specialist-specific instructions
         if specialist == "coding":
-            system_prompt += "\n\n" + CODING_SPECIALIST_PROMPT
+            base_prompt += "\n\n" + CODING_SPECIALIST_PROMPT
         elif specialist == "rag":
-            system_prompt += "\n\n" + RAG_SPECIALIST_PROMPT
+            base_prompt += "\n\n" + RAG_SPECIALIST_PROMPT
         elif specialist == "generic":
             # Generic uses just the kernel (or could use legacy prompt)
             pass
         else:
             raise ValueError(f"Unknown specialist profile: {specialist}")
 
+        # Format tools description
+        tools_description = format_tools_description(tools) if tools else ""
+
+        # Build final prompt with dynamic tools injection
+        system_prompt = build_system_prompt(
+            base_prompt=base_prompt,
+            tools_description=tools_description,
+        )
+
         self.logger.debug(
             "system_prompt_assembled",
             specialist=specialist,
+            tools_count=len(tools),
             prompt_length=len(system_prompt),
         )
 
