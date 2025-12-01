@@ -165,12 +165,32 @@ logging:
 tracing:
   enabled: true
   # Mode: 'file', 'phoenix', or 'both'
+  # Note: Phoenix OTEL auto-instrumentation is separate from file tracing
   mode: "file"
   file_config:
     path: "traces/llm_traces.jsonl"
   phoenix_config:
-    # Endpoint for Arize Phoenix collector if different from default
-    # collector_endpoint: "http://localhost:6006"
+    # Arize Phoenix collector endpoints (Docker container)
+    # HTTP endpoint for traces
+    collector_endpoint: "http://localhost:6006/v1/traces"
+    # gRPC endpoint (preferred for performance)
+    grpc_endpoint: "http://localhost:4317"
     project_name: "taskforce"
+
+# ============================================================================
+# Phoenix OTEL Tracing (Environment Variables)
+# ============================================================================
+# The Phoenix OTEL integration is configured via environment variables:
+#
+# TRACING_ENABLED: Enable/disable tracing (default: true)
+# PHOENIX_PROJECT_NAME: Project name in Phoenix UI (default: taskforce)
+# PHOENIX_COLLECTOR_ENDPOINT: HTTP endpoint (default: http://localhost:6006/v1/traces)
+# PHOENIX_GRPC_ENDPOINT: gRPC endpoint (default: http://localhost:4317)
+#
+# Example (PowerShell):
+#   $env:TRACING_ENABLED = "true"
+#   $env:PHOENIX_PROJECT_NAME = "taskforce"
+#   $env:PHOENIX_GRPC_ENDPOINT = "http://localhost:4317"
+# ============================================================================
 
 
