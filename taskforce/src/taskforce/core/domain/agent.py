@@ -70,6 +70,7 @@ class Agent:
         tools: list[ToolProtocol],
         todolist_manager: TodoListManagerProtocol,
         system_prompt: str,
+        model_alias: str = "main",
     ):
         """
         Initialize Agent with injected dependencies.
@@ -80,12 +81,14 @@ class Agent:
             tools: List of available tools implementing ToolProtocol
             todolist_manager: Protocol for TodoList management
             system_prompt: Base system prompt for LLM interactions
+            model_alias: Model alias for LLM calls (default: "main")
         """
         self.state_manager = state_manager
         self.llm_provider = llm_provider
         self.tools = {tool.name: tool for tool in tools}
         self.todolist_manager = todolist_manager
         self.system_prompt = system_prompt
+        self.model_alias = model_alias
         self.logger = structlog.get_logger().bind(component="agent")
 
     async def execute(self, mission: str, session_id: str) -> ExecutionResult:
@@ -373,9 +376,8 @@ class Agent:
         """
         Asks the LLM how to fix the broken plan.
         """
-        # Context building
+        # Context building (tools are already in the system prompt's <ToolsDescription> section)
         context = extract_failure_context(current_step)
-        context["available_tools"] = self._get_tools_description()
         
         # Render prompt
         user_prompt = REPLAN_PROMPT_TEMPLATE.format(**context)
@@ -385,7 +387,7 @@ class Agent:
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            model="main", # Use the smart model for replanning
+            model=self.model_alias,
             response_format={"type": "json_object"},
             temperature=0.1
         )
@@ -456,7 +458,7 @@ class Agent:
         answers = state.get("answers", {})
         
         todolist = await self.todolist_manager.create_todolist(
-            mission=mission, tools_desc=tools_desc, answers=answers
+            mission=mission, tools_desc=tools_desc, answers=answers, model=self.model_alias
         )
 
         state["todolist_id"] = todolist.todolist_id
@@ -533,7 +535,6 @@ class Agent:
             "current_step": step,
             "current_error": current_error,
             "previous_results": previous_results[-5:],  # Last 5 results
-            "available_tools": self._get_tools_description(),
             "user_answers": state.get("answers", {}),
         }
 
@@ -581,9 +582,8 @@ Error Message: {error.get('error', 'Unknown error')}
             f"{error_context}"
             f"PREVIOUS_RESULTS:\n{json.dumps(context.get('previous_results', []), indent=2)}\n\n"
             f"USER_ANSWERS:\n{json.dumps(context.get('user_answers', {}), indent=2)}\n\n"
-            f"AVAILABLE_TOOLS:\n{context.get('available_tools', '')}\n\n"
             "Rules:\n"
-            "- Choose the appropriate tool to fulfill the step's acceptance criteria.\n"
+            "- Choose the appropriate tool from the <ToolsDescription> section to fulfill the step's acceptance criteria.\n"
             "- If this is a retry, FIX the previous error using the hints provided.\n"
             "- If information is missing, use ask_user action.\n"
             "- If the entire mission is already fulfilled, use complete action.\n"
@@ -610,7 +610,7 @@ Error Message: {error.get('error', 'Unknown error')}
         self.logger.info("llm_call_thought_start", step=current_step.position)
 
         result = await self.llm_provider.complete(
-            messages=messages, model="main", response_format={"type": "json_object"}, temperature=0.2
+            messages=messages, model=self.model_alias, response_format={"type": "json_object"}, temperature=0.2
         )
 
         if not result.get("success"):
@@ -867,3 +867,28 @@ Error Message: {error.get('error', 'Unknown error')}
 
         # Fallback: return default message
         return "All tasks completed successfully."
+
+    async def close(self) -> None:
+        """
+        Clean up agent resources, especially MCP client connections.
+
+        This method must be called when the agent is no longer needed to
+        properly close MCP client context managers. Failing to call this
+        can result in 'cancel scope in different task' errors from anyio.
+
+        The method is idempotent and safe to call multiple times.
+        """
+        # Close MCP contexts if they exist (set by factory)
+        mcp_contexts = getattr(self, "_mcp_contexts", None)
+        if mcp_contexts:
+            for ctx in mcp_contexts:
+                try:
+                    await ctx.__aexit__(None, None, None)
+                except Exception as e:
+                    self.logger.warning(
+                        "mcp_context_close_error",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
+            # Clear the list to prevent double-close
+            self._mcp_contexts = []

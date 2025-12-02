@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from taskforce.api.routes import execution, health, sessions
+from taskforce.infrastructure.tracing import init_tracing, shutdown_tracing
 
 logger = structlog.get_logger()
 
@@ -10,6 +11,9 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for FastAPI startup/shutdown events."""
+    # Initialize tracing first (before any LLM calls)
+    init_tracing()
+
     await logger.ainfo(
         "fastapi.startup", message="Taskforce API starting..."
     )
@@ -17,6 +21,9 @@ async def lifespan(app: FastAPI):
     await logger.ainfo(
         "fastapi.shutdown", message="Taskforce API shutting down..."
     )
+
+    # Shutdown tracing last (flush all pending spans)
+    shutdown_tracing()
 
 
 def create_app() -> FastAPI:

@@ -658,58 +658,29 @@ class OpenAIService(LLMProviderProtocol):
         Returns:
             Mapped parameters suitable for the model
         """
-        # Detect GPT-5 models
-        if "gpt-5" in model.lower():
+        # Detect GPT-5/o1/o3 reasoning models
+        # These models don't support traditional parameters like temperature, top_p, etc.
+        # Azure OpenAI also doesn't support effort/reasoning_effort parameters
+        if "gpt-5" in model.lower() or "o1" in model.lower() or "o3" in model.lower():
             mapped = {}
 
-            # Max tokens is universal
+            # GPT-5 uses max_completion_tokens instead of max_tokens
             if "max_tokens" in params:
-                mapped["max_tokens"] = params["max_tokens"]
+                mapped["max_completion_tokens"] = params["max_tokens"]
+            if "max_completion_tokens" in params:
+                mapped["max_completion_tokens"] = params["max_completion_tokens"]
 
-            # Map temperature to effort if temperature provided
-            # Ranges: <0.3=low, 0.3-0.7=medium, >0.7=high
-            if "temperature" in params and "effort" not in params:
-                temp = params["temperature"]
-                if temp < 0.3:
-                    mapped["effort"] = "low"
-                elif temp <= 0.7:
-                    mapped["effort"] = "medium"
-                else:
-                    mapped["effort"] = "high"
-
-                if self.logging_config.get("log_parameter_mapping", True):
-                    self.logger.info(
-                        "parameter_mapped_gpt5",
-                        model=model,
-                        temperature=temp,
-                        mapped_effort=mapped["effort"],
-                    )
-
-            # Use configured effort/reasoning if available
-            if "effort" in params:
-                mapped["effort"] = params["effort"]
-            if "reasoning" in params:
-                mapped["reasoning"] = params["reasoning"]
-
-            # Log if deprecated parameters were provided
-            deprecated = [
-                k
-                for k in params.keys()
-                if k
-                in [
-                    "temperature",
-                    "top_p",
-                    "logprobs",
-                    "frequency_penalty",
-                    "presence_penalty",
-                ]
+            # Log ignored parameters for debugging
+            ignored = [
+                k for k in params.keys()
+                if k not in ["max_tokens", "max_completion_tokens"]
             ]
-            if deprecated and self.logging_config.get("log_parameter_mapping", True):
-                self.logger.warning(
-                    "deprecated_parameters_ignored_gpt5",
+            if ignored and self.logging_config.get("log_parameter_mapping", True):
+                self.logger.info(
+                    "parameters_ignored_for_reasoning_model",
                     model=model,
-                    deprecated_params=deprecated,
-                    hint="These parameters are not supported by GPT-5",
+                    ignored_params=ignored,
+                    hint="GPT-5/o1/o3 models only support max_completion_tokens",
                 )
 
             return mapped
@@ -890,11 +861,12 @@ class OpenAIService(LLMProviderProtocol):
                     message_count=len(messages),
                 )
 
-                # Call LiteLLM
+                # Call LiteLLM with drop_params=True to auto-remove unsupported params
                 response = await litellm.acompletion(
                     model=actual_model,
                     messages=messages,
                     timeout=self.retry_policy.timeout,
+                    drop_params=True,
                     **final_params,
                 )
 

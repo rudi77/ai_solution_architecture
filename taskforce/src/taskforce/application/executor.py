@@ -76,6 +76,7 @@ class AgentExecutor:
         session_id: Optional[str] = None,
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         progress_callback: Optional[Callable[[ProgressUpdate], None]] = None,
+        user_context: Optional[Dict[str, Any]] = None,
     ) -> ExecutionResult:
         """Execute agent mission with comprehensive orchestration.
         
@@ -95,6 +96,8 @@ class AgentExecutor:
             session_id: Optional existing session to resume
             conversation_history: Optional conversation history for chat context
             progress_callback: Optional callback for progress updates
+            user_context: Optional user context for RAG security filtering
+                         (user_id, org_id, scope)
         
         Returns:
             ExecutionResult with completion status and history
@@ -113,11 +116,13 @@ class AgentExecutor:
             mission=mission[:100],
             profile=profile,
             session_id=session_id,
+            has_user_context=user_context is not None,
         )
 
+        agent = None
         try:
             # Create agent with appropriate adapters
-            agent = await self._create_agent(profile)
+            agent = await self._create_agent(profile, user_context=user_context)
 
             # Store conversation history in state if provided
             if conversation_history:
@@ -156,12 +161,18 @@ class AgentExecutor:
             )
             raise
 
+        finally:
+            # Clean up MCP connections to avoid cancel scope errors
+            if agent:
+                await agent.close()
+
     async def execute_mission_streaming(
         self,
         mission: str,
         profile: str = "dev",
         session_id: Optional[str] = None,
         conversation_history: Optional[List[Dict[str, Any]]] = None,
+        user_context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[ProgressUpdate]:
         """Execute mission with streaming progress updates.
         
@@ -173,6 +184,7 @@ class AgentExecutor:
             profile: Configuration profile (dev/staging/prod)
             session_id: Optional existing session to resume
             conversation_history: Optional conversation history for chat context
+            user_context: Optional user context for RAG security filtering
             
         Yields:
             ProgressUpdate objects for each execution event
@@ -189,6 +201,7 @@ class AgentExecutor:
             mission=mission[:100],
             profile=profile,
             session_id=session_id,
+            has_user_context=user_context is not None,
         )
 
         # Yield initial started event
@@ -199,9 +212,10 @@ class AgentExecutor:
             details={"session_id": session_id, "profile": profile},
         )
 
+        agent = None
         try:
             # Create agent
-            agent = await self._create_agent(profile)
+            agent = await self._create_agent(profile, user_context=user_context)
 
             # Store conversation history in state if provided
             if conversation_history:
@@ -233,16 +247,38 @@ class AgentExecutor:
 
             raise
 
-    async def _create_agent(self, profile: str) -> Agent:
+        finally:
+            # Clean up MCP connections to avoid cancel scope errors
+            if agent:
+                await agent.close()
+
+    async def _create_agent(
+        self, profile: str, user_context: Optional[Dict[str, Any]] = None
+    ) -> Agent:
         """Create agent using factory.
+        
+        Uses create_rag_agent when user_context is provided (for RAG profiles),
+        otherwise uses create_agent.
         
         Args:
             profile: Configuration profile name
+            user_context: Optional user context for RAG security filtering
             
         Returns:
             Agent instance with injected dependencies
         """
-        self.logger.debug("creating_agent", profile=profile)
+        self.logger.debug(
+            "creating_agent",
+            profile=profile,
+            has_user_context=user_context is not None,
+        )
+        
+        # Use RAG agent factory when user_context is provided
+        if user_context:
+            return await self.factory.create_rag_agent(
+                profile=profile, user_context=user_context
+            )
+        
         return await self.factory.create_agent(profile=profile)
 
     async def _execute_with_progress(
