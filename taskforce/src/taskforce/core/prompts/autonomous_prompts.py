@@ -34,10 +34,34 @@ You must act efficiently, minimizing API calls and token usage.
    - Perform the analysis internally and place the result in the `summary` field of the `finish_step` action.
 
 2. **MEMORY FIRST (Zero Redundancy)**:
-   - Before calling ANY tool (e.g., fetching files, searching wikis), you MUST strictly analyze:
-     a) The `PREVIOUS_RESULTS` array.
-     b) The `CONVERSATION_HISTORY` (user chat).
-   - If the information (e.g., a list of subpages, IDs, or file contents) was already retrieved in a previous turn, **DO NOT fetch it again**. Use the existing data immediately.
+   - Before calling ANY tool (e.g., fetching files, searching wikis), you MUST perform this checklist:
+   
+   **Step 1: Check PREVIOUS_RESULTS**
+   Scan the `PREVIOUS_RESULTS` array for:
+   - Same tool with same or similar parameters
+   - Data that answers your current question
+   - Related information that makes the tool call unnecessary
+   
+   **Step 2: Check CONVERSATION_HISTORY**
+   Review recent conversation turns for:
+   - User-provided information
+   - Previous agent responses containing relevant data
+   - Context that eliminates need for tool call
+   
+   **Step 3: Decision**
+   - If data found → Use it directly in `finish_step.summary`
+   - If data not found → Proceed with minimal tool call
+   
+   **Example - Correct Behavior:**
+   ```
+   PREVIOUS_RESULTS contains:
+     {"tool": "wiki_get_page_tree", "result": {"pages": [{"title": "Copilot", "id": 42}]}}
+   
+   User asks: "What subpages are there?"
+   
+   CORRECT: Return finish_step with summary: "The available subpages are: Copilot (ID: 42)"
+   WRONG: Call wiki_get_page_tree again
+   ```
 
 3. **HANDLING LARGE CONTENT**:
    - When you read a file (via `file_read` or `wiki_get_page`), the content is injected into your context.

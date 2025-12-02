@@ -24,6 +24,7 @@ import yaml
 
 from taskforce.core.domain.agent import Agent
 from taskforce.core.interfaces.llm import LLMProviderProtocol
+from taskforce.infrastructure.cache.tool_cache import ToolResultCache
 from taskforce.infrastructure.persistence.file_todolist import FileTodoListManager
 from taskforce.core.interfaces.state import StateManagerProtocol
 from taskforce.core.interfaces.tools import ToolProtocol
@@ -152,6 +153,20 @@ class AgentFactory:
         llm_config = config.get("llm", {})
         model_alias = llm_config.get("default_model", "main")
 
+        # Create tool result cache for session-scoped caching
+        # TTL can be configured per profile (default: 1 hour, 0 = session lifetime)
+        cache_config = config.get("cache", {})
+        cache_ttl = cache_config.get("tool_cache_ttl", 3600)
+        enable_cache = cache_config.get("enable_tool_cache", True)
+        tool_cache = ToolResultCache(default_ttl=cache_ttl) if enable_cache else None
+
+        if tool_cache:
+            self.logger.debug(
+                "tool_cache_created",
+                ttl=cache_ttl,
+                enabled=True,
+            )
+
         # Create domain agent with injected dependencies
         agent = Agent(
             state_manager=state_manager,
@@ -160,6 +175,7 @@ class AgentFactory:
             todolist_manager=todolist_manager,
             system_prompt=system_prompt,
             model_alias=model_alias,
+            tool_cache=tool_cache,
         )
 
         # Store MCP contexts on agent for lifecycle management
@@ -232,6 +248,19 @@ class AgentFactory:
         llm_config = config.get("llm", {})
         model_alias = llm_config.get("default_model", "main")
 
+        # Create tool result cache for session-scoped caching
+        cache_config = config.get("cache", {})
+        cache_ttl = cache_config.get("tool_cache_ttl", 3600)
+        enable_cache = cache_config.get("enable_tool_cache", True)
+        tool_cache = ToolResultCache(default_ttl=cache_ttl) if enable_cache else None
+
+        if tool_cache:
+            self.logger.debug(
+                "tool_cache_created_rag",
+                ttl=cache_ttl,
+                enabled=True,
+            )
+
         agent = Agent(
             state_manager=state_manager,
             llm_provider=llm_provider,
@@ -239,6 +268,7 @@ class AgentFactory:
             todolist_manager=todolist_manager,
             system_prompt=system_prompt,
             model_alias=model_alias,
+            tool_cache=tool_cache,
         )
         
         # Store MCP contexts on agent for lifecycle management

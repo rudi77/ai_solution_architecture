@@ -43,6 +43,10 @@ from taskforce.core.interfaces.todolist import (
 )
 from taskforce.core.interfaces.tools import ToolProtocol
 
+# Type hint import for optional cache (avoid circular import)
+if False:  # TYPE_CHECKING workaround for runtime
+    from taskforce.infrastructure.cache.tool_cache import ToolResultCache
+
 
 class Agent:
     """
@@ -63,6 +67,18 @@ class Agent:
 
     MAX_ITERATIONS = 50  # Safety limit to prevent infinite loops
 
+    # Whitelist of cacheable (read-only) tools
+    CACHEABLE_TOOLS = frozenset({
+        "wiki_get_page",
+        "wiki_get_page_tree",
+        "wiki_search",
+        "file_read",
+        "semantic_search",
+        "web_search",
+        "get_document",
+        "list_documents",
+    })
+
     def __init__(
         self,
         state_manager: StateManagerProtocol,
@@ -71,6 +87,7 @@ class Agent:
         todolist_manager: TodoListManagerProtocol,
         system_prompt: str,
         model_alias: str = "main",
+        tool_cache: "ToolResultCache | None" = None,
     ):
         """
         Initialize Agent with injected dependencies.
@@ -82,6 +99,7 @@ class Agent:
             todolist_manager: Protocol for TodoList management
             system_prompt: Base system prompt for LLM interactions
             model_alias: Model alias for LLM calls (default: "main")
+            tool_cache: Optional cache for tool results (session-scoped)
         """
         self.state_manager = state_manager
         self.llm_provider = llm_provider
@@ -89,6 +107,7 @@ class Agent:
         self.todolist_manager = todolist_manager
         self.system_prompt = system_prompt
         self.model_alias = model_alias
+        self._tool_cache = tool_cache
         self.logger = structlog.get_logger().bind(component="agent")
 
     async def execute(self, mission: str, session_id: str) -> ExecutionResult:
@@ -506,8 +525,21 @@ class Agent:
     def _build_thought_context(
         self, step: TodoItem, todolist: TodoList, state: dict[str, Any]
     ) -> dict[str, Any]:
-        """Build context for thought generation."""
-        # Collect results from previous steps
+        """
+        Build enriched context for thought generation.
+
+        Includes full previous results (not truncated), conversation history,
+        and cache information to help the LLM avoid redundant tool calls.
+
+        Args:
+            step: Current TodoItem being executed
+            todolist: Full TodoList with all items
+            state: Session state dictionary
+
+        Returns:
+            Context dictionary for LLM thought generation
+        """
+        # Collect ALL results from completed steps (not truncated)
         previous_results = [
             {
                 "step": s.position,
@@ -531,10 +563,24 @@ class Agent:
                 "max_attempts": step.max_attempts,
             }
 
+        # Include full conversation history from state
+        conversation_history = state.get("conversation_history", [])
+
+        # Include cache info for transparency
+        cache_info = None
+        if self._tool_cache:
+            cache_info = {
+                "enabled": True,
+                "stats": self._tool_cache.stats,
+                "hint": "Check PREVIOUS_RESULTS before calling tools - data may already be available",
+            }
+
         return {
             "current_step": step,
             "current_error": current_error,
-            "previous_results": previous_results[-5:],  # Last 5 results
+            "previous_results": previous_results,  # Full results, not truncated
+            "conversation_history": conversation_history,
+            "cache_info": cache_info,
             "user_answers": state.get("answers", {}),
         }
 
@@ -706,20 +752,80 @@ Error Message: {error.get('error', 'Unknown error')}
             return Observation(success=False, error=f"Unknown action type: {action.type}")
 
     async def _execute_tool(self, action: Action, step: TodoItem) -> Observation:
-        """Execute tool and return observation."""
+        """
+        Execute tool with caching support.
+
+        Before executing, checks the cache for identical requests.
+        After successful execution of cacheable tools, stores results.
+
+        Args:
+            action: Action containing tool name and input
+            step: Current TodoItem being executed
+
+        Returns:
+            Observation with tool result or cached result
+        """
         tool = self.tools.get(action.tool)
         if not tool:
             return Observation(success=False, error=f"Tool not found: {action.tool}")
 
+        tool_input = action.tool_input or {}
+
+        # Check cache first for cacheable tools
+        if self._tool_cache and self._is_cacheable_tool(action.tool):
+            cached = self._tool_cache.get(action.tool, tool_input)
+            if cached is not None:
+                self.logger.info(
+                    "tool_cache_hit",
+                    tool=action.tool,
+                    step=step.position,
+                    cache_stats=self._tool_cache.stats,
+                )
+                return Observation(
+                    success=cached.get("success", True),
+                    data=cached,
+                    error=cached.get("error"),
+                )
+
         try:
             self.logger.info("tool_execution_start", tool=action.tool, step=step.position)
-            result = await tool.execute(**(action.tool_input or {}))
+            result = await tool.execute(**tool_input)
             self.logger.info("tool_execution_end", tool=action.tool, step=step.position)
 
-            return Observation(success=result.get("success", False), data=result, error=result.get("error"))
+            # Cache successful results for cacheable tools
+            if self._tool_cache and result.get("success", False):
+                if self._is_cacheable_tool(action.tool):
+                    self._tool_cache.put(action.tool, tool_input, result)
+                    self.logger.debug(
+                        "tool_result_cached",
+                        tool=action.tool,
+                        step=step.position,
+                        cache_size=self._tool_cache.size,
+                    )
+
+            return Observation(
+                success=result.get("success", False),
+                data=result,
+                error=result.get("error"),
+            )
         except Exception as e:
             self.logger.error("tool_execution_exception", tool=action.tool, error=str(e))
             return Observation(success=False, error=str(e))
+
+    def _is_cacheable_tool(self, tool_name: str) -> bool:
+        """
+        Determine if tool results should be cached.
+
+        Only read-only tools are cacheable. Write operations (file_write,
+        git commit, etc.) should never be cached as they have side effects.
+
+        Args:
+            tool_name: Name of the tool
+
+        Returns:
+            True if tool results can be safely cached
+        """
+        return tool_name in self.CACHEABLE_TOOLS
 
     async def _process_observation(
         self,
