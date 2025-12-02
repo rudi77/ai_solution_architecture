@@ -4,6 +4,13 @@
 profile: prod
 specialist: generic  # Full toolset with autonomous kernel prompt
 
+# Agent configuration
+agent:
+  enable_fast_path: true  # Enable fast-path for follow-up queries
+  router:
+    use_llm_classification: true  # Use LLM for better accuracy in prod
+    max_follow_up_length: 100  # Max query length for follow-up classification
+
 # Persistence configuration
 persistence:
   type: database  # Use database state manager

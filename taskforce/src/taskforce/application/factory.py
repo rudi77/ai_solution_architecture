@@ -23,6 +23,7 @@ import structlog
 import yaml
 
 from taskforce.core.domain.agent import Agent
+from taskforce.core.domain.router import QueryRouter
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.infrastructure.cache.tool_cache import ToolResultCache
 from taskforce.infrastructure.persistence.file_todolist import FileTodoListManager
@@ -167,6 +168,24 @@ class AgentFactory:
                 enabled=True,
             )
 
+        # Create QueryRouter for fast-path routing (if enabled)
+        agent_config = config.get("agent", {})
+        enable_fast_path = agent_config.get("enable_fast_path", False)
+        router = None
+
+        if enable_fast_path:
+            router_config = agent_config.get("router", {})
+            router = QueryRouter(
+                llm_provider=llm_provider,
+                use_llm_classification=router_config.get("use_llm_classification", False),
+                max_follow_up_length=router_config.get("max_follow_up_length", 100),
+            )
+            self.logger.debug(
+                "query_router_created",
+                use_llm_classification=router_config.get("use_llm_classification", False),
+                max_follow_up_length=router_config.get("max_follow_up_length", 100),
+            )
+
         # Create domain agent with injected dependencies
         agent = Agent(
             state_manager=state_manager,
@@ -176,6 +195,8 @@ class AgentFactory:
             system_prompt=system_prompt,
             model_alias=model_alias,
             tool_cache=tool_cache,
+            router=router,
+            enable_fast_path=enable_fast_path,
         )
 
         # Store MCP contexts on agent for lifecycle management
@@ -261,6 +282,24 @@ class AgentFactory:
                 enabled=True,
             )
 
+        # Create QueryRouter for fast-path routing (if enabled)
+        agent_config = config.get("agent", {})
+        enable_fast_path = agent_config.get("enable_fast_path", False)
+        router = None
+
+        if enable_fast_path:
+            router_config = agent_config.get("router", {})
+            router = QueryRouter(
+                llm_provider=llm_provider,
+                use_llm_classification=router_config.get("use_llm_classification", False),
+                max_follow_up_length=router_config.get("max_follow_up_length", 100),
+            )
+            self.logger.debug(
+                "query_router_created_rag",
+                use_llm_classification=router_config.get("use_llm_classification", False),
+                max_follow_up_length=router_config.get("max_follow_up_length", 100),
+            )
+
         agent = Agent(
             state_manager=state_manager,
             llm_provider=llm_provider,
@@ -269,6 +308,8 @@ class AgentFactory:
             system_prompt=system_prompt,
             model_alias=model_alias,
             tool_cache=tool_cache,
+            router=router,
+            enable_fast_path=enable_fast_path,
         )
         
         # Store MCP contexts on agent for lifecycle management

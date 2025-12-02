@@ -24,6 +24,12 @@ from taskforce.core.domain.events import (
     Observation,
     Thought
 )
+from taskforce.core.domain.router import (
+    QueryRouter,
+    RouteDecision,
+    RouterContext,
+    RouterResult,
+)
 
 from taskforce.core.domain.models import ExecutionResult
 from taskforce.core.domain.replanning import (
@@ -88,6 +94,8 @@ class Agent:
         system_prompt: str,
         model_alias: str = "main",
         tool_cache: "ToolResultCache | None" = None,
+        router: QueryRouter | None = None,
+        enable_fast_path: bool = False,
     ):
         """
         Initialize Agent with injected dependencies.
@@ -100,6 +108,8 @@ class Agent:
             system_prompt: Base system prompt for LLM interactions
             model_alias: Model alias for LLM calls (default: "main")
             tool_cache: Optional cache for tool results (session-scoped)
+            router: Optional QueryRouter for fast-path routing
+            enable_fast_path: Whether to enable fast-path for follow-up queries
         """
         self.state_manager = state_manager
         self.llm_provider = llm_provider
@@ -108,6 +118,8 @@ class Agent:
         self.system_prompt = system_prompt
         self.model_alias = model_alias
         self._tool_cache = tool_cache
+        self._router = router
+        self._enable_fast_path = enable_fast_path
         self.logger = structlog.get_logger().bind(component="agent")
 
     async def execute(self, mission: str, session_id: str) -> ExecutionResult:
@@ -140,173 +152,23 @@ class Agent:
         state = await self.state_manager.load_state(session_id)
         execution_history: list[dict[str, Any]] = []
 
-        # 2. Check if we have a completed todolist and should reset for new query
-        # (Multi-turn conversation support - don't reuse completed todolists)
-        if not state.get("pending_question"):  # Not answering a question
-            todolist_id = state.get("todolist_id")
-            if todolist_id:
-                try:
-                    existing_todolist = await self.todolist_manager.load_todolist(todolist_id)
-                    if self._is_plan_complete(existing_todolist):
-                        # Completed todolist detected - reset for new query
-                        self.logger.info(
-                            "completed_todolist_detected_resetting",
-                            session_id=session_id,
-                            old_todolist_id=todolist_id,
-                        )
-                        # Remove todolist reference to force creation of new one
-                        state.pop("todolist_id", None)
-                        await self.state_manager.save_state(session_id, state)
-                except FileNotFoundError:
-                    # Todolist file missing, will create new one anyway
-                    self.logger.warning(
-                        "todolist_file_not_found",
-                        session_id=session_id,
-                        todolist_id=todolist_id,
-                    )
+        # 1a. Fast-path routing for follow-up queries
+        if self._router and self._enable_fast_path:
+            route_result = await self._route_query(mission, state, session_id)
 
-        # 3. Get or create TodoList
-        todolist = await self._get_or_create_todolist(state, mission, session_id)
-
-        # 3a. Empty plan recovery - inject a recovery step if plan is empty
-        if not todolist.items:
-            self.logger.warning(
-                "empty_plan_detected_injecting_recovery",
-                session_id=session_id,
-                todolist_id=todolist.todolist_id,
-            )
-            recovery_step = TodoItem(
-                position=1,
-                description="Analyze the mission and create a valid execution plan.",
-                acceptance_criteria="A plan with at least one actionable step is created.",
-                status=TaskStatus.PENDING,
-            )
-            todolist.items.append(recovery_step)
-            await self.todolist_manager.update_todolist(todolist)
-
-        # 4. Execute ReAct loop
-        iteration = 0
-        while not self._is_plan_complete(todolist) and iteration < self.MAX_ITERATIONS:
-            iteration += 1
-            self.logger.info("react_iteration", session_id=session_id, iteration=iteration)
-
-            # Get next actionable step
-            current_step = self._get_next_actionable_step(todolist)
-            if not current_step:
-                self.logger.info("no_actionable_steps", session_id=session_id)
-                break
-
-            self.logger.info(
-                "step_start",
-                session_id=session_id,
-                step=current_step.position,
-                description=current_step.description[:50],
-            )
-
-            # Generate Thought
-            context = self._build_thought_context(current_step, todolist, state)
-            # Add conversation history to context if available in state
-            if state.get("conversation_history"):
-                context["conversation_history"] = state.get("conversation_history")
-            thought = await self._generate_thought(context)
-            execution_history.append(
-                {"type": "thought", "step": current_step.position, "data": asdict(thought)}
-            )
-
-            # Execute Action
-            if thought.action.type == ActionType.REPLAN:
-                # SPECIAL HANDLING FOR REPLAN
-                self.logger.info("executing_replan", session_id=session_id)
-                todolist = await self._replan(current_step, thought, todolist, state, session_id)
-                
-                # Create observation for history
-                observation = Observation(success=True, data={"replan": "executed"})
-                execution_history.append(
-                    {
-                        "type": "observation", 
-                        "step": current_step.position, 
-                        "data": asdict(observation)
-                    }
-                )
-                
-                # Restart loop to evaluate new plan
-                continue
-            
-            else:
-                # STANDARD HANDLING
-                observation = await self._execute_action(thought.action, current_step, state, session_id)
-            
-            execution_history.append(
-                {
-                    "type": "observation",
-                    "step": current_step.position,
-                    "data": asdict(observation),
-                }
-            )
-
-            # Handle observation and update step status
-            await self._process_observation(
-                current_step, observation, thought.action, todolist, state, session_id
-            )
-
-            # Check if we need to pause for user input
-            if observation.requires_user:
-                self.logger.info("execution_paused_for_user", session_id=session_id)
-                pending_q = state.get("pending_question")
-                return ExecutionResult(
+            if route_result.decision == RouteDecision.FOLLOW_UP:
+                self.logger.info(
+                    "fast_path_activated",
                     session_id=session_id,
-                    status="paused",
-                    final_message=pending_q.get("question", "Waiting for user input") if pending_q else "Waiting for user input",
-                    execution_history=execution_history,
-                    todolist_id=todolist.todolist_id,
-                    pending_question=pending_q,
+                    confidence=route_result.confidence,
+                    rationale=route_result.rationale,
+                )
+                return await self._execute_fast_path(
+                    mission, state, session_id, execution_history
                 )
 
-            # Check for early completion
-            if thought.action.type == ActionType.COMPLETE:
-                self.logger.info("early_completion", session_id=session_id)
-                
-                # Mark current step as completed and save summary as result
-                current_step.status = TaskStatus.COMPLETED
-                current_step.execution_result = {"response": thought.action.summary}
-                
-                # Mark remaining pending steps as skipped
-                for step in todolist.items:
-                    if step.status == TaskStatus.PENDING:
-                        step.status = TaskStatus.SKIPPED
-                
-                await self.todolist_manager.update_todolist(todolist)
-                await self.state_manager.save_state(session_id, state)
-
-                return ExecutionResult(
-                    session_id=session_id,
-                    status="completed",
-                    final_message=thought.action.summary or "Mission completed",
-                    execution_history=execution_history,
-                    todolist_id=todolist.todolist_id,
-                )
-
-        # 5. Determine final status and extract final message
-        if self._is_plan_complete(todolist):
-            status = "completed"
-            # Try to extract meaningful response from last completed step
-            final_message = self._extract_final_message(todolist, execution_history)
-        elif iteration >= self.MAX_ITERATIONS:
-            status = "failed"
-            final_message = f"Exceeded maximum iterations ({self.MAX_ITERATIONS})"
-        else:
-            status = "failed"
-            final_message = "Execution stopped with incomplete tasks"
-
-        self.logger.info("execute_complete", session_id=session_id, status=status)
-
-        return ExecutionResult(
-            session_id=session_id,
-            status=status,
-            final_message=final_message,
-            execution_history=execution_history,
-            todolist_id=todolist.todolist_id,
-        )
+        # 2. Standard path: full planning and execution
+        return await self._execute_full_path(mission, state, session_id, execution_history)
 
     async def _replan(
         self, current_step: TodoItem, thought: Thought, todolist: TodoList, state: dict[str, Any], session_id: str
@@ -911,6 +773,353 @@ Error Message: {error.get('error', 'Unknown error')}
             return False  # Empty plan is broken, not complete
             
         return all(s.status in (TaskStatus.COMPLETED, TaskStatus.SKIPPED) for s in todolist.items)
+
+    async def _route_query(
+        self, mission: str, state: dict[str, Any], session_id: str
+    ) -> RouterResult:
+        """
+        Route query through classifier to determine execution path.
+
+        Args:
+            mission: User's mission/query
+            state: Current session state
+            session_id: Session identifier for logging
+
+        Returns:
+            RouterResult with decision, confidence, and rationale
+        """
+        todolist_id = state.get("todolist_id")
+        todolist = None
+        todolist_completed = False
+
+        if todolist_id:
+            try:
+                todolist = await self.todolist_manager.load_todolist(todolist_id)
+                todolist_completed = self._is_plan_complete(todolist)
+            except FileNotFoundError:
+                pass
+
+        context = RouterContext(
+            query=mission,
+            has_active_todolist=todolist is not None,
+            todolist_completed=todolist_completed,
+            previous_results=self._get_previous_results(todolist) if todolist else [],
+            conversation_history=state.get("conversation_history", []),
+            last_query=state.get("last_query"),
+        )
+
+        result = await self._router.classify(context)
+
+        self.logger.info(
+            "route_decision",
+            session_id=session_id,
+            decision=result.decision.value,
+            confidence=result.confidence,
+            rationale=result.rationale,
+        )
+
+        return result
+
+    def _get_previous_results(self, todolist: TodoList) -> list[dict[str, Any]]:
+        """
+        Extract previous execution results from todolist.
+
+        Args:
+            todolist: TodoList to extract results from
+
+        Returns:
+            List of result dictionaries from completed steps
+        """
+        results = []
+        for step in todolist.items:
+            if step.execution_result and step.status == TaskStatus.COMPLETED:
+                results.append({
+                    "step": step.position,
+                    "description": step.description,
+                    "tool": step.chosen_tool,
+                    "result": step.execution_result,
+                })
+        return results
+
+    async def _execute_fast_path(
+        self,
+        mission: str,
+        state: dict[str, Any],
+        session_id: str,
+        execution_history: list[dict[str, Any]],
+    ) -> ExecutionResult:
+        """
+        Execute query directly without creating a new TodoList.
+
+        Creates a single synthetic step and executes it, bypassing the
+        full planning cycle for simple follow-up questions.
+
+        Args:
+            mission: User's query/mission
+            state: Current session state
+            session_id: Session identifier
+            execution_history: List to record execution events
+
+        Returns:
+            ExecutionResult with status and final message
+        """
+        # Create synthetic single-step todoitem
+        synthetic_step = TodoItem(
+            position=1,
+            description=mission,
+            acceptance_criteria="User query answered satisfactorily",
+            dependencies=[],
+            status=TaskStatus.PENDING,
+        )
+
+        # Build context from previous session
+        todolist_id = state.get("todolist_id")
+        previous_results = []
+        if todolist_id:
+            try:
+                previous_todolist = await self.todolist_manager.load_todolist(todolist_id)
+                previous_results = self._get_previous_results(previous_todolist)
+            except FileNotFoundError:
+                pass
+
+        context = {
+            "current_step": synthetic_step,
+            "previous_results": previous_results,
+            "conversation_history": state.get("conversation_history", []),
+            "user_answers": state.get("answers", {}),
+            "fast_path": True,  # Signal to thought generator
+        }
+
+        # Generate thought and execute
+        thought = await self._generate_thought(context)
+        execution_history.append({
+            "type": "thought",
+            "step": 1,
+            "data": asdict(thought),
+            "fast_path": True,
+        })
+
+        # Handle direct completion (LLM answered without tool)
+        if thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP):
+            return ExecutionResult(
+                session_id=session_id,
+                status="completed",
+                final_message=thought.action.summary or "Query answered",
+                execution_history=execution_history,
+                todolist_id=state.get("todolist_id"),  # Keep previous todolist
+            )
+
+        # If tool call needed, execute it
+        if thought.action.type == ActionType.TOOL_CALL:
+            observation = await self._execute_tool(thought.action, synthetic_step)
+            execution_history.append({
+                "type": "observation",
+                "step": 1,
+                "data": asdict(observation),
+                "fast_path": True,
+            })
+
+            if observation.success:
+                # Generate final response from tool result
+                final_context = {
+                    **context,
+                    "tool_result": observation.data,
+                }
+                final_thought = await self._generate_thought(final_context)
+                execution_history.append({
+                    "type": "thought",
+                    "step": 1,
+                    "data": asdict(final_thought),
+                    "fast_path": True,
+                    "final": True,
+                })
+
+                return ExecutionResult(
+                    session_id=session_id,
+                    status="completed",
+                    final_message=final_thought.action.summary or str(observation.data),
+                    execution_history=execution_history,
+                    todolist_id=state.get("todolist_id"),
+                )
+
+            # Tool failed - fall back to full path
+            self.logger.warning(
+                "fast_path_tool_failed",
+                session_id=session_id,
+                tool=thought.action.tool,
+                error=observation.error,
+            )
+
+        # Fallback to full path if fast path can't handle
+        self.logger.info("fast_path_fallback", session_id=session_id)
+        return await self._execute_full_path(mission, state, session_id, execution_history)
+
+    async def _execute_full_path(
+        self,
+        mission: str,
+        state: dict[str, Any],
+        session_id: str,
+        execution_history: list[dict[str, Any]],
+    ) -> ExecutionResult:
+        """
+        Execute full planning path (standard ReAct loop).
+
+        This is extracted from execute() to support fast-path fallback.
+        Creates a TodoList and executes the full ReAct loop.
+
+        Args:
+            mission: User's mission/query
+            state: Current session state
+            session_id: Session identifier
+            execution_history: List to record execution events
+
+        Returns:
+            ExecutionResult with status and final message
+        """
+        # Check if we have a completed todolist and should reset for new query
+        if not state.get("pending_question"):
+            todolist_id = state.get("todolist_id")
+            if todolist_id:
+                try:
+                    existing_todolist = await self.todolist_manager.load_todolist(todolist_id)
+                    if self._is_plan_complete(existing_todolist):
+                        self.logger.info(
+                            "completed_todolist_detected_resetting",
+                            session_id=session_id,
+                            old_todolist_id=todolist_id,
+                        )
+                        state.pop("todolist_id", None)
+                        await self.state_manager.save_state(session_id, state)
+                except FileNotFoundError:
+                    self.logger.warning(
+                        "todolist_file_not_found",
+                        session_id=session_id,
+                        todolist_id=todolist_id,
+                    )
+
+        # Get or create TodoList
+        todolist = await self._get_or_create_todolist(state, mission, session_id)
+
+        # Empty plan recovery
+        if not todolist.items:
+            self.logger.warning(
+                "empty_plan_detected_injecting_recovery",
+                session_id=session_id,
+                todolist_id=todolist.todolist_id,
+            )
+            recovery_step = TodoItem(
+                position=1,
+                description="Analyze the mission and create a valid execution plan.",
+                acceptance_criteria="A plan with at least one actionable step is created.",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+            )
+            todolist.items.append(recovery_step)
+            await self.todolist_manager.update_todolist(todolist)
+
+        # Execute ReAct loop
+        iteration = 0
+        while not self._is_plan_complete(todolist) and iteration < self.MAX_ITERATIONS:
+            iteration += 1
+            self.logger.info("react_iteration", session_id=session_id, iteration=iteration)
+
+            current_step = self._get_next_actionable_step(todolist)
+            if not current_step:
+                self.logger.info("no_actionable_steps", session_id=session_id)
+                break
+
+            self.logger.info(
+                "step_start",
+                session_id=session_id,
+                step=current_step.position,
+                description=current_step.description[:50],
+            )
+
+            context = self._build_thought_context(current_step, todolist, state)
+            if state.get("conversation_history"):
+                context["conversation_history"] = state.get("conversation_history")
+            thought = await self._generate_thought(context)
+            execution_history.append(
+                {"type": "thought", "step": current_step.position, "data": asdict(thought)}
+            )
+
+            if thought.action.type == ActionType.REPLAN:
+                self.logger.info("executing_replan", session_id=session_id)
+                todolist = await self._replan(current_step, thought, todolist, state, session_id)
+                observation = Observation(success=True, data={"replan": "executed"})
+                execution_history.append({
+                    "type": "observation",
+                    "step": current_step.position,
+                    "data": asdict(observation),
+                })
+                continue
+            else:
+                observation = await self._execute_action(
+                    thought.action, current_step, state, session_id
+                )
+
+            execution_history.append({
+                "type": "observation",
+                "step": current_step.position,
+                "data": asdict(observation),
+            })
+
+            await self._process_observation(
+                current_step, observation, thought.action, todolist, state, session_id
+            )
+
+            if observation.requires_user:
+                self.logger.info("execution_paused_for_user", session_id=session_id)
+                pending_q = state.get("pending_question")
+                return ExecutionResult(
+                    session_id=session_id,
+                    status="paused",
+                    final_message=pending_q.get("question", "Waiting for user input")
+                    if pending_q
+                    else "Waiting for user input",
+                    execution_history=execution_history,
+                    todolist_id=todolist.todolist_id,
+                    pending_question=pending_q,
+                )
+
+            if thought.action.type == ActionType.COMPLETE:
+                self.logger.info("early_completion", session_id=session_id)
+                current_step.status = TaskStatus.COMPLETED
+                current_step.execution_result = {"response": thought.action.summary}
+                for step in todolist.items:
+                    if step.status == TaskStatus.PENDING:
+                        step.status = TaskStatus.SKIPPED
+                await self.todolist_manager.update_todolist(todolist)
+                await self.state_manager.save_state(session_id, state)
+
+                return ExecutionResult(
+                    session_id=session_id,
+                    status="completed",
+                    final_message=thought.action.summary or "Mission completed",
+                    execution_history=execution_history,
+                    todolist_id=todolist.todolist_id,
+                )
+
+        # Determine final status
+        if self._is_plan_complete(todolist):
+            status = "completed"
+            final_message = self._extract_final_message(todolist, execution_history)
+        elif iteration >= self.MAX_ITERATIONS:
+            status = "failed"
+            final_message = f"Exceeded maximum iterations ({self.MAX_ITERATIONS})"
+        else:
+            status = "failed"
+            final_message = "Execution stopped with incomplete tasks"
+
+        self.logger.info("execute_complete", session_id=session_id, status=status)
+
+        return ExecutionResult(
+            session_id=session_id,
+            status=status,
+            final_message=final_message,
+            execution_history=execution_history,
+            todolist_id=todolist.todolist_id,
+        )
 
     def _extract_final_message(
         self, todolist: TodoList, execution_history: list[dict[str, Any]]
