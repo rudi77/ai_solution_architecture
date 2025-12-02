@@ -30,6 +30,8 @@ from taskforce.infrastructure.persistence.file_todolist import FileTodoListManag
 from taskforce.core.interfaces.state import StateManagerProtocol
 from taskforce.core.interfaces.tools import ToolProtocol
 from taskforce.core.prompts import build_system_prompt, format_tools_description
+from taskforce.infrastructure.tools.filters import simplify_wiki_list_output
+from taskforce.infrastructure.tools.wrappers import OutputFilteringTool
 
 
 class AgentFactory:
@@ -539,6 +541,19 @@ class AgentFactory:
                     # Wrap each tool
                     for tool_def in tools_list:
                         wrapper = MCPToolWrapper(client, tool_def)
+
+                        # Apply output filtering for specific tools
+                        if wrapper.name == "list_wiki":
+                            self.logger.debug(
+                                "wrapping_tool_with_filter",
+                                tool_name=wrapper.name,
+                                filter="simplify_wiki_list_output",
+                            )
+                            wrapper = OutputFilteringTool(
+                                original_tool=wrapper,
+                                filter_func=simplify_wiki_list_output
+                            )
+
                         mcp_tools.append(wrapper)
                 
                 elif server_type == "sse":
@@ -577,6 +592,19 @@ class AgentFactory:
                     # Wrap each tool
                     for tool_def in tools_list:
                         wrapper = MCPToolWrapper(client, tool_def)
+
+                        # Apply output filtering for specific tools
+                        if wrapper.name == "list_wiki":
+                            self.logger.debug(
+                                "wrapping_tool_with_filter",
+                                tool_name=wrapper.name,
+                                filter="simplify_wiki_list_output",
+                            )
+                            wrapper = OutputFilteringTool(
+                                original_tool=wrapper,
+                                filter_func=simplify_wiki_list_output
+                            )
+
                         mcp_tools.append(wrapper)
                 
                 else:
