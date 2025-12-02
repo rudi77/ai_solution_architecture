@@ -878,12 +878,30 @@ Error Message: {error.get('error', 'Unknown error')}
 
         The method is idempotent and safe to call multiple times.
         """
+        import asyncio
+        
         # Close MCP contexts if they exist (set by factory)
         mcp_contexts = getattr(self, "_mcp_contexts", None)
         if mcp_contexts:
             for ctx in mcp_contexts:
                 try:
                     await ctx.__aexit__(None, None, None)
+                except (RuntimeError, asyncio.CancelledError) as e:
+                    # Suppress cancel scope errors during shutdown - these occur when
+                    # anyio TaskGroups are being cleaned up in different task contexts.
+                    # This is expected during CLI shutdown and harmless.
+                    if "cancel scope" in str(e).lower() or isinstance(e, asyncio.CancelledError):
+                        self.logger.debug(
+                            "mcp_context_close_cancelled",
+                            error=str(e),
+                            hint="Expected during shutdown, harmless",
+                        )
+                    else:
+                        self.logger.warning(
+                            "mcp_context_close_error",
+                            error=str(e),
+                            error_type=type(e).__name__,
+                        )
                 except Exception as e:
                     self.logger.warning(
                         "mcp_context_close_error",

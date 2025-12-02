@@ -113,70 +113,75 @@ def chat(
             tf_console.print_system_message("Agent initialized", "success")
             tf_console.print_divider()
 
-        while True:
-            # Get user input (blocking, but that's okay in CLI)
-            try:
-                user_input = tf_console.prompt()
-            except (KeyboardInterrupt, EOFError):
-                tf_console.print_divider()
-                tf_console.print_system_message("Goodbye! 👋", "info")
-                break
+        try:
+            while True:
+                # Get user input (blocking, but that's okay in CLI)
+                try:
+                    user_input = tf_console.prompt()
+                except (KeyboardInterrupt, EOFError):
+                    tf_console.print_divider()
+                    tf_console.print_system_message("Goodbye! 👋", "info")
+                    break
 
-            # Check for exit commands
-            if user_input.lower() in ["exit", "quit", "bye"]:
-                tf_console.print_divider()
-                tf_console.print_system_message("Goodbye! 👋", "info")
-                break
+                # Check for exit commands
+                if user_input.lower() in ["exit", "quit", "bye"]:
+                    tf_console.print_divider()
+                    tf_console.print_system_message("Goodbye! 👋", "info")
+                    break
 
-            if not user_input.strip():
-                continue
+                if not user_input.strip():
+                    continue
 
-            # Show user message in panel
-            tf_console.print_user_message(user_input)
+                # Show user message in panel
+                tf_console.print_user_message(user_input)
 
-            try:
-                # === CONVERSATION HISTORY MANAGEMENT ===
-                # Load current state and update conversation history with user message
-                state = await agent.state_manager.load_state(session_id) or {}
-                history = state.get("conversation_history", [])
-                
-                # Append user message to history
-                history.append({"role": "user", "content": user_input})
-                state["conversation_history"] = history
-                
-                # Save state so agent can access the updated history
-                await agent.state_manager.save_state(session_id, state)
-                
-                # Execute with the same agent instance
-                result = await agent.execute(mission=user_input, session_id=session_id)
-                
-                # Reload state (agent may have modified it) and append agent response
-                state = await agent.state_manager.load_state(session_id) or {}
-                history = state.get("conversation_history", [])
-                history.append({"role": "assistant", "content": result.final_message})
-                state["conversation_history"] = history
-                await agent.state_manager.save_state(session_id, state)
-                # === END CONVERSATION HISTORY MANAGEMENT ===
+                try:
+                    # === CONVERSATION HISTORY MANAGEMENT ===
+                    # Load current state and update conversation history with user message
+                    state = await agent.state_manager.load_state(session_id) or {}
+                    history = state.get("conversation_history", [])
+                    
+                    # Append user message to history
+                    history.append({"role": "user", "content": user_input})
+                    state["conversation_history"] = history
+                    
+                    # Save state so agent can access the updated history
+                    await agent.state_manager.save_state(session_id, state)
+                    
+                    # Execute with the same agent instance
+                    result = await agent.execute(mission=user_input, session_id=session_id)
+                    
+                    # Reload state (agent may have modified it) and append agent response
+                    state = await agent.state_manager.load_state(session_id) or {}
+                    history = state.get("conversation_history", [])
+                    history.append({"role": "assistant", "content": result.final_message})
+                    state["conversation_history"] = history
+                    await agent.state_manager.save_state(session_id, state)
+                    # === END CONVERSATION HISTORY MANAGEMENT ===
 
-                # Extract thought if available (for debug mode)
-                thought = None
-                if debug and hasattr(result, 'thoughts') and result.thoughts:
-                    thought = result.thoughts[-1] if result.thoughts else None
+                    # Extract thought if available (for debug mode)
+                    thought = None
+                    if debug and hasattr(result, 'thoughts') and result.thoughts:
+                        thought = result.thoughts[-1] if result.thoughts else None
 
-                # Display agent response
-                tf_console.print_agent_message(result.final_message, thought=thought)
+                    # Display agent response
+                    tf_console.print_agent_message(result.final_message, thought=thought)
 
-                # If there's a pending question, show it prominently
-                if result.status == "paused" and result.pending_question:
-                    question = result.pending_question.get("question", "")
-                    if question and question != result.final_message:
-                        tf_console.print_warning(f"Question: {question}")
+                    # If there's a pending question, show it prominently
+                    if result.status == "paused" and result.pending_question:
+                        question = result.pending_question.get("question", "")
+                        if question and question != result.final_message:
+                            tf_console.print_warning(f"Question: {question}")
 
-                # Debug info
-                tf_console.print_debug(f"Status: {result.status}")
+                    # Debug info
+                    tf_console.print_debug(f"Status: {result.status}")
 
-            except Exception as e:
-                tf_console.print_error(f"Execution failed: {str(e)}", exception=e if debug else None)
+                except Exception as e:
+                    tf_console.print_error(f"Execution failed: {str(e)}", exception=e if debug else None)
+        finally:
+            # Clean up MCP connections to avoid cancel scope errors
+            if agent:
+                await agent.close()
 
     # Run the async loop
     asyncio.run(run_chat_loop())
