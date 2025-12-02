@@ -98,8 +98,7 @@ REPLAN_PROMPT_TEMPLATE = """You are analyzing a failed task execution to recomme
 - Error Type: {error_type}
 - Previous Attempts: {attempt_count}
 
-**Available Tools:**
-{available_tools}
+(Refer to the <ToolsDescription> section in the system prompt for available tools.)
 
 **Strategy Options:**
 

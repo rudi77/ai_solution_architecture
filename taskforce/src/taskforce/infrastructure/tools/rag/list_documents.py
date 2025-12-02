@@ -318,6 +318,9 @@ class ListDocumentsTool:
         except Exception as e:
             return self._handle_error(e, time.time() - start_time)
 
+    # Valid filter fields that exist in the Azure Search index
+    VALID_FILTER_FIELDS = {"document_type", "org_id", "user_id", "scope"}
+
     def _combine_filters(
         self,
         security_filter: str,
@@ -340,6 +343,15 @@ class ListDocumentsTool:
 
         if additional_filters:
             for key, value in additional_filters.items():
+                # Skip invalid filter fields (e.g., 'query' is not a valid index field)
+                if key not in self.VALID_FILTER_FIELDS:
+                    self.logger.warning(
+                        "invalid_filter_field_ignored",
+                        field=key,
+                        valid_fields=list(self.VALID_FILTER_FIELDS)
+                    )
+                    continue
+                    
                 # Sanitize the value
                 sanitized_value = self.azure_base._sanitize_filter_value(str(value))
                 if isinstance(value, str):

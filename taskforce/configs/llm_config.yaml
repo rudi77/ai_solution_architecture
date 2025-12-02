@@ -33,9 +33,9 @@ model_params:
     max_tokens: 4000
 
   gpt-5-mini:
-    effort: "medium"
-    reasoning: "balanced"
-    max_tokens: 10000    
+    effort: "low"
+    reasoning: "minimal"
+    #max_tokens: 10000    
 
 default_params:
   temperature: 0.7
@@ -133,7 +133,7 @@ providers:
       main: "gpt-4.1"
       fast: "gpt-4.1-mini"
       powerful: "gpt-5"
-      powerful-1: "gpt-5-1"
+      powerful-1: "gpt-5-mini"
       legacy: "gpt-4-turbo"
     
     # -------------------------------------------------------------------------
