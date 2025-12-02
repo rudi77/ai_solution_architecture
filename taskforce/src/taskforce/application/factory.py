@@ -147,8 +147,21 @@ class AgentFactory:
             mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
             tools.extend(mcp_tools)
 
+        # CRITICAL: Filter out llm_generate tool for executor agent
+        # The agent has internal generation capabilities and should NOT use llm_generate
+        # This tool is only for PlanGenerator, not for execution
+        execution_tools = [t for t in tools if t.name != "llm_generate"]
+        
+        if len(tools) != len(execution_tools):
+            self.logger.debug(
+                "filtered_llm_generate_tool",
+                original_count=len(tools),
+                filtered_count=len(execution_tools),
+                reason="Agent has internal generation - llm_generate causes inefficiency"
+            )
+        
         todolist_manager = self._create_todolist_manager(config, llm_provider)
-        system_prompt = self._assemble_system_prompt(effective_specialist, tools)
+        system_prompt = self._assemble_system_prompt(effective_specialist, execution_tools)
 
         # Get model_alias from config (default to "main" for backward compatibility)
         llm_config = config.get("llm", {})
@@ -187,10 +200,11 @@ class AgentFactory:
             )
 
         # Create domain agent with injected dependencies
+        # Use filtered execution_tools (without llm_generate)
         agent = Agent(
             state_manager=state_manager,
             llm_provider=llm_provider,
-            tools=tools,
+            tools=execution_tools,  # Use filtered tools, not original tools
             todolist_manager=todolist_manager,
             system_prompt=system_prompt,
             model_alias=model_alias,

@@ -33,24 +33,36 @@ You must act efficiently, minimizing API calls and token usage.
    - If a step requires analyzing a file or wiki page you just read, do NOT call a tool. 
    - Perform the analysis internally and place the result in the `summary` field of the `finish_step` action.
 
-2. **MEMORY FIRST (Zero Redundancy)**:
-   - Before calling ANY tool (e.g., fetching files, searching wikis), you MUST perform this checklist:
+2. **MEMORY FIRST (Zero Redundancy - STRICTLY ENFORCE)**:
+   - Before calling ANY tool (e.g., fetching files, searching wikis), you MUST strictly analyze:
+     a) The `PREVIOUS_RESULTS` array
+     b) The `CONVERSATION_HISTORY` (user chat)
    
-   **Step 1: Check PREVIOUS_RESULTS**
-   Scan the `PREVIOUS_RESULTS` array for:
-   - Same tool with same or similar parameters
-   - Data that answers your current question
-   - Related information that makes the tool call unnecessary
+   **Critical Check (MANDATORY before every tool call):**
+   - Has this exact data already been retrieved in a previous turn?
+   - Is the answer to the user's question already in PREVIOUS_RESULTS?
+   - Can I answer using data I already have?
    
-   **Step 2: Check CONVERSATION_HISTORY**
-   Review recent conversation turns for:
-   - User-provided information
-   - Previous agent responses containing relevant data
-   - Context that eliminates need for tool call
+   **If YES to any of the above:**
+   - **DO NOT** call the tool again
+   - Use the existing data immediately in `finish_step.summary`
+   - Mention in rationale: "Found data in PREVIOUS_RESULTS from step X"
    
-   **Step 3: Decision**
-   - If data found → Use it directly in `finish_step.summary`
-   - If data not found → Proceed with minimal tool call
+   **If NO:**
+   - Proceed with the minimal tool call needed
+   
+   **Special Cases:**
+   
+   a) **Formatting Requests:**
+   - If user says "format this better", "I can't read this", "make it pretty":
+     - Do NOT call the tool again
+     - Take data from PREVIOUS_RESULTS (even if raw JSON)
+     - Reformat internally and output in `finish_step`
+   
+   b) **Follow-up Questions:**
+   - User: "What wikis exist?" → You call `list_wiki` → Result stored
+   - User: "Is there a Copilot wiki?" → **DO NOT** call `list_wiki` again
+   - Check PREVIOUS_RESULTS, find the list, answer directly
    
    **Example - Correct Behavior:**
    ```
@@ -60,7 +72,7 @@ You must act efficiently, minimizing API calls and token usage.
    User asks: "What subpages are there?"
    
    CORRECT: Return finish_step with summary: "The available subpages are: Copilot (ID: 42)"
-   WRONG: Call wiki_get_page_tree again
+   WRONG: Call wiki_get_page_tree again (WASTEFUL, FORBIDDEN)
    ```
 
 3. **HANDLING LARGE CONTENT**:
@@ -70,6 +82,11 @@ You must act efficiently, minimizing API calls and token usage.
 4. **DIRECT EXECUTION**:
    - Do not ask for confirmation unless the task is dangerous (e.g., deleting data).
    - If you have enough information to answer the user's intent based on history + tool outputs, use `finish_step` immediately.
+
+5. **DATA CONTINUITY (ID Persistence)**:
+   - When a previous tool call returns specific identifiers (UUIDs, file paths, object IDs), you **MUST** use these exact identifiers in subsequent steps.
+   - **NEVER** substitute a technical ID (like `958df5d5...`) with a human-readable name (like `ISMS`) unless the tool specifically asks for a name.
+   - **Example**: If `list_items` returns `{"name": "ProjectA", "id": "123-abc"}`, the next call must be `get_details(id="123-abc")`, NOT `get_details(id="ProjectA")`.
 
 ## Decision Logic (The "Thought" Process)
 
@@ -95,6 +112,18 @@ Use `finish_step` ONLY when the acceptance criteria of the current step are met.
   },
   "confidence": <float, 0.0-1.0>
 }
+
+## Output Formatting Standards (CRITICAL)
+
+5. **NO RAW DATA TO USER**:
+   - The `summary` field is for the HUMAN user.
+   - **NEVER** output raw JSON, Python dictionaries, or code stack traces in the `summary`.
+   - If a tool returns raw data, convert it to a bulleted list or a natural language sentence.
+   - If a page is empty/blank, say "The page is empty" instead of showing the JSON object.
+   - **ALWAYS use Markdown** for structured data.
+   - Never dump raw lists. Use bullet points (`- Item`).
+   - For Wiki structures (Trees), use indentation or nested lists.
+   - If a response contains multiple items, structure them automatically. Do NOT wait for the user to ask for "better formatting".
 """
 
 CODING_SPECIALIST_PROMPT = """
