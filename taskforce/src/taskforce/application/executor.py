@@ -119,6 +119,7 @@ class AgentExecutor:
             has_user_context=user_context is not None,
         )
 
+        agent = None
         try:
             # Create agent with appropriate adapters
             agent = await self._create_agent(profile, user_context=user_context)
@@ -159,6 +160,11 @@ class AgentExecutor:
                 duration_seconds=duration,
             )
             raise
+
+        finally:
+            # Clean up MCP connections to avoid cancel scope errors
+            if agent:
+                await agent.close()
 
     async def execute_mission_streaming(
         self,
@@ -206,6 +212,7 @@ class AgentExecutor:
             details={"session_id": session_id, "profile": profile},
         )
 
+        agent = None
         try:
             # Create agent
             agent = await self._create_agent(profile, user_context=user_context)
@@ -239,6 +246,11 @@ class AgentExecutor:
             )
 
             raise
+
+        finally:
+            # Clean up MCP connections to avoid cancel scope errors
+            if agent:
+                await agent.close()
 
     async def _create_agent(
         self, profile: str, user_context: Optional[Dict[str, Any]] = None

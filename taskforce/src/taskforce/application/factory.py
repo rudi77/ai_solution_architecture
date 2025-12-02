@@ -148,6 +148,10 @@ class AgentFactory:
         todolist_manager = self._create_todolist_manager(config, llm_provider)
         system_prompt = self._assemble_system_prompt(effective_specialist, tools)
 
+        # Get model_alias from config (default to "main" for backward compatibility)
+        llm_config = config.get("llm", {})
+        model_alias = llm_config.get("default_model", "main")
+
         # Create domain agent with injected dependencies
         agent = Agent(
             state_manager=state_manager,
@@ -155,6 +159,7 @@ class AgentFactory:
             tools=tools,
             todolist_manager=todolist_manager,
             system_prompt=system_prompt,
+            model_alias=model_alias,
         )
 
         # Store MCP contexts on agent for lifecycle management
@@ -223,12 +228,17 @@ class AgentFactory:
         todolist_manager = self._create_todolist_manager(config, llm_provider)
         system_prompt = self._assemble_system_prompt("rag", tools)
 
+        # Get model_alias from config (default to "main" for backward compatibility)
+        llm_config = config.get("llm", {})
+        model_alias = llm_config.get("default_model", "main")
+
         agent = Agent(
             state_manager=state_manager,
             llm_provider=llm_provider,
             tools=tools,
             todolist_manager=todolist_manager,
             system_prompt=system_prompt,
+            model_alias=model_alias,
         )
         
         # Store MCP contexts on agent for lifecycle management
