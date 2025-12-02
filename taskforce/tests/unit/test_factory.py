@@ -118,7 +118,8 @@ class TestAgentFactory:
         tools = factory._create_native_tools(config, mock_llm)
 
         # Verify we have the expected number of tools
-        assert len(tools) == 10  # 10 native tools
+        # NOTE: llm_generate is intentionally excluded (Story 4.1)
+        assert len(tools) == 9  # 9 native tools (no llm_generate)
 
         # Verify tool names
         tool_names = [tool.name for tool in tools]
@@ -131,7 +132,7 @@ class TestAgentFactory:
             "file_read",
             "file_write",
             "powershell",
-            "llm_generate",
+            # "llm_generate" intentionally excluded - agent uses internal LLM
             "ask_user",
         ]
 
@@ -284,7 +285,8 @@ class TestAgentFactory:
         assert isinstance(agent, Agent)
         assert agent.state_manager is not None
         assert agent.llm_provider is not None
-        assert len(agent.tools) > 10  # Native + RAG tools
+        # NOTE: llm_generate excluded (Story 4.1), so 9 native + 3 RAG = 12+
+        assert len(agent.tools) > 9  # Native + RAG tools
         assert agent.todolist_manager is not None
         assert agent.system_prompt is not None
 
@@ -531,7 +533,8 @@ class TestSpecialistProfiles:
         agent = await factory.create_agent(profile="dev", specialist="coding")
 
         # Tools come from config (dev.yaml has tools)
-        assert len(agent.tools) >= 10  # dev has 10+ tools
+        # NOTE: llm_generate excluded (Story 4.1), so 9+ tools
+        assert len(agent.tools) >= 9  # dev has 9+ tools (no llm_generate)
         assert "file_read" in agent.tools
         # But prompt should be coding specialist (parameter override)
         assert "Coding Specialist" in agent.system_prompt
@@ -560,8 +563,8 @@ class TestAgentFactoryIntegration:
         factory = AgentFactory(config_dir="configs")
         agent = await factory.create_agent(profile="dev")
 
-        # Should have 10 native tools
-        assert len(agent.tools) == 10
+        # Should have 9 native tools (llm_generate excluded per Story 4.1)
+        assert len(agent.tools) == 9
 
     @pytest.mark.asyncio
     async def test_multiple_agents_can_be_created(self):

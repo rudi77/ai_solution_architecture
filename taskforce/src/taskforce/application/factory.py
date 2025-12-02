@@ -342,6 +342,11 @@ class AgentFactory:
 
         Returns:
             List of native tool instances
+
+        Note:
+            LLMTool (llm_generate) is filtered out unless `agent.include_llm_generate: true`
+            is set in the config. This is intentional - the agent should use its internal
+            LLM capabilities for text generation rather than calling a tool.
         """
         tools_config = config.get("tools", [])
         
@@ -354,6 +359,18 @@ class AgentFactory:
             tool = self._instantiate_tool(tool_spec, llm_provider, user_context=user_context)
             if tool:
                 tools.append(tool)
+        
+        # Filter out LLMTool unless explicitly enabled in config
+        include_llm_generate = config.get("agent", {}).get("include_llm_generate", False)
+        if not include_llm_generate:
+            original_count = len(tools)
+            tools = [t for t in tools if t.name != "llm_generate"]
+            if len(tools) < original_count:
+                self.logger.debug(
+                    "llm_generate_filtered",
+                    reason="include_llm_generate is False (default)",
+                    remaining_tools=[t.name for t in tools],
+                )
         
         return tools
     
@@ -501,8 +518,12 @@ class AgentFactory:
         """
         Create default tool set (fallback when no config provided).
 
+        NOTE: LLMTool is intentionally EXCLUDED from default tools.
+        The agent's internal LLM capabilities should be used for text generation.
+        LLMTool can be added explicitly via config if needed for specialized use cases.
+
         Args:
-            llm_provider: LLM provider for LLMTool
+            llm_provider: LLM provider (unused - kept for API compatibility)
 
         Returns:
             List of default tool instances
@@ -513,7 +534,7 @@ class AgentFactory:
             FileWriteTool,
         )
         from taskforce.infrastructure.tools.native.git_tools import GitHubTool, GitTool
-        from taskforce.infrastructure.tools.native.llm_tool import LLMTool
+        # REMOVED: LLMTool - Agent uses internal LLM for text generation
         from taskforce.infrastructure.tools.native.python_tool import PythonTool
         from taskforce.infrastructure.tools.native.shell_tool import PowerShellTool
         from taskforce.infrastructure.tools.native.web_tools import (
@@ -521,7 +542,7 @@ class AgentFactory:
             WebSearchTool,
         )
 
-        # Standard tool set matching Agent V2
+        # Standard tool set - LLMTool intentionally excluded for efficiency
         return [
             WebSearchTool(),
             WebFetchTool(),
@@ -531,7 +552,7 @@ class AgentFactory:
             FileReadTool(),
             FileWriteTool(),
             PowerShellTool(),
-            LLMTool(llm_service=llm_provider),
+            # LLMTool excluded - Agent uses internal LLM capabilities
             AskUserTool(),
         ]
 
