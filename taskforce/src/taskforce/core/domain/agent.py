@@ -758,24 +758,38 @@ Error Message: {error.get('error', 'Unknown error')}
             return "Keine vorherigen Ergebnisse."
 
         summaries = []
+        # NOTE: Increased limit from 200 to 4000 chars to avoid truncation bug
+        # that caused data loss (e.g., 9 documents truncated to 1)
+        MAX_PREVIEW_LENGTH = 4000
+        
         for i, result in enumerate(previous_results[-5:], 1):
             tool = result.get("tool", "unknown")
             success = "✓" if result.get("success") or result.get("result", {}).get("success") else "✗"
             
-            # Extract preview from result data
+            # Extract content from result data - prioritize 'summary' for formatted output
             data = result.get("result", result.get("data", {}))
-            if isinstance(data, dict):
-                # Try common content keys
-                for key in ["content", "summary", "response", "output", "data"]:
-                    if key in data and isinstance(data[key], str):
-                        data_preview = data[key][:200]
-                        break
-                else:
-                    data_preview = str(data)[:200]
-            else:
-                data_preview = str(data)[:200]
+            data_content = ""
             
-            summaries.append(f"{i}. [{success}] {tool}: {data_preview}")
+            if isinstance(data, dict):
+                # Prioritize 'summary' key as it contains the agent's formatted response
+                if "summary" in data and data["summary"]:
+                    data_content = str(data["summary"])
+                else:
+                    # Try other common content keys
+                    for key in ["content", "response", "output", "data"]:
+                        if key in data and data[key]:
+                            data_content = str(data[key])
+                            break
+                    else:
+                        data_content = str(data)
+            else:
+                data_content = str(data)
+            
+            # Only truncate if really necessary
+            if len(data_content) > MAX_PREVIEW_LENGTH:
+                data_content = data_content[:MAX_PREVIEW_LENGTH] + "... [truncated]"
+            
+            summaries.append(f"{i}. [{success}] {tool}: {data_content}")
 
         return "\n".join(summaries)
 
@@ -808,7 +822,24 @@ Error Message: {error.get('error', 'Unknown error')}
             )
 
         elif action.type == ActionType.RESPOND:
-            # Two-Phase Response: Generate clean markdown via separate LLM call
+            # OPTIMIZATION: If agent already provided a good summary, use it directly
+            # This avoids an extra LLM call (~11s) and potential data loss from truncation
+            if action.summary and len(action.summary) > 50:
+                self.logger.info(
+                    "using_direct_summary",
+                    summary_length=len(action.summary),
+                    hint="Agent provided summary directly, skipping two-phase LLM call",
+                )
+                return Observation(
+                    success=True,
+                    data={"summary": action.summary},
+                )
+            
+            # Fallback to Two-Phase Response only if no good summary provided
+            self.logger.info(
+                "using_two_phase_response",
+                hint="No direct summary, generating via separate LLM call",
+            )
             context = self._build_response_context_for_respond(state, step)
             
             # Extract previous results from todolist if available

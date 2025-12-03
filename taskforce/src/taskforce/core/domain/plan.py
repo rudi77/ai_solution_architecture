@@ -789,20 +789,30 @@ RULES:
 1. Each item describes WHAT to achieve, NOT HOW (no tool names, no parameters)
 2. acceptance_criteria: Observable condition (e.g., "File X exists with content Y")
 3. dependencies: List of step positions that must complete first
-4. Keep plan minimal (prefer 3-7 steps over 20)
+4. **MINIMAL STEPS (CRITICAL):**
+   - Simple queries (list, find, show, get) → **1 step only**
+   - Simple tasks (read file, search) → **1-2 steps**
+   - Complex tasks (create, modify, deploy) → **3-5 steps max**
+   - NEVER split "find and present" into separate steps. One step: "Find and present X"
 5. open_questions MUST be empty (all clarifications resolved)
 6. description: Clear, actionable outcome (1-2 sentences)
 7. acceptance_criteria: Specific, verifiable condition
 8. DYNAMIC REPLANNING (CRITICAL): If you just received a User Answer from a previous step, do NOT mark the mission as complete. You MUST generate NEW steps to fulfill the user's intent expressed in that answer.
 
 EXAMPLES:
-Good:
-- description: "Create a markdown report from CSV data"
-  acceptance_criteria: "File report.md exists and contains a valid markdown table with all CSV rows"
 
-Bad:
-- description: "Use python tool to read CSV"
-  acceptance_criteria: "Python code executes successfully"
+Good (Simple query = 1 step):
+- Mission: "List all documents"
+  Plan: 1 step - "Find and present all available documents with their names and IDs"
+
+Good (Complex task = multiple steps):
+- Mission: "Create a Python script that reads CSV and generates a report"
+  Plan: 3 steps - (1) Understand CSV structure, (2) Create script, (3) Verify output
+
+Bad (Over-engineered):
+- Mission: "List all documents"
+  Plan: 3 steps - (1) Find documents, (2) Extract names, (3) Present to user
+  → This should be 1 step!
 
 Return JSON matching:
 {structure}
