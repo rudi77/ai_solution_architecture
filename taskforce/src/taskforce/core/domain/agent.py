@@ -673,58 +673,76 @@ Error Message: {error.get('error', 'Unknown error')}
 
     async def _generate_fast_path_thought(self, context: dict[str, Any]) -> Thought:
         """
-        Lightweight thought generation for Fast Path.
-        Uses a minimal system prompt to save tokens and latency.
+        Lightweight iterative thought generation.
         """
         current_step = context["current_step"]
         mission = current_step.description
 
-        # 1. OPTIMIERTER MINI-PROMPT
-        # Wir sagen ihm explizit: "Schau in die History für Parameter!"
-        mini_system_prompt = """You are a fast execution assistant.
-Your goal is to answer the user's question directly using the available tools.
+        # --- DYNAMIC HISTORY INJECTION ---
+        # Core of loop: Agent sees its own steps
+        fast_path_history = context.get("fast_path_history", [])
+        history_text = ""
+        if fast_path_history:
+            history_text = "### ACTIONS YOU JUST TOOK (DO NOT REPEAT):\n"
+            # Show last steps
+            for item in fast_path_history[-6:]:
+                tool = item.get("tool", "unknown")
+                res = str(item.get("result", ""))
+                # Truncate to save tokens but keep enough info
+                preview = res[:600] + "..." if len(res) > 600 else res
+                history_text += f"- Called `{tool}` -> Result: {preview}\n"
+        # ---------------------------------
 
-CRITICAL RULES:
-1. Do NOT plan. Do NOT ask clarifying questions unless absolutely necessary.
-2. PARAMETER CONSISTENCY (Most Important):
-   - Check the conversation history below for Organization names, Project names, and Wiki IDs.
-   - NEVER invent parameters. If the history shows 'organization': 'blumatix', USE IT.
-   - If the history shows a Wiki ID like '556a...', USE IT instead of the name.
-
-Available Tools:
-"""
+        mini_system_prompt = (
+            "You are a fast, autonomous researcher (Cursor-like).\n"
+            "Your goal is to answer the user's question comprehensively.\n\n"
+            "STRATEGY:\n"
+            "1. **Explore First:** If you don't have the answer yet, "
+            "use tools to find it.\n"
+            "2. **Handle Empty Pages:** If a wiki page is empty "
+            "(isParentPage=true) or search fails, IMMEDIATELY try another "
+            "path (e.g., list subpages, search again).\n"
+            "3. **Chain Actions:** You can perform multiple tool calls in "
+            "sequence.\n"
+            "   - Example: list_wiki -> get_tree -> get_page -> respond.\n"
+            "4. **Respond:** ONLY use 'respond' when you have gathered "
+            "enough information to give a good answer.\n\n"
+            "PARAMETER RULES:\n"
+            "- Use IDs from history (e.g. Wiki UUIDs), never names.\n"
+            "- Check conversation history for context.\n\n"
+            "Available Tools:\n"
+        )
         mini_system_prompt += self._get_tools_description()
 
         user_prompt = f"""
 User Query: "{mission}"
 
+{history_text}
+
 Decide the next immediate action.
 Return JSON matching this schema:
 {{
   "action": "tool_call" | "respond",
-  "tool": "<tool_name_if_tool_call>",
+  "tool": "<tool_name>",
   "tool_input": {{<params>}},
-  "summary": "<content_if_respond>"
+  "summary": "<content if respond>"
 }}
 """
-
-        # 2. HISTORY EINBAUEN (Mehr Context für bessere Parameter-Suche)
+        
+        # Add conversation history context (the "old" history)
         messages = [{"role": "system", "content": mini_system_prompt}]
-
-        # Erhöhe von [-2:] auf [-6:].
-        # Das kostet kaum Zeit, gibt dem Agenten aber Zugriff auf vorherige 'list_wiki' Ergebnisse.
-        history = context.get("conversation_history", [])[-6:]
-        for msg in history:
+        chat_history = context.get("conversation_history", [])[-6:]
+        for msg in chat_history:
             if msg.get("role") != "system":
                 messages.append(msg)
-
+        
         messages.append({"role": "user", "content": user_prompt})
 
-        self.logger.info("fast_path_thought_start", step=1)
+        self.logger.info("fast_path_thought_start")
 
         result = await self.llm_provider.complete(
             messages=messages,
-            model="fast",  # Fast model for quick responses
+            model="fast",  # Or "fast" for GPT-4o-mini
             response_format={"type": "json_object"},
             temperature=0.0
         )
@@ -732,86 +750,63 @@ Return JSON matching this schema:
         if not result.get("success"):
             raise RuntimeError(f"Fast thought failed: {result.get('error')}")
 
-        # Parsing Logic (Reuse from _generate_thought logic essentially)
+        # JSON Cleaning & Parsing (Robust)
         try:
-            data = json.loads(result["content"])
-
-            # Detect schema format: minimal has "action" as string
-            if isinstance(data.get("action"), str):
-                action_type_raw = data["action"]
-
-                # Normalize: finish_step -> respond
-                if action_type_raw == "finish_step":
-                    action_type_raw = "respond"
-
-                # FALLBACK: LLM may confuse tool name with action type
-                valid_action_types = {a.value for a in ActionType}
-                if action_type_raw not in valid_action_types:
-                    # Check if LLM provided tool info (clear sign of tool_call intent)
-                    if data.get("tool") or data.get("tool_input"):
-                        self.logger.warning(
-                            "fast_path_action_type_corrected",
-                            original_action=action_type_raw,
-                            corrected_to="tool_call",
-                        )
-                        # If tool field is missing but action looks like tool name, use it
-                        if not data.get("tool"):
-                            data["tool"] = action_type_raw
-                        action_type_raw = "tool_call"
-                    else:
-                        raise ValueError(f"'{action_type_raw}' is not a valid ActionType")
-
-                action = Action(
-                    type=ActionType(action_type_raw),
-                    tool=data.get("tool"),
-                    tool_input=data.get("tool_input"),
-                    question=data.get("question"),
-                    answer_key=data.get("answer_key"),
-                    summary=data.get("summary"),
-                    replan_reason=data.get("replan_reason"),
+            content = result["content"].strip()
+            # Clean Markdown if present
+            if "```" in content:
+                import re
+                match = re.search(
+                    r"```(?:json)?\s*(\{.*?\})\s*```",
+                    content,
+                    re.DOTALL
                 )
+                if match:
+                    content = match.group(1)
 
-                return Thought(
-                    step_ref=1,
-                    rationale="Fast path decision",
-                    action=action,
-                    expected_outcome="",
-                    confidence=1.0,
-                )
-            else:
-                # Legacy schema handling (shouldn't happen with fast path, but handle it)
-                action_data = data.get("action", {})
-                if isinstance(action_data, dict):
-                    action_type_raw = action_data.get("type", "respond")
-                else:
-                    action_type_raw = "respond"
+            data = json.loads(content)
 
-                action = Action(
-                    type=ActionType(action_type_raw),
-                    tool=data.get("tool") or action_data.get("tool"),
-                    tool_input=data.get("tool_input") or action_data.get("tool_input"),
-                    question=data.get("question") or action_data.get("question"),
-                    answer_key=data.get("answer_key") or action_data.get("answer_key"),
-                    summary=data.get("summary") or action_data.get("summary"),
-                    replan_reason=data.get("replan_reason") or action_data.get("replan_reason"),
-                )
+            # Action Mapping logic (same as before)
+            action_type_raw = data.get("action")
+            if action_type_raw == "finish_step":
+                action_type_raw = "respond"
 
-                return Thought(
-                    step_ref=1,
-                    rationale="Fast path decision",
-                    action=action,
-                    expected_outcome="",
-                    confidence=1.0,
-                )
+            # Fallback for tool confusion
+            if (
+                action_type_raw not in {a.value for a in ActionType}
+                and (data.get("tool") or data.get("tool_input"))
+            ):
+                action_type_raw = "tool_call"
+
+            action = Action(
+                type=ActionType(action_type_raw),
+                tool=data.get("tool"),
+                tool_input=data.get("tool_input"),
+                question=data.get("question"),
+                summary=data.get("summary")
+            )
+
+            return Thought(
+                step_ref=1,
+                rationale="Fast loop",
+                action=action,
+                confidence=1.0
+            )
+
         except Exception as e:
-            self.logger.error("fast_thought_parse_error", error=str(e))
-            # Fallback
+            self.logger.error(
+                "fast_thought_parse_error",
+                error=str(e),
+                content=result["content"]
+            )
             return Thought(
                 step_ref=1,
                 rationale="Error",
-                action=Action(type=ActionType.RESPOND, summary="Error processing request"),
-                expected_outcome="",
-                confidence=0.0,
+                action=Action(
+                    type=ActionType.RESPOND,
+                    summary="Internal Error"
+                ),
+                confidence=0.0
             )
 
     async def _generate_markdown_response(
@@ -1263,21 +1258,10 @@ Return JSON matching this schema:
         execution_history: list[dict[str, Any]],
     ) -> ExecutionResult:
         """
-        Execute query directly without creating a new TodoList.
-
-        Creates a single synthetic step and executes it, bypassing the
-        full planning cycle for simple follow-up questions.
-
-        Args:
-            mission: User's query/mission
-            state: Current session state
-            session_id: Session identifier
-            execution_history: List to record execution events
-
-        Returns:
-            ExecutionResult with status and final message
+        Execute query using a fast ReAct loop (Cursor-Style).
+        Allows multiple steps (max 5) to explore/research before answering.
         """
-        # 1. Synthetic Step
+        # 1. Synthetic Step initialization
         synthetic_step = TodoItem(
             position=1,
             description=mission,
@@ -1286,7 +1270,7 @@ Return JSON matching this schema:
             status=TaskStatus.PENDING,
         )
 
-        # 2. Context bauen
+        # Initial context loading
         todolist_id = state.get("todolist_id")
         previous_results = []
         if todolist_id:
@@ -1296,110 +1280,150 @@ Return JSON matching this schema:
             except FileNotFoundError:
                 pass
 
-        # --- OPTIMIERUNG 1: Prompt Injection ---
-        # Wir manipulieren die "user_answers", um den Agenten zu zwingen,
-        # NICHT zu fragen. Das ist ein Trick, um den Base-Prompt zu übersteuern.
+        # Prompt Injection: Force research behavior
         user_answers = dict(state.get("answers", {}))
         user_answers["IMPORTANT_INSTRUCTION"] = (
-            "Do NOT ask clarifying questions. Execute the most likely tool immediately. "
-            "Guess parameters if needed."
+            "Do NOT ask clarifying questions. If a page is empty/folder, find subpages. "
+            "Read multiple pages if necessary to give a comprehensive answer."
         )
-        context = {
-            "current_step": synthetic_step,
-            "previous_results": previous_results,
-            "conversation_history": state.get("conversation_history", []),
-            "user_answers": user_answers,
-            "fast_path": True,  # Signal to thought generator
-        }
-        # ---------------------------------------
 
-        # Generate thought and execute (using lightweight fast path thought)
-        thought = await self._generate_fast_path_thought(context)
-        execution_history.append({
-            "type": "thought",
-            "step": 1,
-            "data": asdict(thought),
-            "fast_path": True,
-        })
+        MAX_FAST_STEPS = 5  # The "Cursor Limit"
+        current_loop = 0
+        
+        self.logger.info("fast_path_loop_start", session_id=session_id)
 
-        # --- OPTIMIERUNG 2: ASK_USER Handling ---
-        # Falls er TROTZDEM fragt, geben wir das sofort zurück,
-        # statt den Full Path zu starten.
-        if thought.action.type == ActionType.ASK_USER:
-            self.logger.info("fast_path_ask_user", session_id=session_id)
-            return ExecutionResult(
-                session_id=session_id,
-                status="paused",
-                final_message=thought.action.question,
-                execution_history=execution_history,
-                todolist_id=None,
-                pending_question={"question": thought.action.question}
-            )
-        # ----------------------------------------
+        # --- THE FAST LOOP ---
+        while current_loop < MAX_FAST_STEPS:
+            current_loop += 1
+            
+            # Build Context: Include history of THIS fast session
+            # Crucial: agent sees "I just read Page X and it was empty"
+            current_session_history = [
+                {
+                    "tool": h["data"]["action"]["tool"],
+                    "result": str(
+                        h["data"]["action"].get("summary")
+                        or "Tool executed"
+                    )
+                }
+                if (
+                    h["type"] == "thought"
+                    and h.get("data")
+                    and isinstance(h["data"], dict)
+                    and "action" in h["data"]
+                )
+                else {
+                    "tool": "unknown",
+                    "result": str(
+                        h.get("data", {}).get("data")
+                        if h.get("data")
+                        else "No data"
+                    )
+                }
+                for h in execution_history
+                if h["type"] in ("observation", "thought")
+            ]
 
-        # Handle direct completion (LLM answered without tool)
-        if thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP, ActionType.RESPOND):
-            # DEBUG: Log what we're returning
-            self.logger.info(
-                "fast_path_direct_completion",
-                session_id=session_id,
-                action_type=str(thought.action.type),
-                summary_preview=str(thought.action.summary)[:100] if thought.action.summary else "None",
-                summary_type=type(thought.action.summary).__name__,
-            )
-            return ExecutionResult(
-                session_id=session_id,
-                status="completed",
-                final_message=thought.action.summary or "Query answered",
-                execution_history=execution_history,
-                todolist_id=state.get("todolist_id"),  # Keep previous todolist
-            )
+            context = {
+                "current_step": synthetic_step,
+                "previous_results": previous_results,  # Old stuff
+                "fast_path_history": current_session_history,  # Current
+                "conversation_history": state.get(
+                    "conversation_history", []
+                ),
+                "user_answers": user_answers,
+                "fast_path": True,
+            }
 
-        # If tool call needed, execute it
-        if thought.action.type == ActionType.TOOL_CALL:
-            observation = await self._execute_tool(thought.action, synthetic_step)
+            # 2. Think
+            thought = await self._generate_fast_path_thought(context)
+            
             execution_history.append({
-                "type": "observation",
-                "step": 1,
-                "data": asdict(observation),
+                "type": "thought",
+                "step": current_loop,
+                "data": asdict(thought),
                 "fast_path": True,
             })
 
-            if observation.success:
-                # --- OPTIMIERUNG START ---
-                # STATT: final_thought = await self._generate_thought(final_context)
-                # MACHEN WIR: Direkte Antwort-Generierung ohne JSON-Zwang.
+            # 3. Act based on Decision
 
-                self.logger.info("fast_path_generating_final_response", session_id=session_id)
+            # CASE A: Respond / Finish (Exit Loop)
+            if thought.action.type in (
+                ActionType.COMPLETE,
+                ActionType.FINISH_STEP,
+                ActionType.RESPOND
+            ):
 
-                # Wir nutzen einen spezialisierten Prompt, der NICHT den ReAct-Overhead hat
-                final_message = await self._generate_fast_path_completion(
-                    mission,
-                    thought.action.tool,
-                    observation.data
+                # Check if we actually have a summary. If not, generate one
+                final_msg = thought.action.summary
+                if not final_msg:
+                    # Generate response from gathered tools
+                    final_msg = await self._generate_fast_path_completion(
+                        mission, "fast_path_tools", execution_history
+                    )
+
+                self.logger.info(
+                    "fast_path_direct_completion",
+                    session_id=session_id,
+                    steps_taken=current_loop
                 )
-
                 return ExecutionResult(
                     session_id=session_id,
                     status="completed",
-                    final_message=final_message,
+                    final_message=final_msg,
                     execution_history=execution_history,
                     todolist_id=state.get("todolist_id"),
                 )
-                # --- OPTIMIERUNG ENDE ---
 
-            # Tool failed or multi-step required - fall back to full path
-            if not observation.success:
-                self.logger.warning(
-                    "fast_path_tool_failed",
+            # CASE B: Ask User (Break Loop)
+            if thought.action.type == ActionType.ASK_USER:
+                return ExecutionResult(
                     session_id=session_id,
-                    tool=thought.action.tool,
-                    error=observation.error,
+                    status="paused",
+                    final_message=thought.action.question,
+                    execution_history=execution_history,
+                    todolist_id=None,
+                    pending_question={"question": thought.action.question}
                 )
 
-        # Fallback to full path if fast path can't handle
-        self.logger.info("fast_path_fallback", session_id=session_id)
-        return await self._execute_full_path(mission, state, session_id, execution_history)
+            # CASE C: Tool Call (Continue Loop)
+            if thought.action.type == ActionType.TOOL_CALL:
+                observation = await self._execute_tool(
+                    thought.action, synthetic_step
+                )
+
+                execution_history.append({
+                    "type": "observation",
+                    "step": current_loop,
+                    "data": asdict(observation),
+                    "fast_path": True,
+                })
+
+                if not observation.success:
+                    self.logger.warning(
+                        "fast_path_tool_failed",
+                        tool=thought.action.tool,
+                        error=observation.error
+                    )
+                    # Loop continues! Agent sees error in next step
+
+                # Loop automatically continues to next iteration...
+
+        # Fallback if loop exhausted
+        self.logger.warning(
+            "fast_path_loop_exhausted", session_id=session_id
+        )
+        # Try to summarize whatever we have
+        final_summary = await self._generate_fast_path_completion(
+            mission, "exhausted", execution_history
+        )
+        return ExecutionResult(
+            session_id=session_id,
+            status="completed",
+            final_message=final_summary,
+            execution_history=execution_history,
+            todolist_id=state.get("todolist_id"),
+        )
 
     async def _execute_full_path(
         self,
@@ -1603,30 +1627,48 @@ Return JSON matching this schema:
         # Fallback - never return raw JSON
         return "Task completed successfully."
 
-    async def _generate_fast_path_completion(self, query: str, tool_name: str, result_data: Any) -> str:
+    async def _generate_fast_path_completion(
+        self, query: str, tool_name: str, execution_history: Any
+    ) -> str:
         """
-        Generates a final answer directly from a tool result, bypassing the heavy 'Thought' process.
-        This handles large contexts better because we don't need the system prompt overhead.
+        Generate final answer from execution history.
+
+        Bypasses the heavy 'Thought' process for better large context
+        handling without system prompt overhead.
 
         Args:
             query: The user's original query/mission
-            tool_name: Name of the tool that was executed
-            result_data: The full result data from the tool execution
+            tool_name: Name of tool executed or "exhausted"/"fast_path_tools"
+            execution_history: The execution history with observations
 
         Returns:
             Generated response message as string
         """
-        # Konvertiere result_data zu String (aber behalte den Inhalt!)
-        content_str = str(result_data)
+        # Extract tool results from execution history
+        tool_results = []
+        if isinstance(execution_history, list):
+            for entry in execution_history:
+                if entry.get("type") == "observation":
+                    data = entry.get("data", {})
+                    tool_results.append(str(data))
+        else:
+            # Fallback for old signature compatibility
+            tool_results.append(str(execution_history))
 
-        # Ein sehr schlanker Prompt, der sich nur auf die Antwort konzentriert
+        results_str = (
+            "\n\n".join(tool_results)
+            if tool_results
+            else "No results available"
+        )
+
+        # Lean prompt focused only on answer
         prompt = f"""
-Du beantwortest die User-Frage basierend auf dem folgenden Tool-Ergebnis.
+Du beantwortest die User-Frage basierend auf den folgenden Tool-Ergebnissen.
 
 User Frage: "{query}"
 
-Tool ({tool_name}) Ergebnis:
-{content_str}
+Tool-Ergebnisse:
+{results_str}
 
 Anweisung:
 - Antworte direkt und präzise auf die Frage.
@@ -1637,13 +1679,15 @@ Anweisung:
 
         result = await self.llm_provider.complete(
             messages=[
-                # Minimaler System Prompt spart Tokens und lenkt nicht ab
-                {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+                {
+                    "role": "system",
+                    "content": "Du bist ein hilfreicher Assistent."
+                },
                 {"role": "user", "content": prompt}
             ],
             model="fast",
             temperature=0.3,
-            # WICHTIG: Kein JSON Mode! Das erlaubt dem Modell "frei" zu atmen.
+            # IMPORTANT: No JSON Mode! Allows model to breathe freely
         )
 
         if result.get("success"):
