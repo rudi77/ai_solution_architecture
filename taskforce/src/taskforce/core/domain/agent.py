@@ -671,6 +671,141 @@ Error Message: {error.get('error', 'Unknown error')}
                 confidence=0.0,
             )
 
+    async def _generate_fast_path_thought(self, context: dict[str, Any]) -> Thought:
+        """
+        Lightweight thought generation for Fast Path.
+        Uses a minimal system prompt to save tokens and latency.
+        """
+        current_step = context["current_step"]
+        mission = current_step.description
+
+        # Winziger System Prompt statt des riesigen Kernels
+        mini_system_prompt = """You are a fast execution assistant.
+Your goal is to answer the user's question directly using the available tools.
+Do NOT plan. Do NOT ask clarifying questions unless absolutely necessary.
+If you know the answer without tools, respond directly.
+
+Available Tools:
+"""
+        # Tools kurz und knackig listen
+        mini_system_prompt += self._get_tools_description()
+
+        user_prompt = f"""
+User Query: "{mission}"
+
+Decide the next immediate action.
+Return JSON matching this schema:
+{{
+  "action": "tool_call" | "respond",
+  "tool": "<tool_name_if_tool_call>",
+  "tool_input": {{<params>}},
+  "summary": "<content_if_respond>"
+}}
+"""
+
+        # History anhängen (nur die letzten 2 Nachrichten für Context)
+        messages = [{"role": "system", "content": mini_system_prompt}]
+        history = context.get("conversation_history", [])[-2:]
+        for msg in history:
+            if msg.get("role") != "system":
+                messages.append(msg)
+
+        messages.append({"role": "user", "content": user_prompt})
+
+        self.logger.info("fast_path_thought_start", step=1)
+
+        result = await self.llm_provider.complete(
+            messages=messages,
+            model=self.model_alias,  # Oder ein schnelleres Modell ('fast') erzwingen?
+            response_format={"type": "json_object"},
+            temperature=0.0
+        )
+
+        if not result.get("success"):
+            raise RuntimeError(f"Fast thought failed: {result.get('error')}")
+
+        # Parsing Logic (Reuse from _generate_thought logic essentially)
+        try:
+            data = json.loads(result["content"])
+
+            # Detect schema format: minimal has "action" as string
+            if isinstance(data.get("action"), str):
+                action_type_raw = data["action"]
+
+                # Normalize: finish_step -> respond
+                if action_type_raw == "finish_step":
+                    action_type_raw = "respond"
+
+                # FALLBACK: LLM may confuse tool name with action type
+                valid_action_types = {a.value for a in ActionType}
+                if action_type_raw not in valid_action_types:
+                    # Check if LLM provided tool info (clear sign of tool_call intent)
+                    if data.get("tool") or data.get("tool_input"):
+                        self.logger.warning(
+                            "fast_path_action_type_corrected",
+                            original_action=action_type_raw,
+                            corrected_to="tool_call",
+                        )
+                        # If tool field is missing but action looks like tool name, use it
+                        if not data.get("tool"):
+                            data["tool"] = action_type_raw
+                        action_type_raw = "tool_call"
+                    else:
+                        raise ValueError(f"'{action_type_raw}' is not a valid ActionType")
+
+                action = Action(
+                    type=ActionType(action_type_raw),
+                    tool=data.get("tool"),
+                    tool_input=data.get("tool_input"),
+                    question=data.get("question"),
+                    answer_key=data.get("answer_key"),
+                    summary=data.get("summary"),
+                    replan_reason=data.get("replan_reason"),
+                )
+
+                return Thought(
+                    step_ref=1,
+                    rationale="Fast path decision",
+                    action=action,
+                    expected_outcome="",
+                    confidence=1.0,
+                )
+            else:
+                # Legacy schema handling (shouldn't happen with fast path, but handle it)
+                action_data = data.get("action", {})
+                if isinstance(action_data, dict):
+                    action_type_raw = action_data.get("type", "respond")
+                else:
+                    action_type_raw = "respond"
+
+                action = Action(
+                    type=ActionType(action_type_raw),
+                    tool=data.get("tool") or action_data.get("tool"),
+                    tool_input=data.get("tool_input") or action_data.get("tool_input"),
+                    question=data.get("question") or action_data.get("question"),
+                    answer_key=data.get("answer_key") or action_data.get("answer_key"),
+                    summary=data.get("summary") or action_data.get("summary"),
+                    replan_reason=data.get("replan_reason") or action_data.get("replan_reason"),
+                )
+
+                return Thought(
+                    step_ref=1,
+                    rationale="Fast path decision",
+                    action=action,
+                    expected_outcome="",
+                    confidence=1.0,
+                )
+        except Exception as e:
+            self.logger.error("fast_thought_parse_error", error=str(e))
+            # Fallback
+            return Thought(
+                step_ref=1,
+                rationale="Error",
+                action=Action(type=ActionType.RESPOND, summary="Error processing request"),
+                expected_outcome="",
+                confidence=0.0,
+            )
+
     async def _generate_markdown_response(
         self,
         context: dict[str, Any],
@@ -1170,8 +1305,8 @@ Error Message: {error.get('error', 'Unknown error')}
         }
         # ---------------------------------------
 
-        # Generate thought and execute
-        thought = await self._generate_thought(context)
+        # Generate thought and execute (using lightweight fast path thought)
+        thought = await self._generate_fast_path_thought(context)
         execution_history.append({
             "type": "thought",
             "step": 1,
@@ -1498,7 +1633,7 @@ Anweisung:
                 {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
                 {"role": "user", "content": prompt}
             ],
-            model=self.model_alias,
+            model="fast",
             temperature=0.3,
             # WICHTIG: Kein JSON Mode! Das erlaubt dem Modell "frei" zu atmen.
         )
