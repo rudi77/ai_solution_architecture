@@ -930,3 +930,222 @@ async def test_finish_step_completes_step_explicitly(
     assert result.status == "completed"
     updated_todolist = mock_todolist_manager.update_todolist.call_args[0][0]
     assert updated_todolist.items[0].status == TaskStatus.COMPLETED
+
+
+# ============================================================================
+# Fallback-Entschärfung Tests - Story 5.1
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_thought_parse_invalid_json_returns_friendly_message(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that invalid JSON response returns a user-friendly message, not raw JSON."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test invalid JSON handling",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns invalid JSON (missing closing brace)
+    invalid_json = '{"step_ref": 1, "rationale": "test", "action": {"type": "complete"'
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": invalid_json,
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: User gets a friendly message, NOT the raw invalid JSON
+    assert result.status == "completed"
+    assert "Verarbeitungsfehler" in result.final_message
+    assert invalid_json not in result.final_message
+    # Ensure no JSON-like characters in user output
+    assert "{" not in result.final_message
+    assert "step_ref" not in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_thought_parse_empty_response_returns_friendly_message(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that empty LLM response returns a user-friendly message."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test empty response",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns empty string
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": "",
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: User gets a friendly message
+    assert result.status == "completed"
+    assert "Verarbeitungsfehler" in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_thought_parse_missing_action_key_returns_friendly_message(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that JSON missing required 'action' key returns friendly message."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test missing key",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns JSON missing 'action' key
+    incomplete_json = json.dumps({
+        "step_ref": 1,
+        "rationale": "Missing action",
+        "expected_outcome": "Test",
+    })
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": incomplete_json,
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: User gets friendly message, not KeyError traceback
+    assert result.status == "completed"
+    assert "Verarbeitungsfehler" in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_thought_parse_extracts_summary_from_invalid_json(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that summary is extracted from invalid JSON when possible."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test summary extraction",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns invalid JSON but with extractable summary
+    invalid_but_with_summary = (
+        '{"step_ref": 1, "action": {"type": "complete", '
+        '"summary": "Die Antwort auf Ihre Frage ist 42."}, '
+        '"rationale": "test"'  # Missing closing brace - invalid JSON
+    )
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": invalid_but_with_summary,
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: Summary was extracted from invalid JSON
+    assert result.status == "completed"
+    assert "42" in result.final_message
+    # Should NOT have the generic error message since summary was extracted
+    assert "Verarbeitungsfehler" not in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_extract_summary_from_invalid_json_with_escaped_quotes(agent):
+    """Test _extract_summary_from_invalid_json handles escaped quotes correctly."""
+    # Input with escaped quotes
+    raw_content = '{"summary": "Er sagte \\"Hallo\\" und ging.", "other": "data"}'
+    
+    result = agent._extract_summary_from_invalid_json(raw_content)
+    
+    assert result is not None
+    assert 'Er sagte "Hallo" und ging.' == result
+
+
+@pytest.mark.asyncio
+async def test_extract_summary_from_invalid_json_with_newlines(agent):
+    """Test _extract_summary_from_invalid_json handles newlines correctly."""
+    raw_content = '{"summary": "Zeile 1\\nZeile 2\\nZeile 3", "x": 1}'
+    
+    result = agent._extract_summary_from_invalid_json(raw_content)
+    
+    assert result is not None
+    assert "Zeile 1\nZeile 2\nZeile 3" == result
+
+
+@pytest.mark.asyncio
+async def test_extract_summary_from_invalid_json_returns_none_when_not_found(agent):
+    """Test _extract_summary_from_invalid_json returns None when no summary field."""
+    raw_content = '{"rationale": "something", "action": {"type": "complete"}}'
+    
+    result = agent._extract_summary_from_invalid_json(raw_content)
+    
+    assert result is None

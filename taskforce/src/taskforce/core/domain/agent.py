@@ -589,14 +589,22 @@ Error Message: {error.get('error', 'Unknown error')}
                 )
                 fallback_summary = extracted_summary
             else:
-                # Last resort: LLM responded with plain text
+                # NIEMALS raw_content als User-Output verwenden!
+                # Log raw_content auf DEBUG für spätere Analyse
+                self.logger.debug(
+                    "thought_parse_raw_content",
+                    step=current_step.position,
+                    raw_content=raw_content[:500] if raw_content else "(empty)",
+                )
                 self.logger.warning(
-                    "thought_parse_failed_using_raw",
+                    "thought_parse_failed_using_fallback",
                     step=current_step.position,
                     error=str(e),
-                    raw_preview=raw_content[:100],
                 )
-                fallback_summary = raw_content
+                fallback_summary = (
+                    "Es ist ein interner Verarbeitungsfehler aufgetreten. "
+                    "Bitte versuchen Sie es erneut oder formulieren Sie Ihre Anfrage anders."
+                )
 
             fallback_action = Action(
                 type=ActionType.COMPLETE,
@@ -605,10 +613,10 @@ Error Message: {error.get('error', 'Unknown error')}
 
             return Thought(
                 step_ref=current_step.position,
-                rationale="LLM provided direct text response instead of JSON. Treating as completion.",
+                rationale="LLM response parsing failed. Returning user-friendly fallback.",
                 action=fallback_action,
-                expected_outcome="User receives the text answer.",
-                confidence=1.0,
+                expected_outcome="User receives a friendly error message instead of raw JSON.",
+                confidence=0.0,
             )
 
     async def _execute_action(
