@@ -651,8 +651,121 @@ Error Message: {error.get('error', 'Unknown error')}
                 confidence=0.0,
             )
 
+    async def _generate_markdown_response(
+        self,
+        context: dict[str, Any],
+        previous_results: list[dict],
+    ) -> str:
+        """
+        Generate final markdown response without JSON constraints.
+
+        Called after ActionType.RESPOND to produce clean user output.
+        This is Phase 2 of the two-phase response flow.
+
+        Args:
+            context: Response context with mission, conversation history, etc.
+            previous_results: Results from previous tool executions
+
+        Returns:
+            Clean markdown-formatted response string
+        """
+        results_summary = self._summarize_results_for_response(previous_results)
+
+        prompt = f"""Formuliere eine klare, gut strukturierte Antwort für den User.
+
+## Kontext
+{context.get('mission', 'Keine Mission angegeben')}
+
+## Ergebnisse aus vorherigen Schritten
+{results_summary}
+
+## Anweisungen
+- Antworte in Markdown
+- Nutze Bullet-Points für Listen
+- Fasse die wichtigsten Erkenntnisse zusammen
+- KEIN JSON, keine Code-Blöcke außer wenn inhaltlich nötig
+"""
+
+        result = await self.llm_provider.complete(
+            messages=[
+                {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+                {"role": "user", "content": prompt},
+            ],
+            model=self.model_alias,
+            response_format=None,  # KEIN JSON-Mode!
+            temperature=0.3,
+        )
+
+        if not result.get("success"):
+            self.logger.error(
+                "markdown_response_generation_failed",
+                error=result.get("error"),
+            )
+            return "Entschuldigung, ich konnte keine Antwort generieren."
+
+        return result["content"]
+
+    def _build_response_context_for_respond(
+        self, state: dict[str, Any], step: TodoItem
+    ) -> dict[str, Any]:
+        """
+        Build context for markdown response generation.
+
+        Args:
+            state: Current session state
+            step: Current TodoItem being executed
+
+        Returns:
+            Context dictionary for response generation
+        """
+        return {
+            "mission": state.get("mission", step.description),
+            "conversation_history": state.get("conversation_history", [])[-5:],
+            "user_answers": state.get("answers", {}),
+        }
+
+    def _summarize_results_for_response(self, previous_results: list[dict]) -> str:
+        """
+        Summarize previous tool results for response context.
+
+        Args:
+            previous_results: List of previous execution results
+
+        Returns:
+            Formatted summary string
+        """
+        if not previous_results:
+            return "Keine vorherigen Ergebnisse."
+
+        summaries = []
+        for i, result in enumerate(previous_results[-5:], 1):
+            tool = result.get("tool", "unknown")
+            success = "✓" if result.get("success") or result.get("result", {}).get("success") else "✗"
+            
+            # Extract preview from result data
+            data = result.get("result", result.get("data", {}))
+            if isinstance(data, dict):
+                # Try common content keys
+                for key in ["content", "summary", "response", "output", "data"]:
+                    if key in data and isinstance(data[key], str):
+                        data_preview = data[key][:200]
+                        break
+                else:
+                    data_preview = str(data)[:200]
+            else:
+                data_preview = str(data)[:200]
+            
+            summaries.append(f"{i}. [{success}] {tool}: {data_preview}")
+
+        return "\n".join(summaries)
+
     async def _execute_action(
-        self, action: Action, step: TodoItem, state: dict[str, Any], session_id: str
+        self,
+        action: Action,
+        step: TodoItem,
+        state: dict[str, Any],
+        session_id: str,
+        todolist: TodoList | None = None,
     ) -> Observation:
         """Execute action and return observation."""
         if action.type == ActionType.TOOL_CALL:
@@ -674,7 +787,36 @@ Error Message: {error.get('error', 'Unknown error')}
                 requires_user=True,
             )
 
-        elif action.type in (ActionType.COMPLETE, ActionType.RESPOND):
+        elif action.type == ActionType.RESPOND:
+            # Two-Phase Response: Generate clean markdown via separate LLM call
+            context = self._build_response_context_for_respond(state, step)
+            
+            # Extract previous results from todolist if available
+            previous_results = []
+            if todolist:
+                previous_results = [
+                    {
+                        "step": s.position,
+                        "description": s.description,
+                        "tool": s.chosen_tool,
+                        "result": s.execution_result,
+                        "success": s.execution_result.get("success", False) if s.execution_result else False,
+                    }
+                    for s in todolist.items
+                    if s.execution_result and s.position < step.position
+                ]
+
+            markdown_response = await self._generate_markdown_response(
+                context, previous_results
+            )
+
+            return Observation(
+                success=True,
+                data={"summary": markdown_response},
+            )
+
+        elif action.type == ActionType.COMPLETE:
+            # COMPLETE = Early exit, use summary directly (no two-phase)
             return Observation(success=True, data={"summary": action.summary})
 
         elif action.type == ActionType.REPLAN:
@@ -1168,7 +1310,7 @@ Error Message: {error.get('error', 'Unknown error')}
                 continue
             else:
                 observation = await self._execute_action(
-                    thought.action, current_step, state, session_id
+                    thought.action, current_step, state, session_id, todolist
                 )
 
             execution_history.append({

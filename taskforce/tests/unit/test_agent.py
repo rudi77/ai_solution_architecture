@@ -201,7 +201,7 @@ async def test_react_loop_executes_pending_step(
     )
     mock_todolist_manager.create_todolist.return_value = todolist
 
-    # Setup LLM to return tool_call first, then finish_step
+    # Setup LLM to return tool_call first, then finish_step, then markdown
     tool_call_response = {
         "step_ref": 1,
         "rationale": "Need to execute the test tool",
@@ -219,6 +219,7 @@ async def test_react_loop_executes_pending_step(
     mock_llm_provider.complete.side_effect = [
         {"success": True, "content": json.dumps(tool_call_response)},
         {"success": True, "content": json.dumps(finish_step_response)},
+        {"success": True, "content": "Task completed successfully."},  # Two-phase markdown
     ]
 
     # Setup tool to succeed
@@ -227,8 +228,8 @@ async def test_react_loop_executes_pending_step(
     # Execute
     result = await agent.execute(mission="Test mission", session_id="test-session")
 
-    # Verify LLM was called twice (tool_call + finish_step)
-    assert mock_llm_provider.complete.call_count == 2
+    # Verify LLM was called 3 times (tool_call + finish_step + markdown)
+    assert mock_llm_provider.complete.call_count == 3
 
     # Verify tool was executed once (tool_input is spread as kwargs)
     mock_tool.execute.assert_called_once_with(param="value")
@@ -390,7 +391,7 @@ async def test_react_loop_retries_failed_step(
     )
     mock_todolist_manager.create_todolist.return_value = todolist
 
-    # LLM returns tool_call actions, then finish_step after success
+    # LLM returns tool_call actions, then finish_step after success, then markdown
     tool_call_response = {
         "step_ref": 1,
         "rationale": "Execute tool",
@@ -409,6 +410,7 @@ async def test_react_loop_retries_failed_step(
         {"success": True, "content": json.dumps(tool_call_response)},  # First attempt
         {"success": True, "content": json.dumps(tool_call_response)},  # Retry
         {"success": True, "content": json.dumps(finish_step_response)},  # Finish
+        {"success": True, "content": "Retry succeeded."},  # Two-phase markdown
     ]
 
     # Tool fails first time, succeeds second time
@@ -521,7 +523,7 @@ async def test_react_loop_respects_dependencies(
     )
     mock_todolist_manager.create_todolist.return_value = todolist
 
-    # LLM returns tool_call then finish_step for each step
+    # LLM returns tool_call then finish_step for each step, plus markdown for two-phase
     mock_llm_provider.complete.side_effect = [
         {"success": True, "content": json.dumps({
             "step_ref": 1,
@@ -537,6 +539,7 @@ async def test_react_loop_respects_dependencies(
             "expected_outcome": "Complete",
             "confidence": 1.0,
         })},
+        {"success": True, "content": "Step 1 completed."},  # Two-phase markdown
         {"success": True, "content": json.dumps({
             "step_ref": 2,
             "rationale": "Execute step 2",
@@ -551,6 +554,7 @@ async def test_react_loop_respects_dependencies(
             "expected_outcome": "Complete",
             "confidence": 1.0,
         })},
+        {"success": True, "content": "Step 2 completed."},  # Two-phase markdown
     ]
 
     mock_tool.execute.return_value = {"success": True, "output": "success"}
@@ -797,6 +801,7 @@ async def test_tool_success_keeps_step_pending(
     mock_llm_provider.complete.side_effect = [
         {"success": True, "content": json.dumps(thought_response)},
         {"success": True, "content": json.dumps(finish_response)},
+        {"success": True, "content": "Task completed."},  # Two-phase markdown
     ]
 
     # Tool succeeds
@@ -805,8 +810,8 @@ async def test_tool_success_keeps_step_pending(
     # Execute
     result = await agent.execute(mission="Test mission", session_id="test-session")
 
-    # Verify: LLM was called twice (tool_call, then finish_step)
-    assert mock_llm_provider.complete.call_count == 2
+    # Verify: LLM was called 3 times (tool_call, finish_step, markdown)
+    assert mock_llm_provider.complete.call_count == 3
 
     # Verify: step ends up COMPLETED only after finish_step
     assert result.status == "completed"
@@ -845,7 +850,7 @@ async def test_tool_success_resets_attempts_counter(
     )
     mock_todolist_manager.create_todolist.return_value = todolist
 
-    # LLM returns tool_call then finish_step
+    # LLM returns tool_call then finish_step then markdown
     mock_llm_provider.complete.side_effect = [
         {"success": True, "content": json.dumps({
             "step_ref": 1,
@@ -861,6 +866,7 @@ async def test_tool_success_resets_attempts_counter(
             "expected_outcome": "Complete",
             "confidence": 1.0,
         })},
+        {"success": True, "content": "Completed."},  # Two-phase markdown
     ]
 
     mock_tool.execute.return_value = {"success": True, "output": "done"}
@@ -1206,6 +1212,7 @@ async def test_minimal_schema_tool_call(
     mock_llm_provider.complete.side_effect = [
         {"success": True, "content": json.dumps(minimal_tool_call)},
         {"success": True, "content": json.dumps(minimal_respond)},
+        {"success": True, "content": "Task completed successfully."},  # Two-phase markdown
     ]
 
     mock_tool.execute.return_value = {"success": True, "output": "done"}
@@ -1216,9 +1223,9 @@ async def test_minimal_schema_tool_call(
     # Verify: Tool was called with correct params
     mock_tool.execute.assert_called_once_with(param="value")
 
-    # Verify: Result is completed
+    # Verify: Result is completed (two-phase generates markdown)
     assert result.status == "completed"
-    assert result.final_message == "Task completed successfully"
+    assert "completed" in result.final_message.lower()
 
 
 @pytest.mark.asyncio
@@ -1506,14 +1513,297 @@ async def test_minimal_schema_without_optional_fields(
         "action": "respond",
         "summary": "Minimal response",
     }
-    mock_llm_provider.complete.return_value = {
-        "success": True,
-        "content": json.dumps(truly_minimal),
-    }
+    # Two LLM calls: first for thought (respond action), second for markdown generation
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps(truly_minimal)},
+        {"success": True, "content": "# Minimal response\n\nHere is your answer."},
+    ]
 
     # Execute
     result = await agent.execute(mission="Test minimal", session_id="test-session")
 
     # Verify: Works even with absolute minimum fields
     assert result.status == "completed"
-    assert "Minimal response" in result.final_message
+    # Two-phase: markdown_response is returned, not the original summary
+    assert "answer" in result.final_message.lower() or "Minimal" in result.final_message
+
+
+# ============================================================================
+# Zwei-Phasen-Response Tests - Story 5.3
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_respond_action_triggers_two_phase_flow(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that RESPOND action triggers a second LLM call for markdown generation."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test two-phase response",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # Phase 1: LLM returns respond action
+    respond_action = {
+        "action": "respond",
+        "summary": "ignored - two phase will generate markdown",
+    }
+    # Phase 2: LLM generates clean markdown
+    markdown_response = "# Ergebnis\n\n- Punkt 1\n- Punkt 2\n\nZusammenfassung fertig."
+
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps(respond_action)},  # Phase 1: Thought
+        {"success": True, "content": markdown_response},  # Phase 2: Markdown
+    ]
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: Two LLM calls were made
+    assert mock_llm_provider.complete.call_count == 2
+
+    # Verify: Second call was WITHOUT JSON mode
+    second_call_kwargs = mock_llm_provider.complete.call_args_list[1].kwargs
+    assert second_call_kwargs.get("response_format") is None
+
+    # Verify: Final message is the markdown, not the original summary
+    assert result.status == "completed"
+    assert "Ergebnis" in result.final_message
+    assert "Punkt 1" in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_two_phase_response_includes_previous_results(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider, mock_tool
+):
+    """Test that two-phase response includes context from previous tool results."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Execute a tool",
+                acceptance_criteria="Tool done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            ),
+            TodoItem(
+                position=2,
+                description="Respond to user",
+                acceptance_criteria="Response given",
+                dependencies=[1],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            ),
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM flow: tool_call -> finish_step -> respond -> markdown
+    mock_llm_provider.complete.side_effect = [
+        # Step 1: tool_call
+        {"success": True, "content": json.dumps({
+            "action": "tool_call",
+            "tool": "test_tool",
+            "tool_input": {},
+        })},
+        # Step 1: finish_step
+        {"success": True, "content": json.dumps({
+            "action": "respond",
+            "summary": "Step 1 done",
+        })},
+        # Step 1 markdown (two-phase)
+        {"success": True, "content": "Step 1 completed."},
+        # Step 2: respond
+        {"success": True, "content": json.dumps({
+            "action": "respond",
+            "summary": "Final answer",
+        })},
+        # Step 2 markdown (two-phase) - should have access to step 1 results
+        {"success": True, "content": "# Final Answer\n\nBased on previous results."},
+    ]
+
+    mock_tool.execute.return_value = {"success": True, "output": "tool output data"}
+
+    # Execute
+    result = await agent.execute(mission="Multi-step mission", session_id="test-session")
+
+    # Verify: Completed successfully
+    assert result.status == "completed"
+
+    # Verify: Multiple LLM calls (thought + markdown for each respond)
+    assert mock_llm_provider.complete.call_count >= 4
+
+
+@pytest.mark.asyncio
+async def test_two_phase_response_handles_llm_failure_gracefully(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that two-phase response returns fallback on LLM failure."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test LLM failure handling",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # Phase 1: respond action
+    respond_action = {"action": "respond", "summary": "Answer"}
+    
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps(respond_action)},  # Phase 1
+        {"success": False, "error": "LLM service unavailable"},  # Phase 2 fails
+    ]
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: Returns graceful fallback message
+    assert result.status == "completed"
+    assert "Entschuldigung" in result.final_message or "konnte keine Antwort" in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_complete_action_skips_two_phase(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that COMPLETE action does NOT trigger two-phase (uses summary directly)."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test complete action",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # COMPLETE action - should NOT trigger second LLM call
+    complete_action = {
+        "action": "complete",
+        "summary": "Early exit with direct summary",
+    }
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps(complete_action),
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: Only ONE LLM call (no second call for markdown)
+    assert mock_llm_provider.complete.call_count == 1
+
+    # Verify: Summary is used directly
+    assert result.status == "completed"
+    assert "Early exit with direct summary" in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_summarize_results_for_response_empty_list(agent):
+    """Test _summarize_results_for_response handles empty list."""
+    result = agent._summarize_results_for_response([])
+    assert result == "Keine vorherigen Ergebnisse."
+
+
+@pytest.mark.asyncio
+async def test_summarize_results_for_response_with_results(agent):
+    """Test _summarize_results_for_response formats results correctly."""
+    previous_results = [
+        {
+            "tool": "wiki_search",
+            "result": {"success": True, "content": "Found 5 pages about Python"},
+        },
+        {
+            "tool": "file_read",
+            "result": {"success": False, "error": "File not found"},
+        },
+    ]
+
+    result = agent._summarize_results_for_response(previous_results)
+
+    # Check formatting
+    assert "wiki_search" in result
+    assert "file_read" in result
+    assert "[✓]" in result  # Success indicator
+    assert "[✗]" in result  # Failure indicator
+
+
+@pytest.mark.asyncio
+async def test_build_response_context_for_respond(agent):
+    """Test _build_response_context_for_respond extracts correct context."""
+    state = {
+        "mission": "Find information about X",
+        "conversation_history": [
+            {"role": "user", "content": "msg1"},
+            {"role": "assistant", "content": "msg2"},
+        ],
+        "answers": {"key1": "value1"},
+    }
+    step = TodoItem(
+        position=1,
+        description="Test step",
+        acceptance_criteria="Done",
+        dependencies=[],
+        status=TaskStatus.PENDING,
+    )
+
+    context = agent._build_response_context_for_respond(state, step)
+
+    assert context["mission"] == "Find information about X"
+    assert len(context["conversation_history"]) == 2
+    assert context["user_answers"] == {"key1": "value1"}
