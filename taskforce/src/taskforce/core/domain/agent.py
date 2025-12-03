@@ -679,15 +679,20 @@ Error Message: {error.get('error', 'Unknown error')}
         current_step = context["current_step"]
         mission = current_step.description
 
-        # Winziger System Prompt statt des riesigen Kernels
+        # 1. OPTIMIERTER MINI-PROMPT
+        # Wir sagen ihm explizit: "Schau in die History für Parameter!"
         mini_system_prompt = """You are a fast execution assistant.
 Your goal is to answer the user's question directly using the available tools.
-Do NOT plan. Do NOT ask clarifying questions unless absolutely necessary.
-If you know the answer without tools, respond directly.
+
+CRITICAL RULES:
+1. Do NOT plan. Do NOT ask clarifying questions unless absolutely necessary.
+2. PARAMETER CONSISTENCY (Most Important):
+   - Check the conversation history below for Organization names, Project names, and Wiki IDs.
+   - NEVER invent parameters. If the history shows 'organization': 'blumatix', USE IT.
+   - If the history shows a Wiki ID like '556a...', USE IT instead of the name.
 
 Available Tools:
 """
-        # Tools kurz und knackig listen
         mini_system_prompt += self._get_tools_description()
 
         user_prompt = f"""
@@ -703,9 +708,12 @@ Return JSON matching this schema:
 }}
 """
 
-        # History anhängen (nur die letzten 2 Nachrichten für Context)
+        # 2. HISTORY EINBAUEN (Mehr Context für bessere Parameter-Suche)
         messages = [{"role": "system", "content": mini_system_prompt}]
-        history = context.get("conversation_history", [])[-2:]
+
+        # Erhöhe von [-2:] auf [-6:].
+        # Das kostet kaum Zeit, gibt dem Agenten aber Zugriff auf vorherige 'list_wiki' Ergebnisse.
+        history = context.get("conversation_history", [])[-6:]
         for msg in history:
             if msg.get("role") != "system":
                 messages.append(msg)
@@ -716,7 +724,7 @@ Return JSON matching this schema:
 
         result = await self.llm_provider.complete(
             messages=messages,
-            model=self.model_alias,  # Oder ein schnelleres Modell ('fast') erzwingen?
+            model="fast",  # Fast model for quick responses
             response_format={"type": "json_object"},
             temperature=0.0
         )
