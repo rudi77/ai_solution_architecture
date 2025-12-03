@@ -1320,6 +1320,69 @@ async def test_minimal_schema_ask_user_action(
 
 
 @pytest.mark.asyncio
+async def test_minimal_schema_tool_name_as_action_fallback(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider, mock_tool
+):
+    """Test agent corrects LLM mistake when tool name is used as action type.
+    
+    This tests the fallback where LLM returns:
+        {"action": "list_wiki", "tool": "list_wiki", ...}
+    instead of:
+        {"action": "tool_call", "tool": "list_wiki", ...}
+    
+    The agent should recognize this pattern and correct it to tool_call.
+    """
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="List wikis",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns WRONG format: tool name as action type (common LLM mistake)
+    wrong_format = {
+        "action": "list_wiki",  # WRONG: should be "tool_call"
+        "tool": "test_tool",    # But tool field is correct (matches mock_tool)
+        "tool_input": {"param": "value"},
+    }
+    minimal_respond = {
+        "action": "respond",
+        "summary": "Done listing wikis",
+    }
+    
+    # Setup mock responses: wrong format -> respond -> markdown
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps(wrong_format)},
+        {"success": True, "content": json.dumps(minimal_respond)},
+        {"success": True, "content": "Done listing wikis."},  # Two-phase markdown
+    ]
+    
+    mock_tool.execute.return_value = {"success": True, "output": "Wiki list"}
+
+    # Execute - should NOT fail with "list_wiki is not a valid ActionType"
+    result = await agent.execute(mission="List wikis", session_id="test-session")
+
+    # Verify: Agent should have executed the tool despite wrong action format
+    assert result.status == "completed"
+    mock_tool.execute.assert_called_once_with(param="value")
+
+
+@pytest.mark.asyncio
 async def test_legacy_schema_still_works(
     agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
 ):

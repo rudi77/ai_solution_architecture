@@ -562,6 +562,26 @@ Error Message: {error.get('error', 'Unknown error')}
                 if action_type_raw == "finish_step":
                     action_type_raw = "respond"
                 
+                # FALLBACK: LLM may confuse tool name with action type
+                # E.g., {"action": "list_wiki", "tool": "list_wiki", ...}
+                # If "action" is not a valid ActionType but looks like a tool_call, correct it
+                valid_action_types = {a.value for a in ActionType}
+                if action_type_raw not in valid_action_types:
+                    # Check if LLM provided tool info (clear sign of tool_call intent)
+                    if data.get("tool") or data.get("tool_input"):
+                        self.logger.warning(
+                            "llm_action_type_corrected",
+                            original_action=action_type_raw,
+                            corrected_to="tool_call",
+                        )
+                        # If tool field is missing but action looks like tool name, use it
+                        if not data.get("tool"):
+                            data["tool"] = action_type_raw
+                        action_type_raw = "tool_call"
+                    else:
+                        # No tool info - raise original error for clarity
+                        raise ValueError(f"'{action_type_raw}' is not a valid ActionType")
+                
                 action = Action(
                     type=ActionType(action_type_raw),
                     tool=data.get("tool"),
@@ -792,6 +812,8 @@ Error Message: {error.get('error', 'Unknown error')}
             context = self._build_response_context_for_respond(state, step)
             
             # Extract previous results from todolist if available
+            # IMPORTANT: Include current step's result (position <= step.position)
+            # because the current step may have already executed a tool in this iteration
             previous_results = []
             if todolist:
                 previous_results = [
@@ -803,7 +825,7 @@ Error Message: {error.get('error', 'Unknown error')}
                         "success": s.execution_result.get("success", False) if s.execution_result else False,
                     }
                     for s in todolist.items
-                    if s.execution_result and s.position < step.position
+                    if s.execution_result and s.position <= step.position
                 ]
 
             markdown_response = await self._generate_markdown_response(

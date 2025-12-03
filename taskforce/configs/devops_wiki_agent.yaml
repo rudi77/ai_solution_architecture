@@ -65,6 +65,6 @@ mcp_servers:
     env:
       AZURE_DEVOPS_URL: "https://dev.azure.com/blumatix"
       AZURE_DEVOPS_PROJECT: "Rechnungserkennung"
-      AZURE_DEVOPS_PAT: " "
+      AZURE_DEVOPS_PAT: ""
       AZURE_DEVOPS_ORGANIZATION: "blumatix"
 

@@ -887,7 +887,21 @@ class OpenAIService(LLMProviderProtocol):
                 )
 
                 # Extract content and usage
-                content = response.choices[0].message.content
+                # Handle both regular and reasoning model response formats
+                message = response.choices[0].message
+                content = message.content
+                
+                # For reasoning models (GPT-5, o1, o3), content might be in reasoning_content
+                # or the model might return content in a different format
+                if not content:
+                    # Try reasoning_content for reasoning models
+                    reasoning_content = getattr(message, "reasoning_content", None)
+                    if reasoning_content:
+                        content = reasoning_content
+                    # Also check for refusal or other alternative fields
+                    elif hasattr(message, "refusal") and message.refusal:
+                        content = f"[Model refused: {message.refusal}]"
+                
                 usage = getattr(response, "usage", {})
 
                 # Handle both dict and object forms
@@ -901,6 +915,18 @@ class OpenAIService(LLMProviderProtocol):
                     }
 
                 latency_ms = int((time.time() - start_time) * 1000)
+                
+                # Warn if we have completion tokens but empty content
+                # This might indicate a response format issue with new model versions
+                completion_tokens = token_stats.get("completion_tokens", 0)
+                if not content and completion_tokens > 0:
+                    self.logger.warning(
+                        "llm_empty_content_with_tokens",
+                        model=actual_model,
+                        completion_tokens=completion_tokens,
+                        hint="Model generated tokens but content is empty. Check for new response format.",
+                        message_fields=list(vars(message).keys()) if hasattr(message, "__dict__") else str(type(message)),
+                    )
 
                 if self.logging_config.get("log_token_usage", True):
                     self.logger.info(

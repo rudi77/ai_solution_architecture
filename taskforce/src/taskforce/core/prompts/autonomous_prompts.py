@@ -108,10 +108,17 @@ Return ONLY this JSON structure. No extra fields required.
   "summary": "<only for respond - your final answer>"
 }
 
-### Action Types:
+### Action Types (EXACTLY these three values):
 - `tool_call`: Execute a tool with the given parameters
 - `respond`: You have enough information - provide final answer in `summary`
 - `ask_user`: Ask the user a clarifying question
+
+### CRITICAL - Common Mistake to Avoid:
+The `action` field must be EXACTLY one of: `tool_call`, `respond`, or `ask_user`.
+**NEVER** put the tool name in the `action` field!
+
+WRONG: `{"action": "list_wiki", "tool": "list_wiki", ...}`
+CORRECT: `{"action": "tool_call", "tool": "list_wiki", ...}`
 
 ### IMPORTANT:
 - NO `rationale`, `confidence`, `expected_outcome`, `step_ref` required
