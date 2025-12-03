@@ -168,6 +168,7 @@ class Agent:
                 )
 
         # 2. Standard path: full planning and execution
+        self.logger.info("full_path_activated", session_id=session_id)
         return await self._execute_full_path(mission, state, session_id, execution_history)
 
     async def _replan(
@@ -446,6 +447,29 @@ class Agent:
             "user_answers": state.get("answers", {}),
         }
 
+    def _extract_summary_from_invalid_json(self, raw_content: str) -> str | None:
+        """
+        Extract summary field from invalid JSON using regex.
+        
+        When LLM returns malformed JSON that still contains a valid summary,
+        we extract it rather than showing the raw JSON to the user.
+        
+        Returns:
+            Extracted summary string, or None if not found
+        """
+        import re
+        # Look for "summary": "..." pattern, handling escaped quotes
+        pattern = r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"\s*[,}]'
+        match = re.search(pattern, raw_content, re.DOTALL)
+        if match:
+            # Unescape the string
+            summary = match.group(1)
+            summary = summary.replace('\\"', '"')
+            summary = summary.replace('\\n', '\n')
+            summary = summary.replace('\\t', '\t')
+            return summary
+        return None
+
     async def _generate_thought(self, context: dict[str, Any]) -> Thought:
         """Generate thought using LLM."""
         current_step = context["current_step"]
@@ -552,19 +576,31 @@ Error Message: {error.get('error', 'Unknown error')}
             )
             return thought
         except (json.JSONDecodeError, KeyError) as e:
-            # FALLBACK: LLM responded with plain text instead of JSON.
-            # Model "broke character" and answered directly.
-            # We treat the entire text as a COMPLETE action summary.
-            self.logger.warning(
-                "thought_parse_failed_using_fallback",
-                step=current_step.position,
-                error=str(e),
-                raw_preview=raw_content[:100],
-            )
+            # FALLBACK: JSON parsing failed.
+            # Try to extract the summary field from invalid JSON
+            extracted_summary = self._extract_summary_from_invalid_json(raw_content)
+            
+            if extracted_summary:
+                self.logger.warning(
+                    "thought_parse_failed_extracted_summary",
+                    step=current_step.position,
+                    error=str(e),
+                    summary_preview=extracted_summary[:100],
+                )
+                fallback_summary = extracted_summary
+            else:
+                # Last resort: LLM responded with plain text
+                self.logger.warning(
+                    "thought_parse_failed_using_raw",
+                    step=current_step.position,
+                    error=str(e),
+                    raw_preview=raw_content[:100],
+                )
+                fallback_summary = raw_content
 
             fallback_action = Action(
                 type=ActionType.COMPLETE,
-                summary=raw_content,  # The LLM's text becomes the answer
+                summary=fallback_summary,
             )
 
             return Thought(
@@ -901,6 +937,14 @@ Error Message: {error.get('error', 'Unknown error')}
 
         # Handle direct completion (LLM answered without tool)
         if thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP):
+            # DEBUG: Log what we're returning
+            self.logger.info(
+                "fast_path_direct_completion",
+                session_id=session_id,
+                action_type=str(thought.action.type),
+                summary_preview=str(thought.action.summary)[:100] if thought.action.summary else "None",
+                summary_type=type(thought.action.summary).__name__,
+            )
             return ExecutionResult(
                 session_id=session_id,
                 status="completed",
@@ -921,9 +965,22 @@ Error Message: {error.get('error', 'Unknown error')}
 
             if observation.success:
                 # Generate final response from tool result
+                # We must inject the result into 'previous_results' so _generate_thought sees it
+                tool_result_entry = {
+                    "step": 1,
+                    "description": synthetic_step.description,
+                    "tool": thought.action.tool,
+                    "result": observation.data,
+                    "status": "COMPLETED"
+                }
+                
+                updated_previous_results = list(context.get("previous_results", []))
+                updated_previous_results.append(tool_result_entry)
+
                 final_context = {
                     **context,
-                    "tool_result": observation.data,
+                    "previous_results": updated_previous_results,
+                    "tool_result": observation.data, # Keep for completeness/debugging
                 }
                 final_thought = await self._generate_thought(final_context)
                 execution_history.append({
@@ -934,21 +991,37 @@ Error Message: {error.get('error', 'Unknown error')}
                     "final": True,
                 })
 
-                return ExecutionResult(
+                # If the agent successfully summarized the result
+                if final_thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP):
+                    # Extract summary, never fall back to raw JSON
+                    summary = final_thought.action.summary
+                    if not summary:
+                        # Try to extract from observation data
+                        summary = self._extract_summary_from_data(observation.data)
+                    return ExecutionResult(
+                        session_id=session_id,
+                        status="completed",
+                        final_message=summary,
+                        execution_history=execution_history,
+                        todolist_id=state.get("todolist_id"),
+                    )
+                
+                # If Agent wants to continue (e.g. another tool call), Fast Path failed (it's single-step only)
+                self.logger.info(
+                    "fast_path_multi_step_required", 
                     session_id=session_id,
-                    status="completed",
-                    final_message=final_thought.action.summary or str(observation.data),
-                    execution_history=execution_history,
-                    todolist_id=state.get("todolist_id"),
+                    next_action=final_thought.action.type
                 )
+                # Fall through to full path fallback
 
-            # Tool failed - fall back to full path
-            self.logger.warning(
-                "fast_path_tool_failed",
-                session_id=session_id,
-                tool=thought.action.tool,
-                error=observation.error,
-            )
+            # Tool failed or multi-step required - fall back to full path
+            if not observation.success:
+                self.logger.warning(
+                    "fast_path_tool_failed",
+                    session_id=session_id,
+                    tool=thought.action.tool,
+                    error=observation.error,
+                )
 
         # Fallback to full path if fast path can't handle
         self.logger.info("fast_path_fallback", session_id=session_id)
@@ -1104,6 +1177,13 @@ Error Message: {error.get('error', 'Unknown error')}
         if self._is_plan_complete(todolist):
             status = "completed"
             final_message = self._extract_final_message(todolist, execution_history)
+            # DEBUG: Log what _extract_final_message returned
+            self.logger.info(
+                "full_path_final_message",
+                session_id=session_id,
+                final_message_preview=final_message[:200] if final_message else "None",
+                final_message_type=type(final_message).__name__,
+            )
         elif iteration >= self.MAX_ITERATIONS:
             status = "failed"
             final_message = f"Exceeded maximum iterations ({self.MAX_ITERATIONS})"
@@ -1120,6 +1200,31 @@ Error Message: {error.get('error', 'Unknown error')}
             execution_history=execution_history,
             todolist_id=todolist.todolist_id,
         )
+
+    def _extract_summary_from_data(self, data: Any) -> str:
+        """
+        Extract human-readable summary from observation data.
+        
+        Never returns raw JSON - always extracts meaningful text or
+        returns a generic completion message.
+        """
+        if isinstance(data, str):
+            return data
+        
+        if isinstance(data, dict):
+            # Priority keys for extracting text
+            for key in ["summary", "content", "response", "result", "message"]:
+                if key in data and isinstance(data[key], str):
+                    return data[key].strip()
+            
+            # Check nested 'data' dict
+            if "data" in data and isinstance(data["data"], dict):
+                for key in ["summary", "content", "response", "result"]:
+                    if key in data["data"] and isinstance(data["data"][key], str):
+                        return data["data"][key].strip()
+        
+        # Fallback - never return raw JSON
+        return "Task completed successfully."
 
     def _extract_final_message(
         self, todolist: TodoList, execution_history: list[dict[str, Any]]
@@ -1149,6 +1254,15 @@ Error Message: {error.get('error', 'Unknown error')}
             if step.status == TaskStatus.COMPLETED and step.execution_result:
                 result = step.execution_result
                 text = None
+                
+                # DEBUG: Log what execution_result contains
+                self.logger.debug(
+                    "extract_final_message_step",
+                    step_position=step.position,
+                    result_type=type(result).__name__,
+                    result_keys=list(result.keys()) if isinstance(result, dict) else "N/A",
+                    result_preview=str(result)[:200] if result else "None",
+                )
 
                 if isinstance(result, dict):
                     # Check top-level keys

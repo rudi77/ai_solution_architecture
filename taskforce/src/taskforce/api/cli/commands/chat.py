@@ -141,6 +141,17 @@ def chat(
                     state = await agent.state_manager.load_state(session_id) or {}
                     history = state.get("conversation_history", [])
                     
+                    # If there's a pending question, save user input as the answer
+                    pending_q = state.get("pending_question")
+                    if pending_q:
+                        answer_key = pending_q.get("answer_key")
+                        if answer_key:
+                            answers = state.get("answers", {})
+                            answers[answer_key] = user_input
+                            state["answers"] = answers
+                        # Clear pending question after answer is stored
+                        state["pending_question"] = None
+                    
                     # Append user message to history
                     history.append({"role": "user", "content": user_input})
                     state["conversation_history"] = history

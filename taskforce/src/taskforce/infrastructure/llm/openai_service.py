@@ -20,6 +20,7 @@ For Azure OpenAI setup instructions, see docs/azure-openai-setup.md
 
 import asyncio
 import json
+import logging
 import os
 import time
 from datetime import datetime
@@ -27,12 +28,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import aiofiles
-import litellm
-import structlog
-import yaml
+# ============================================================================
+# CRITICAL: Suppress LiteLLM logging BEFORE importing litellm
+# ============================================================================
+os.environ["LITELLM_LOGGING"] = "off"
+os.environ["LITELLM_LOG_LEVEL"] = "ERROR"
+os.environ["HTTPX_LOG_LEVEL"] = "warning"
 
-from taskforce.core.interfaces.llm import LLMProviderProtocol
+# Pre-silence loggers before litellm import
+for _ln in ["LiteLLM", "litellm", "httpcore", "httpx", "aiohttp", "openai"]:
+    logging.getLogger(_ln).setLevel(logging.ERROR)
+
+import aiofiles  # noqa: E402
+import litellm  # noqa: E402
+import structlog  # noqa: E402
+import yaml  # noqa: E402
+
+# After import: ensure litellm's internal flags are off
+litellm.set_verbose = False
+litellm.suppress_debug_info = True
+
+from taskforce.core.interfaces.llm import LLMProviderProtocol  # noqa: E402
 
 
 @dataclass
