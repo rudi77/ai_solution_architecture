@@ -134,6 +134,7 @@ class QueryRouter:
         Classify query as follow-up or new mission.
 
         Uses heuristics first, falls back to LLM if configured and uncertain.
+        Now includes "bold" fast-start heuristic for simple queries without context.
 
         Args:
             context: RouterContext with query and session information
@@ -141,8 +142,30 @@ class QueryRouter:
         Returns:
             RouterResult with decision, confidence, and rationale
         """
-        # Rule 1: No active context → must be new mission
+        # Heuristik für "Quick Start"
+        # Prüfen auf typische "Single-Step"-Fragen (Wer, Was, Wie, Liste...)
+        start_words = ["wer", "was", "wie", "wo", "wann", "welche", "zeig", "liste",
+                       "who", "what", "how", "where", "when", "which", "show", "list"]
+
+        query_lower = context.query.lower().strip()
+        is_simple_start = any(query_lower.startswith(w) for w in start_words)
+        is_short = len(context.query.split()) < 20
+
+        # Rule 1: No active context
         if not context.has_active_todolist and not context.previous_results:
+            # NEUE LOGIK: Wenn es wie eine simple Frage aussieht -> Fast Path riskieren!
+            if is_simple_start and is_short:
+                self.logger.debug(
+                    "router_fast_start_heuristic",
+                    query=context.query,
+                )
+                return RouterResult(
+                    decision=RouteDecision.FOLLOW_UP,  # Wir nutzen FOLLOW_UP als Signal für "Direkt"
+                    confidence=0.85,
+                    rationale="Initial query looks simple enough for fast path",
+                )
+
+            # Sonst: Sicherer Weg über Planung
             self.logger.debug(
                 "router_no_context",
                 query_preview=context.query[:50],
@@ -153,10 +176,9 @@ class QueryRouter:
                 rationale="No active context - starting new mission",
             )
 
-        # Rule 2: Completed todolist with new query → check if follow-up
+        # Rule 2: Completed todolist -> check follow-up
         if context.todolist_completed:
-            # Check if query references previous results
-            if self._references_previous_context(context):
+            if self._references_previous_context(context) or (is_simple_start and is_short):
                 self.logger.debug(
                     "router_references_context",
                     query_preview=context.query[:50],
@@ -164,7 +186,7 @@ class QueryRouter:
                 return RouterResult(
                     decision=RouteDecision.FOLLOW_UP,
                     confidence=0.8,
-                    rationale="Query references completed task context",
+                    rationale="Query references context or is simple follow-up",
                 )
 
         # Rule 3: Apply heuristic patterns
@@ -186,7 +208,7 @@ class QueryRouter:
             )
             return await self._llm_classify(context)
 
-        # Default: Treat as new mission to be safe
+        # Fallback
         self.logger.debug(
             "router_default_new_mission",
             query_preview=context.query[:50],
@@ -194,7 +216,7 @@ class QueryRouter:
         return RouterResult(
             decision=RouteDecision.NEW_MISSION,
             confidence=0.5,
-            rationale="Uncertain classification - defaulting to full planning",
+            rationale="Defaulting to full planning",
         )
 
     def _references_previous_context(self, context: RouterContext) -> bool:

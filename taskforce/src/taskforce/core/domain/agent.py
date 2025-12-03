@@ -1134,16 +1134,16 @@ Error Message: {error.get('error', 'Unknown error')}
         Returns:
             ExecutionResult with status and final message
         """
-        # Create synthetic single-step todoitem
+        # 1. Synthetic Step
         synthetic_step = TodoItem(
             position=1,
             description=mission,
-            acceptance_criteria="User query answered satisfactorily",
+            acceptance_criteria="User query answered",
             dependencies=[],
             status=TaskStatus.PENDING,
         )
 
-        # Build context from previous session
+        # 2. Context bauen
         todolist_id = state.get("todolist_id")
         previous_results = []
         if todolist_id:
@@ -1153,13 +1153,22 @@ Error Message: {error.get('error', 'Unknown error')}
             except FileNotFoundError:
                 pass
 
+        # --- OPTIMIERUNG 1: Prompt Injection ---
+        # Wir manipulieren die "user_answers", um den Agenten zu zwingen,
+        # NICHT zu fragen. Das ist ein Trick, um den Base-Prompt zu übersteuern.
+        user_answers = dict(state.get("answers", {}))
+        user_answers["IMPORTANT_INSTRUCTION"] = (
+            "Do NOT ask clarifying questions. Execute the most likely tool immediately. "
+            "Guess parameters if needed."
+        )
         context = {
             "current_step": synthetic_step,
             "previous_results": previous_results,
             "conversation_history": state.get("conversation_history", []),
-            "user_answers": state.get("answers", {}),
+            "user_answers": user_answers,
             "fast_path": True,  # Signal to thought generator
         }
+        # ---------------------------------------
 
         # Generate thought and execute
         thought = await self._generate_thought(context)
@@ -1169,6 +1178,21 @@ Error Message: {error.get('error', 'Unknown error')}
             "data": asdict(thought),
             "fast_path": True,
         })
+
+        # --- OPTIMIERUNG 2: ASK_USER Handling ---
+        # Falls er TROTZDEM fragt, geben wir das sofort zurück,
+        # statt den Full Path zu starten.
+        if thought.action.type == ActionType.ASK_USER:
+            self.logger.info("fast_path_ask_user", session_id=session_id)
+            return ExecutionResult(
+                session_id=session_id,
+                status="paused",
+                final_message=thought.action.question,
+                execution_history=execution_history,
+                todolist_id=None,
+                pending_question={"question": thought.action.question}
+            )
+        # ----------------------------------------
 
         # Handle direct completion (LLM answered without tool)
         if thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP, ActionType.RESPOND):
@@ -1199,55 +1223,27 @@ Error Message: {error.get('error', 'Unknown error')}
             })
 
             if observation.success:
-                # Generate final response from tool result
-                # We must inject the result into 'previous_results' so _generate_thought sees it
-                tool_result_entry = {
-                    "step": 1,
-                    "description": synthetic_step.description,
-                    "tool": thought.action.tool,
-                    "result": observation.data,
-                    "status": "COMPLETED"
-                }
-                
-                updated_previous_results = list(context.get("previous_results", []))
-                updated_previous_results.append(tool_result_entry)
+                # --- OPTIMIERUNG START ---
+                # STATT: final_thought = await self._generate_thought(final_context)
+                # MACHEN WIR: Direkte Antwort-Generierung ohne JSON-Zwang.
 
-                final_context = {
-                    **context,
-                    "previous_results": updated_previous_results,
-                    "tool_result": observation.data, # Keep for completeness/debugging
-                }
-                final_thought = await self._generate_thought(final_context)
-                execution_history.append({
-                    "type": "thought",
-                    "step": 1,
-                    "data": asdict(final_thought),
-                    "fast_path": True,
-                    "final": True,
-                })
+                self.logger.info("fast_path_generating_final_response", session_id=session_id)
 
-                # If the agent successfully summarized the result
-                if final_thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP, ActionType.RESPOND):
-                    # Extract summary, never fall back to raw JSON
-                    summary = final_thought.action.summary
-                    if not summary:
-                        # Try to extract from observation data
-                        summary = self._extract_summary_from_data(observation.data)
-                    return ExecutionResult(
-                        session_id=session_id,
-                        status="completed",
-                        final_message=summary,
-                        execution_history=execution_history,
-                        todolist_id=state.get("todolist_id"),
-                    )
-                
-                # If Agent wants to continue (e.g. another tool call), Fast Path failed (it's single-step only)
-                self.logger.info(
-                    "fast_path_multi_step_required", 
-                    session_id=session_id,
-                    next_action=final_thought.action.type
+                # Wir nutzen einen spezialisierten Prompt, der NICHT den ReAct-Overhead hat
+                final_message = await self._generate_fast_path_completion(
+                    mission,
+                    thought.action.tool,
+                    observation.data
                 )
-                # Fall through to full path fallback
+
+                return ExecutionResult(
+                    session_id=session_id,
+                    status="completed",
+                    final_message=final_message,
+                    execution_history=execution_history,
+                    todolist_id=state.get("todolist_id"),
+                )
+                # --- OPTIMIERUNG ENDE ---
 
             # Tool failed or multi-step required - fall back to full path
             if not observation.success:
@@ -1463,6 +1459,53 @@ Error Message: {error.get('error', 'Unknown error')}
         
         # Fallback - never return raw JSON
         return "Task completed successfully."
+
+    async def _generate_fast_path_completion(self, query: str, tool_name: str, result_data: Any) -> str:
+        """
+        Generates a final answer directly from a tool result, bypassing the heavy 'Thought' process.
+        This handles large contexts better because we don't need the system prompt overhead.
+
+        Args:
+            query: The user's original query/mission
+            tool_name: Name of the tool that was executed
+            result_data: The full result data from the tool execution
+
+        Returns:
+            Generated response message as string
+        """
+        # Konvertiere result_data zu String (aber behalte den Inhalt!)
+        content_str = str(result_data)
+
+        # Ein sehr schlanker Prompt, der sich nur auf die Antwort konzentriert
+        prompt = f"""
+Du beantwortest die User-Frage basierend auf dem folgenden Tool-Ergebnis.
+
+User Frage: "{query}"
+
+Tool ({tool_name}) Ergebnis:
+{content_str}
+
+Anweisung:
+- Antworte direkt und präzise auf die Frage.
+- Nutze Markdown.
+- Zitiere Quellen, falls im Ergebnis vorhanden.
+- Wenn das Ergebnis die Frage nicht beantwortet, sage das ehrlich.
+"""
+
+        result = await self.llm_provider.complete(
+            messages=[
+                # Minimaler System Prompt spart Tokens und lenkt nicht ab
+                {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+                {"role": "user", "content": prompt}
+            ],
+            model=self.model_alias,
+            temperature=0.3,
+            # WICHTIG: Kein JSON Mode! Das erlaubt dem Modell "frei" zu atmen.
+        )
+
+        if result.get("success"):
+            return result["content"]
+        return "Task completed (could not generate summary)."
 
     def _extract_final_message(
         self, todolist: TodoList, execution_history: list[dict[str, Any]]
