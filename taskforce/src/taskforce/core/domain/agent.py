@@ -474,20 +474,14 @@ class Agent:
         """Generate thought using LLM."""
         current_step = context["current_step"]
 
-        # Build prompt
+        # Build prompt with MINIMAL schema
         schema_hint = {
-            "step_ref": "int",
-            "rationale": "string (<= 2 sentences)",
-            "action": {
-                "type": "tool_call|ask_user|complete|replan|finish_step",
-                "tool": "string|null (for tool_call)",
-                "tool_input": "object (for tool_call)",
-                "question": "string (for ask_user)",
-                "answer_key": "string (for ask_user)",
-                "summary": "string (for complete)",
-            },
-            "expected_outcome": "string",
-            "confidence": "float (0-1, optional)",
+            "action": "tool_call|respond|ask_user",
+            "tool": "string (only for tool_call)",
+            "tool_input": "object (only for tool_call)",
+            "question": "string (only for ask_user)",
+            "answer_key": "string (only for ask_user)",
+            "summary": "string (only for respond - final answer)",
         }
 
         # Build error context if retry
@@ -518,10 +512,10 @@ Error Message: {error.get('error', 'Unknown error')}
             "- Choose the appropriate tool from the <ToolsDescription> section to fulfill the step's acceptance criteria.\n"
             "- If this is a retry, FIX the previous error using the hints provided.\n"
             "- If information is missing, use ask_user action.\n"
-            "- If the entire mission is already fulfilled, use complete action.\n"
+            "- If you have enough information to answer, use respond action with your answer in summary.\n"
             "- IMPORTANT: After a tool succeeds, you may continue iterating (e.g., run tests).\n"
-            "  Only use finish_step when you have VERIFIED the step's acceptance criteria are met.\n"
-            "- Return STRICT JSON only matching this schema:\n"
+            "  Only use respond when you have VERIFIED the step's acceptance criteria are met.\n"
+            "- Return STRICT JSON only matching this MINIMAL schema:\n"
             f"{json.dumps(schema_hint, indent=2)}\n"
         )
 
@@ -554,26 +548,64 @@ Error Message: {error.get('error', 'Unknown error')}
         raw_content = result["content"]
         self.logger.info("llm_call_thought_end", step=current_step.position)
 
-        # Parse thought from JSON
+        # Parse thought from JSON - supports both minimal and legacy schema
         try:
             data = json.loads(raw_content)
-            action_data = data["action"]
-            action = Action(
-                type=ActionType(action_data["type"]),
-                tool=action_data.get("tool"),
-                tool_input=action_data.get("tool_input"),
-                question=action_data.get("question"),
-                answer_key=action_data.get("answer_key"),
-                summary=action_data.get("summary"),
-                replan_reason=action_data.get("replan_reason"),
-            )
-            thought = Thought(
-                step_ref=data["step_ref"],
-                rationale=data["rationale"],
-                action=action,
-                expected_outcome=data["expected_outcome"],
-                confidence=data.get("confidence", 1.0),
-            )
+            
+            # Detect schema format: minimal has "action" as string, legacy has "action" as dict
+            if isinstance(data.get("action"), str):
+                # MINIMAL SCHEMA: {"action": "tool_call", "tool": "...", ...}
+                action_type_raw = data["action"]
+                
+                # Normalize: finish_step -> respond (same semantics: complete current step)
+                # Note: "complete" is NOT mapped - it has different semantics (early exit)
+                if action_type_raw == "finish_step":
+                    action_type_raw = "respond"
+                
+                action = Action(
+                    type=ActionType(action_type_raw),
+                    tool=data.get("tool"),
+                    tool_input=data.get("tool_input"),
+                    question=data.get("question"),
+                    answer_key=data.get("answer_key"),
+                    summary=data.get("summary"),
+                    replan_reason=data.get("replan_reason"),
+                )
+                
+                # Build Thought with defaults for optional fields
+                thought = Thought(
+                    step_ref=current_step.position,  # Use current step as default
+                    rationale="",  # Not required in minimal schema
+                    action=action,
+                    expected_outcome="",  # Not required in minimal schema
+                    confidence=1.0,
+                )
+            else:
+                # LEGACY SCHEMA: {"action": {"type": "...", "tool": "..."}, "step_ref": ...}
+                action_data = data["action"]
+                action_type_raw = action_data["type"]
+                
+                # Normalize: finish_step -> respond (same semantics: complete current step)
+                # Note: "complete" is NOT mapped - it has different semantics (early exit)
+                if action_type_raw == "finish_step":
+                    action_type_raw = "respond"
+                
+                action = Action(
+                    type=ActionType(action_type_raw),
+                    tool=action_data.get("tool"),
+                    tool_input=action_data.get("tool_input"),
+                    question=action_data.get("question"),
+                    answer_key=action_data.get("answer_key"),
+                    summary=action_data.get("summary"),
+                    replan_reason=action_data.get("replan_reason"),
+                )
+                thought = Thought(
+                    step_ref=data.get("step_ref", current_step.position),
+                    rationale=data.get("rationale", ""),
+                    action=action,
+                    expected_outcome=data.get("expected_outcome", ""),
+                    confidence=data.get("confidence", 1.0),
+                )
             return thought
         except (json.JSONDecodeError, KeyError) as e:
             # FALLBACK: JSON parsing failed.
@@ -642,7 +674,7 @@ Error Message: {error.get('error', 'Unknown error')}
                 requires_user=True,
             )
 
-        elif action.type == ActionType.COMPLETE:
+        elif action.type in (ActionType.COMPLETE, ActionType.RESPOND):
             return Observation(success=True, data={"summary": action.summary})
 
         elif action.type == ActionType.REPLAN:
@@ -772,8 +804,8 @@ Error Message: {error.get('error', 'Unknown error')}
         )
 
         # Update status based on action type and observation
-        if action.type == ActionType.FINISH_STEP:
-            # Explicit completion signal from agent
+        if action.type in (ActionType.FINISH_STEP, ActionType.RESPOND):
+            # Explicit completion signal from agent (RESPOND is the new name)
             step.status = TaskStatus.COMPLETED
             self.logger.info(
                 "step_completed_explicitly",
@@ -944,7 +976,7 @@ Error Message: {error.get('error', 'Unknown error')}
         })
 
         # Handle direct completion (LLM answered without tool)
-        if thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP):
+        if thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP, ActionType.RESPOND):
             # DEBUG: Log what we're returning
             self.logger.info(
                 "fast_path_direct_completion",
@@ -1000,7 +1032,7 @@ Error Message: {error.get('error', 'Unknown error')}
                 })
 
                 # If the agent successfully summarized the result
-                if final_thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP):
+                if final_thought.action.type in (ActionType.COMPLETE, ActionType.FINISH_STEP, ActionType.RESPOND):
                     # Extract summary, never fall back to raw JSON
                     summary = final_thought.action.summary
                     if not summary:
@@ -1164,9 +1196,10 @@ Error Message: {error.get('error', 'Unknown error')}
                 )
 
             if thought.action.type == ActionType.COMPLETE:
+                # COMPLETE = Early exit, skip all remaining steps
                 self.logger.info("early_completion", session_id=session_id)
                 current_step.status = TaskStatus.COMPLETED
-                current_step.execution_result = {"response": thought.action.summary}
+                current_step.execution_result = {"summary": thought.action.summary}
                 for step in todolist.items:
                     if step.status == TaskStatus.PENDING:
                         step.status = TaskStatus.SKIPPED
@@ -1180,6 +1213,8 @@ Error Message: {error.get('error', 'Unknown error')}
                     execution_history=execution_history,
                     todolist_id=todolist.todolist_id,
                 )
+            # Note: RESPOND and FINISH_STEP are handled via _process_observation,
+            # they only complete the current step, not the entire mission
 
         # Determine final status
         if self._is_plan_complete(todolist):

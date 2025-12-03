@@ -1149,3 +1149,371 @@ async def test_extract_summary_from_invalid_json_returns_none_when_not_found(age
     result = agent._extract_summary_from_invalid_json(raw_content)
     
     assert result is None
+
+
+# ============================================================================
+# Minimales Action-Schema Tests - Story 5.2
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_action_type_includes_respond():
+    """Test that ActionType enum includes RESPOND as the new primary completion type."""
+    assert ActionType.RESPOND == "respond"
+    assert ActionType.RESPOND.value == "respond"
+    # Legacy types still exist
+    assert ActionType.FINISH_STEP == "finish_step"
+    assert ActionType.COMPLETE == "complete"
+
+
+@pytest.mark.asyncio
+async def test_minimal_schema_tool_call(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider, mock_tool
+):
+    """Test agent parses minimal schema format for tool_call action."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test minimal schema",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns MINIMAL SCHEMA (action is string, not nested object)
+    minimal_tool_call = {
+        "action": "tool_call",
+        "tool": "test_tool",
+        "tool_input": {"param": "value"},
+    }
+    minimal_respond = {
+        "action": "respond",
+        "summary": "Task completed successfully",
+    }
+    mock_llm_provider.complete.side_effect = [
+        {"success": True, "content": json.dumps(minimal_tool_call)},
+        {"success": True, "content": json.dumps(minimal_respond)},
+    ]
+
+    mock_tool.execute.return_value = {"success": True, "output": "done"}
+
+    # Execute
+    result = await agent.execute(mission="Test mission", session_id="test-session")
+
+    # Verify: Tool was called with correct params
+    mock_tool.execute.assert_called_once_with(param="value")
+
+    # Verify: Result is completed
+    assert result.status == "completed"
+    assert result.final_message == "Task completed successfully"
+
+
+@pytest.mark.asyncio
+async def test_minimal_schema_respond_action(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test agent parses minimal schema 'respond' action (replaces finish_step/complete)."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test respond action",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns minimal schema with respond action
+    minimal_respond = {
+        "action": "respond",
+        "summary": "Here is your answer: 42",
+    }
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps(minimal_respond),
+    }
+
+    # Execute
+    result = await agent.execute(mission="What is the answer?", session_id="test-session")
+
+    # Verify: Result is completed with the summary
+    assert result.status == "completed"
+    assert "42" in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_minimal_schema_ask_user_action(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test agent parses minimal schema 'ask_user' action."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Need user input",
+                acceptance_criteria="User provides answer",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns minimal schema with ask_user
+    minimal_ask_user = {
+        "action": "ask_user",
+        "question": "What is your preferred language?",
+        "answer_key": "preferred_language",
+    }
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps(minimal_ask_user),
+    }
+
+    # Execute
+    result = await agent.execute(mission="Help me", session_id="test-session")
+
+    # Verify: Execution paused for user input
+    assert result.status == "paused"
+    assert "preferred language" in result.final_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_legacy_schema_still_works(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that legacy schema format (nested action object) still works."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test legacy schema",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns LEGACY SCHEMA (action is nested object)
+    legacy_complete = {
+        "step_ref": 1,
+        "rationale": "Task is done",
+        "action": {
+            "type": "complete",
+            "summary": "Legacy schema still works",
+        },
+        "expected_outcome": "Complete",
+        "confidence": 0.95,
+    }
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps(legacy_complete),
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test legacy", session_id="test-session")
+
+    # Verify: Legacy schema was parsed and worked
+    assert result.status == "completed"
+    assert "Legacy schema still works" in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_legacy_finish_step_maps_to_respond(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that legacy 'finish_step' is mapped to RESPOND internally."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test finish_step mapping",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns finish_step (legacy) via minimal schema
+    legacy_finish_step = {
+        "action": "finish_step",  # Legacy value
+        "summary": "Done via finish_step",
+    }
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps(legacy_finish_step),
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test finish_step", session_id="test-session")
+
+    # Verify: finish_step was handled (mapped to respond internally)
+    assert result.status == "completed"
+    assert "Done via finish_step" in result.final_message
+
+
+@pytest.mark.asyncio
+async def test_complete_triggers_early_exit(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that 'complete' action triggers early exit (skips remaining steps).
+    
+    Unlike 'respond' which only completes the current step, 'complete'
+    is a special action that completes the entire mission immediately.
+    """
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="First step",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            ),
+            TodoItem(
+                position=2,
+                description="Second step (will be skipped)",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns 'complete' - should exit immediately, skipping step 2
+    complete_action = {
+        "action": "complete",
+        "summary": "Mission done early",
+    }
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps(complete_action),
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test complete", session_id="test-session")
+
+    # Verify: complete triggered early exit
+    assert result.status == "completed"
+    assert "Mission done early" in result.final_message
+    
+    # Verify: LLM was only called once (not for step 2)
+    assert mock_llm_provider.complete.call_count == 1
+    
+    # Verify: Step 2 was skipped
+    updated_todolist = mock_todolist_manager.update_todolist.call_args[0][0]
+    assert updated_todolist.items[1].status == TaskStatus.SKIPPED
+
+
+@pytest.mark.asyncio
+async def test_minimal_schema_without_optional_fields(
+    agent, mock_state_manager, mock_todolist_manager, mock_llm_provider
+):
+    """Test that minimal schema works without rationale, confidence, expected_outcome."""
+    # Setup
+    mock_state_manager.load_state.return_value = {"answers": {}}
+
+    todolist = TodoList(
+        todolist_id="test-todolist",
+        items=[
+            TodoItem(
+                position=1,
+                description="Test minimal fields",
+                acceptance_criteria="Done",
+                dependencies=[],
+                status=TaskStatus.PENDING,
+                attempts=0,
+                max_attempts=3,
+                execution_history=[],
+            )
+        ],
+        open_questions=[],
+        notes="",
+    )
+    mock_todolist_manager.create_todolist.return_value = todolist
+
+    # LLM returns ONLY the required minimal fields (no rationale, confidence, etc.)
+    truly_minimal = {
+        "action": "respond",
+        "summary": "Minimal response",
+    }
+    mock_llm_provider.complete.return_value = {
+        "success": True,
+        "content": json.dumps(truly_minimal),
+    }
+
+    # Execute
+    result = await agent.execute(mission="Test minimal", session_id="test-session")
+
+    # Verify: Works even with absolute minimum fields
+    assert result.status == "completed"
+    assert "Minimal response" in result.final_message

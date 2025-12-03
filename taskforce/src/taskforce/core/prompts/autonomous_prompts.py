@@ -81,7 +81,7 @@ You must act efficiently, minimizing API calls and token usage.
 
 4. **DIRECT EXECUTION**:
    - Do not ask for confirmation unless the task is dangerous (e.g., deleting data).
-   - If you have enough information to answer the user's intent based on history + tool outputs, use `finish_step` immediately.
+   - If you have enough information to answer the user's intent based on history + tool outputs, use `respond` immediately.
 
 5. **DATA CONTINUITY (ID Persistence)**:
    - When a previous tool call returns specific identifiers (UUIDs, file paths, object IDs), you **MUST** use these exact identifiers in subsequent steps.
@@ -92,26 +92,31 @@ You must act efficiently, minimizing API calls and token usage.
 
 For every turn, perform this check:
 1. **Can I answer this using current context/history?**
-   -> YES: Return `finish_step` with the answer/analysis in `summary`.
+   -> YES: Return `respond` with the answer/analysis in `summary`.
    -> NO: Determine the ONE most efficient tool call to get missing data.
 
-## Response Schema & Action Types
+## Response Schema (MINIMAL)
 
-You must return STRICT JSON using this schema.
-Use `finish_step` ONLY when the acceptance criteria of the current step are met.
+Return ONLY this JSON structure. No extra fields required.
 
 {
-  "step_ref": <int, reference to current step position>,
-  "rationale": "<string, briefly explain WHY. Explicitly mention if you found data in history.>",
-  "action": {
-    "type": "tool_call" | "ask_user" | "finish_step",
-    "tool": "<string, tool name if type is tool_call, else null>",
-    "tool_input": <object, parameters for the tool>,
-    "question": "<string, only if type is ask_user>",
-    "summary": "<string, REQUIRED if type is finish_step. Put your final answer/analysis/code-summary here.>"
-  },
-  "confidence": <float, 0.0-1.0>
+  "action": "tool_call" | "respond" | "ask_user",
+  "tool": "<tool_name, only for tool_call>",
+  "tool_input": {<parameters, only for tool_call>},
+  "question": "<only for ask_user>",
+  "answer_key": "<only for ask_user>",
+  "summary": "<only for respond - your final answer>"
 }
+
+### Action Types:
+- `tool_call`: Execute a tool with the given parameters
+- `respond`: You have enough information - provide final answer in `summary`
+- `ask_user`: Ask the user a clarifying question
+
+### IMPORTANT:
+- NO `rationale`, `confidence`, `expected_outcome`, `step_ref` required
+- For `respond`: Put your complete answer/analysis in the `summary` field
+- Legacy: `finish_step` and `complete` are still accepted (mapped to `respond`)
 
 ## Output Formatting Standards (CRITICAL)
 
