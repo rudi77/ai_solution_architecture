@@ -397,14 +397,15 @@ class AgentFactory:
         # Pass user_context for RAG tools if provided
         tools_config = config.get("tools", [])
         has_config_tools = bool(tools_config)
+        mcp_contexts = []
 
         if has_config_tools:
             tools = self._create_native_tools(config, llm_provider, user_context=user_context)
-            mcp_tools, _ = await self._create_mcp_tools(config)
+            mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
             tools.extend(mcp_tools)
         else:
             tools = self._create_default_tools(llm_provider)
-            mcp_tools, _ = await self._create_mcp_tools(config)
+            mcp_tools, mcp_contexts = await self._create_mcp_tools(config)
             tools.extend(mcp_tools)
 
         # Build system prompt - use LEAN_KERNEL_PROMPT or specialist variant
@@ -421,13 +422,18 @@ class AgentFactory:
             model_alias=model_alias,
         )
 
-        return LeanAgent(
+        agent = LeanAgent(
             state_manager=state_manager,
             llm_provider=llm_provider,
             tools=tools,
             system_prompt=system_prompt,
             model_alias=model_alias,
         )
+
+        # Store MCP contexts on agent for lifecycle management
+        agent._mcp_contexts = mcp_contexts
+
+        return agent
 
     def _assemble_lean_system_prompt(
         self, specialist: Optional[str], tools: list[ToolProtocol]

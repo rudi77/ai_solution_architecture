@@ -292,9 +292,11 @@ class AgentExecutor:
             use_lean_agent=use_lean_agent,
         )
         
-        # LeanAgent takes priority if requested
+        # LeanAgent takes priority if requested (with optional user_context for RAG)
         if use_lean_agent:
-            return await self.factory.create_lean_agent(profile=profile)
+            return await self.factory.create_lean_agent(
+                profile=profile, user_context=user_context
+            )
         
         # Use RAG agent factory when user_context is provided
         if user_context:
