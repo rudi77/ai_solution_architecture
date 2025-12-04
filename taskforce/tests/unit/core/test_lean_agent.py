@@ -585,3 +585,165 @@ class TestToolConverterIntegration:
         assert planner_tool_def["type"] == "function"
         assert "description" in planner_tool_def["function"]
         assert "parameters" in planner_tool_def["function"]
+
+
+class TestDynamicContextInjection:
+    """Tests for Story 4: Dynamic Context Injection."""
+
+    def test_build_system_prompt_without_plan(
+        self, mock_state_manager, mock_llm_provider, mock_tool
+    ):
+        """Test that _build_system_prompt returns base prompt when no plan exists."""
+        agent = LeanAgent(
+            state_manager=mock_state_manager,
+            llm_provider=mock_llm_provider,
+            tools=[mock_tool],
+            system_prompt="Base prompt here.",
+        )
+
+        prompt = agent._build_system_prompt()
+
+        assert "Base prompt here." in prompt
+        assert "CURRENT PLAN STATUS" not in prompt
+
+    def test_build_system_prompt_with_active_plan(
+        self, mock_state_manager, mock_llm_provider, mock_tool
+    ):
+        """Test that _build_system_prompt injects plan when one exists."""
+        planner = PlannerTool()
+        planner._create_plan(tasks=["Step 1: Do A", "Step 2: Do B"])
+
+        agent = LeanAgent(
+            state_manager=mock_state_manager,
+            llm_provider=mock_llm_provider,
+            tools=[mock_tool, planner],
+            system_prompt="Base prompt.",
+        )
+
+        prompt = agent._build_system_prompt()
+
+        assert "Base prompt." in prompt
+        assert "## CURRENT PLAN STATUS" in prompt
+        assert "[ ] 1. Step 1: Do A" in prompt
+        assert "[ ] 2. Step 2: Do B" in prompt
+
+    def test_build_system_prompt_reflects_completed_steps(
+        self, mock_state_manager, mock_llm_provider, mock_tool
+    ):
+        """Test that plan injection shows completed steps with [x]."""
+        planner = PlannerTool()
+        planner._create_plan(tasks=["Step 1", "Step 2"])
+        planner._mark_done(step_index=1)
+
+        agent = LeanAgent(
+            state_manager=mock_state_manager,
+            llm_provider=mock_llm_provider,
+            tools=[mock_tool, planner],
+            system_prompt="Test",
+        )
+
+        prompt = agent._build_system_prompt()
+
+        assert "[x] 1. Step 1" in prompt
+        assert "[ ] 2. Step 2" in prompt
+
+    @pytest.mark.asyncio
+    async def test_plan_updates_in_system_prompt_during_loop(
+        self, mock_state_manager, mock_llm_provider
+    ):
+        """Test that system prompt is updated each loop with latest plan state."""
+        planner = PlannerTool()
+        agent = LeanAgent(
+            state_manager=mock_state_manager,
+            llm_provider=mock_llm_provider,
+            tools=[planner],
+            system_prompt="Base",
+        )
+
+        captured_prompts = []
+
+        # Mock complete to capture system prompt on each call
+        async def capture_complete(messages, **kwargs):
+            # Capture the system prompt from messages
+            system_msg = next(
+                (m for m in messages if m["role"] == "system"), None
+            )
+            if system_msg:
+                captured_prompts.append(system_msg["content"])
+
+            # Simulate: 1st call creates plan, 2nd marks done, 3rd responds
+            call_count = len(captured_prompts)
+            if call_count == 1:
+                return {
+                    "success": True,
+                    "content": None,
+                    "tool_calls": [
+                        make_tool_call(
+                            "planner",
+                            {"action": "create_plan", "tasks": ["Task A"]},
+                        )
+                    ],
+                }
+            elif call_count == 2:
+                return {
+                    "success": True,
+                    "content": None,
+                    "tool_calls": [
+                        make_tool_call(
+                            "planner", {"action": "mark_done", "step_index": 1}
+                        )
+                    ],
+                }
+            else:
+                return {
+                    "success": True,
+                    "content": "All done!",
+                    "tool_calls": None,
+                }
+
+        mock_llm_provider.complete = capture_complete
+
+        await agent.execute(mission="Do task", session_id="test")
+
+        # Verify prompts evolved
+        assert len(captured_prompts) == 3
+
+        # 1st call: No plan yet
+        assert "CURRENT PLAN STATUS" not in captured_prompts[0]
+
+        # 2nd call: Plan exists with pending task
+        assert "CURRENT PLAN STATUS" in captured_prompts[1]
+        assert "[ ] 1. Task A" in captured_prompts[1]
+
+        # 3rd call: Plan exists with completed task
+        assert "CURRENT PLAN STATUS" in captured_prompts[2]
+        assert "[x] 1. Task A" in captured_prompts[2]
+
+    def test_system_prompt_property_returns_base_prompt(
+        self, mock_state_manager, mock_llm_provider, mock_tool
+    ):
+        """Test backward compatibility: system_prompt property returns base."""
+        agent = LeanAgent(
+            state_manager=mock_state_manager,
+            llm_provider=mock_llm_provider,
+            tools=[mock_tool],
+            system_prompt="My custom prompt",
+        )
+
+        assert agent.system_prompt == "My custom prompt"
+
+    def test_uses_lean_kernel_prompt_by_default(
+        self, mock_state_manager, mock_llm_provider, mock_tool
+    ):
+        """Test that LEAN_KERNEL_PROMPT is used when no prompt is provided."""
+        from taskforce.core.prompts.autonomous_prompts import LEAN_KERNEL_PROMPT
+
+        agent = LeanAgent(
+            state_manager=mock_state_manager,
+            llm_provider=mock_llm_provider,
+            tools=[mock_tool],
+            # No system_prompt provided
+        )
+
+        assert agent.system_prompt == LEAN_KERNEL_PROMPT
+        assert "Lean ReAct Agent" in agent.system_prompt

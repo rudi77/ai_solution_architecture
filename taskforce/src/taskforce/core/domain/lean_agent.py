@@ -7,6 +7,7 @@ tool calling capabilities (OpenAI/Anthropic function calling).
 Key features:
 - Native tool calling (no custom JSON parsing)
 - PlannerTool as first-class tool for plan management
+- Dynamic context injection: plan status injected into system prompt each loop
 - Robust error handling with automatic retry context
 - Clean message history management
 
@@ -27,6 +28,7 @@ from taskforce.core.domain.models import ExecutionResult
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.core.interfaces.state import StateManagerProtocol
 from taskforce.core.interfaces.tools import ToolProtocol
+from taskforce.core.prompts.autonomous_prompts import LEAN_KERNEL_PROMPT
 from taskforce.core.tools.planner_tool import PlannerTool
 from taskforce.infrastructure.tools.tool_converter import (
     assistant_tool_calls_to_message,
@@ -55,7 +57,7 @@ class LeanAgent:
         state_manager: StateManagerProtocol,
         llm_provider: LLMProviderProtocol,
         tools: list[ToolProtocol],
-        system_prompt: str,
+        system_prompt: str | None = None,
         model_alias: str = "main",
     ):
         """
@@ -66,11 +68,12 @@ class LeanAgent:
             llm_provider: Protocol for LLM completions (must support tools parameter)
             tools: List of available tools (PlannerTool should be included)
             system_prompt: Base system prompt for LLM interactions
+                          (defaults to LEAN_KERNEL_PROMPT if not provided)
             model_alias: Model alias for LLM calls (default: "main")
         """
         self.state_manager = state_manager
         self.llm_provider = llm_provider
-        self.system_prompt = system_prompt
+        self._base_system_prompt = system_prompt or LEAN_KERNEL_PROMPT
         self.model_alias = model_alias
         self.logger = structlog.get_logger().bind(component="lean_agent")
 
@@ -90,6 +93,42 @@ class LeanAgent:
 
         # Pre-convert tools to OpenAI format
         self._openai_tools = tools_to_openai_format(self.tools)
+
+    @property
+    def system_prompt(self) -> str:
+        """Return base system prompt (backward compatibility)."""
+        return self._base_system_prompt
+
+    def _build_system_prompt(self) -> str:
+        """
+        Build system prompt with dynamic plan context injection.
+
+        Reads current plan from PlannerTool and injects it into the system
+        prompt. This ensures the LLM always has visibility into plan state
+        on every loop iteration.
+
+        Returns:
+            Complete system prompt with plan context (if plan exists).
+        """
+        prompt = self._base_system_prompt
+
+        # Inject current plan status if PlannerTool exists and has a plan
+        if self._planner:
+            plan_result = self._planner._read_plan()
+            plan_output = plan_result.get("output", "")
+
+            # Only inject if there's an actual plan (not "No active plan.")
+            if plan_output and plan_output != "No active plan.":
+                plan_section = (
+                    "\n\n## CURRENT PLAN STATUS\n"
+                    "The following plan is currently active. "
+                    "Use it to guide your next steps.\n\n"
+                    f"{plan_output}"
+                )
+                prompt += plan_section
+                self.logger.debug("plan_injected", plan_steps=plan_output.count("\n") + 1)
+
+        return prompt
 
     async def execute(self, mission: str, session_id: str) -> ExecutionResult:
         """
@@ -128,6 +167,10 @@ class LeanAgent:
         while step < self.MAX_STEPS:
             step += 1
             self.logger.info("loop_step", session_id=session_id, step=step)
+
+            # Dynamic context injection: rebuild system prompt with current plan
+            current_system_prompt = self._build_system_prompt()
+            messages[0] = {"role": "system", "content": current_system_prompt}
 
             # Call LLM with tools
             result = await self.llm_provider.complete(
@@ -250,32 +293,26 @@ class LeanAgent:
         mission: str,
         state: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """Build initial message list for LLM conversation."""
-        # Get current plan status from PlannerTool
-        plan_status = "No plan created yet."
-        if self._planner:
-            result = self._planner._read_plan()
-            plan_status = result.get("output", "No plan created yet.")
+        """
+        Build initial message list for LLM conversation.
 
+        Note: Plan status is NOT included here - it's dynamically injected
+        into the system prompt on each loop iteration via _build_system_prompt().
+        """
         # Build user message with mission and context
         user_answers = state.get("answers", {})
         answers_text = ""
         if user_answers:
-            answers_text = f"\n\n## User Provided Information\n{json.dumps(user_answers, indent=2)}"
+            answers_text = (
+                f"\n\n## User Provided Information\n"
+                f"{json.dumps(user_answers, indent=2)}"
+            )
 
-        user_message = (
-            f"## Mission\n{mission}\n\n"
-            f"## Current Plan Status\n{plan_status}"
-            f"{answers_text}\n\n"
-            "## Instructions\n"
-            "1. If no plan exists, use the 'planner' tool to create one.\n"
-            "2. Execute tasks using appropriate tools.\n"
-            "3. Mark tasks done with 'planner' tool after completion.\n"
-            "4. When all tasks are complete, provide a final summary response."
-        )
+        user_message = f"## Mission\n{mission}{answers_text}"
 
+        # System prompt will be rebuilt dynamically in the loop
         return [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": self._base_system_prompt},
             {"role": "user", "content": user_message},
         ]
 
