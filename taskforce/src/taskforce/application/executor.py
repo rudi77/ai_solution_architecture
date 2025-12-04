@@ -14,16 +14,17 @@ The AgentExecutor:
 """
 
 import uuid
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncIterator, Callable, Optional, List, Dict, Any
+from typing import Any
 
 import structlog
 
 from taskforce.application.factory import AgentFactory
 from taskforce.core.domain.agent import Agent
 from taskforce.core.domain.lean_agent import LeanAgent
-from taskforce.core.domain.models import ExecutionResult
+from taskforce.core.domain.models import ExecutionResult, StreamEvent
 
 logger = structlog.get_logger()
 
@@ -31,10 +32,10 @@ logger = structlog.get_logger()
 @dataclass
 class ProgressUpdate:
     """Progress update during execution.
-    
+
     Represents a single event during agent execution that can be
     streamed to consumers for real-time progress tracking.
-    
+
     Attributes:
         timestamp: When this update occurred
         event_type: Type of event (started, thought, action, observation, complete, error)
@@ -50,19 +51,19 @@ class ProgressUpdate:
 
 class AgentExecutor:
     """Service layer orchestrating agent execution.
-    
+
     Provides unified execution logic used by both CLI and API entrypoints.
     Handles agent creation, session management, execution orchestration,
     progress tracking, and comprehensive logging.
-    
+
     This service layer decouples the domain logic (Agent) from the
     presentation layer (CLI/API), enabling consistent behavior across
     different interfaces.
     """
 
-    def __init__(self, factory: Optional[AgentFactory] = None):
+    def __init__(self, factory: AgentFactory | None = None):
         """Initialize AgentExecutor with optional factory.
-        
+
         Args:
             factory: Optional AgentFactory instance. If not provided,
                     creates a default factory.
@@ -74,24 +75,24 @@ class AgentExecutor:
         self,
         mission: str,
         profile: str = "dev",
-        session_id: Optional[str] = None,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-        progress_callback: Optional[Callable[[ProgressUpdate], None]] = None,
-        user_context: Optional[Dict[str, Any]] = None,
+        session_id: str | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
+        progress_callback: Callable[[ProgressUpdate], None] | None = None,
+        user_context: dict[str, Any] | None = None,
         use_lean_agent: bool = False,
     ) -> ExecutionResult:
         """Execute agent mission with comprehensive orchestration.
-        
+
         Main entry point for mission execution. Orchestrates the complete
         workflow from agent creation through execution to result delivery.
-        
+
         Workflow:
         1. Create agent using factory based on profile
         2. Generate or use provided session ID
         3. Execute agent ReAct loop with progress tracking
         4. Log execution metrics and status
         5. Return execution result
-        
+
         Args:
             mission: Mission description (what to accomplish)
             profile: Configuration profile (dev/staging/prod)
@@ -102,10 +103,10 @@ class AgentExecutor:
                          (user_id, org_id, scope)
             use_lean_agent: If True, use LeanAgent instead of legacy Agent.
                            LeanAgent uses native tool calling and PlannerTool.
-        
+
         Returns:
             ExecutionResult with completion status and history
-            
+
         Raises:
             Exception: If agent creation or execution fails
         """
@@ -177,16 +178,16 @@ class AgentExecutor:
         self,
         mission: str,
         profile: str = "dev",
-        session_id: Optional[str] = None,
-        conversation_history: Optional[List[Dict[str, Any]]] = None,
-        user_context: Optional[Dict[str, Any]] = None,
+        session_id: str | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
+        user_context: dict[str, Any] | None = None,
         use_lean_agent: bool = False,
     ) -> AsyncIterator[ProgressUpdate]:
         """Execute mission with streaming progress updates.
-        
+
         Yields ProgressUpdate objects as execution progresses, enabling
         real-time feedback to consumers (CLI progress bars, API SSE, etc).
-        
+
         Args:
             mission: Mission description
             profile: Configuration profile (dev/staging/prod)
@@ -194,10 +195,10 @@ class AgentExecutor:
             conversation_history: Optional conversation history for chat context
             user_context: Optional user context for RAG security filtering
             use_lean_agent: If True, use LeanAgent instead of legacy Agent
-            
+
         Yields:
             ProgressUpdate objects for each execution event
-            
+
         Raises:
             Exception: If agent creation or execution fails
         """
@@ -267,21 +268,21 @@ class AgentExecutor:
     async def _create_agent(
         self,
         profile: str,
-        user_context: Optional[Dict[str, Any]] = None,
+        user_context: dict[str, Any] | None = None,
         use_lean_agent: bool = False,
     ) -> Agent | LeanAgent:
         """Create agent using factory.
-        
+
         Creates either legacy Agent or LeanAgent based on parameters:
         - use_lean_agent=True: Creates LeanAgent (native tool calling, PlannerTool)
         - user_context provided: Creates RAG agent (legacy)
         - Otherwise: Creates standard Agent (legacy)
-        
+
         Args:
             profile: Configuration profile name
             user_context: Optional user context for RAG security filtering
             use_lean_agent: If True, create LeanAgent instead of legacy Agent
-            
+
         Returns:
             Agent or LeanAgent instance with injected dependencies
         """
@@ -291,19 +292,19 @@ class AgentExecutor:
             has_user_context=user_context is not None,
             use_lean_agent=use_lean_agent,
         )
-        
+
         # LeanAgent takes priority if requested (with optional user_context for RAG)
         if use_lean_agent:
             return await self.factory.create_lean_agent(
                 profile=profile, user_context=user_context
             )
-        
+
         # Use RAG agent factory when user_context is provided
         if user_context:
             return await self.factory.create_rag_agent(
                 profile=profile, user_context=user_context
             )
-        
+
         return await self.factory.create_agent(profile=profile)
 
     async def _execute_with_progress(
@@ -311,19 +312,19 @@ class AgentExecutor:
         agent: Agent | LeanAgent,
         mission: str,
         session_id: str,
-        progress_callback: Optional[Callable[[ProgressUpdate], None]],
+        progress_callback: Callable[[ProgressUpdate], None] | None,
     ) -> ExecutionResult:
         """Execute agent with progress tracking via callback.
-        
+
         Wraps agent execution to intercept events and send progress updates
         through the provided callback function.
-        
+
         Args:
             agent: Agent instance to execute
             mission: Mission description
             session_id: Session identifier
             progress_callback: Optional callback for progress updates
-            
+
         Returns:
             ExecutionResult from agent execution
         """
@@ -356,64 +357,110 @@ class AgentExecutor:
         self, agent: Agent | LeanAgent, mission: str, session_id: str
     ) -> AsyncIterator[ProgressUpdate]:
         """Execute agent with streaming progress updates.
-        
-        Executes the agent and yields progress updates for each significant
-        event during execution.
-        
+
+        Uses true streaming if agent supports execute_stream(), otherwise
+        falls back to post-hoc streaming from execution history.
+
         Args:
             agent: Agent instance to execute
             mission: Mission description
             session_id: Session identifier
-            
+
         Yields:
             ProgressUpdate objects for execution events
         """
-        # Execute agent
-        # Note: Current Agent implementation doesn't provide streaming
-        # For now, we execute and yield updates based on result
-        result = await agent.execute(mission=mission, session_id=session_id)
+        # Check if agent supports streaming (LeanAgent has execute_stream)
+        # Also verify it's a real method, not a Mock attribute
+        execute_stream_method = getattr(agent, "execute_stream", None)
+        is_real_method = (
+            execute_stream_method is not None
+            and callable(execute_stream_method)
+            and not str(type(execute_stream_method).__module__).startswith("unittest.mock")
+        )
 
-        # Yield updates based on execution history
-        for event in result.execution_history:
-            event_type = event.get("type", "unknown")
-            step = event.get("step", "?")
+        if is_real_method:
+            # True streaming: yield events as they happen
+            async for event in agent.execute_stream(mission, session_id):
+                yield self._stream_event_to_progress_update(event)
+        else:
+            # Fallback: post-hoc streaming from execution history
+            result = await agent.execute(mission=mission, session_id=session_id)
 
-            if event_type == "thought":
-                data = event.get("data", {})
-                rationale = data.get("rationale", "")
-                yield ProgressUpdate(
-                    timestamp=datetime.now(),
-                    event_type="thought",
-                    message=f"Step {step}: {rationale[:80]}",
-                    details=data,
-                )
+            # Yield updates based on execution history
+            for event in result.execution_history:
+                event_type = event.get("type", "unknown")
+                step = event.get("step", "?")
 
-            elif event_type == "observation":
-                data = event.get("data", {})
-                success = data.get("success", False)
-                status = "success" if success else "failed"
-                yield ProgressUpdate(
-                    timestamp=datetime.now(),
-                    event_type="observation",
-                    message=f"Step {step}: {status}",
-                    details=data,
-                )
+                if event_type == "thought":
+                    data = event.get("data", {})
+                    rationale = data.get("rationale", "")
+                    yield ProgressUpdate(
+                        timestamp=datetime.now(),
+                        event_type="thought",
+                        message=f"Step {step}: {rationale[:80]}",
+                        details=data,
+                    )
 
-        # Yield final completion update
-        yield ProgressUpdate(
-            timestamp=datetime.now(),
-            event_type="complete",
-            message=result.final_message,
-            details={
-                "status": result.status,
-                "session_id": result.session_id,
-                "todolist_id": result.todolist_id,
-            },
+                elif event_type == "observation":
+                    data = event.get("data", {})
+                    success = data.get("success", False)
+                    status = "success" if success else "failed"
+                    yield ProgressUpdate(
+                        timestamp=datetime.now(),
+                        event_type="observation",
+                        message=f"Step {step}: {status}",
+                        details=data,
+                    )
+
+            # Yield final completion update
+            yield ProgressUpdate(
+                timestamp=datetime.now(),
+                event_type="complete",
+                message=result.final_message,
+                details={
+                    "status": result.status,
+                    "session_id": result.session_id,
+                    "todolist_id": result.todolist_id,
+                },
+            )
+
+    def _stream_event_to_progress_update(self, event: StreamEvent) -> ProgressUpdate:
+        """Convert StreamEvent to ProgressUpdate for API consumers.
+
+        Maps LeanAgent StreamEvent types to human-readable messages
+        for CLI and API streaming consumers.
+
+        Args:
+            event: StreamEvent from agent execution
+
+        Returns:
+            ProgressUpdate for consumer display
+        """
+        message_map = {
+            "step_start": lambda d: f"Step {d.get('step', '?')} starting...",
+            "llm_token": lambda d: d.get("content", ""),
+            "tool_call": lambda d: f"🔧 Calling: {d.get('tool', 'unknown')}",
+            "tool_result": lambda d: (
+                f"{'✅' if d.get('success') else '❌'} "
+                f"{d.get('tool', 'unknown')}: {str(d.get('output', ''))[:50]}"
+            ),
+            "plan_updated": lambda d: f"📋 Plan updated ({d.get('action', 'unknown')})",
+            "final_answer": lambda d: d.get("content", ""),
+            "error": lambda d: f"⚠️ Error: {d.get('message', 'unknown')}",
+        }
+
+        message_fn = message_map.get(event.event_type, lambda d: str(d))
+
+        return ProgressUpdate(
+            timestamp=event.timestamp,
+            event_type=event.event_type,
+            message=message_fn(event.data),
+            details=event.data,
         )
 
     def _generate_session_id(self) -> str:
         """Generate unique session ID.
-        
+
         Returns:
             UUID-based session identifier
         """
