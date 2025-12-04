@@ -296,10 +296,31 @@ class LeanAgent:
         """
         Build initial message list for LLM conversation.
 
+        Includes conversation_history from state to support multi-turn chat.
+        The history contains previous user/assistant exchanges for context.
+
         Note: Plan status is NOT included here - it's dynamically injected
         into the system prompt on each loop iteration via _build_system_prompt().
         """
-        # Build user message with mission and context
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._base_system_prompt},
+        ]
+
+        # Load conversation history from state for multi-turn context
+        conversation_history = state.get("conversation_history", [])
+        if conversation_history:
+            # Add previous conversation turns (user/assistant pairs)
+            for msg in conversation_history:
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
+            self.logger.debug(
+                "conversation_history_loaded",
+                history_length=len(conversation_history),
+            )
+
+        # Build user message with current mission and context
         user_answers = state.get("answers", {})
         answers_text = ""
         if user_answers:
@@ -308,13 +329,12 @@ class LeanAgent:
                 f"{json.dumps(user_answers, indent=2)}"
             )
 
-        user_message = f"## Mission\n{mission}{answers_text}"
+        user_message = f"{mission}{answers_text}"
 
-        # System prompt will be rebuilt dynamically in the loop
-        return [
-            {"role": "system", "content": self._base_system_prompt},
-            {"role": "user", "content": user_message},
-        ]
+        # Add current mission as latest user message
+        messages.append({"role": "user", "content": user_message})
+
+        return messages
 
     async def _execute_tool(
         self,

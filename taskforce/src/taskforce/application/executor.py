@@ -22,6 +22,7 @@ import structlog
 
 from taskforce.application.factory import AgentFactory
 from taskforce.core.domain.agent import Agent
+from taskforce.core.domain.lean_agent import LeanAgent
 from taskforce.core.domain.models import ExecutionResult
 
 logger = structlog.get_logger()
@@ -77,6 +78,7 @@ class AgentExecutor:
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         progress_callback: Optional[Callable[[ProgressUpdate], None]] = None,
         user_context: Optional[Dict[str, Any]] = None,
+        use_lean_agent: bool = False,
     ) -> ExecutionResult:
         """Execute agent mission with comprehensive orchestration.
         
@@ -98,6 +100,8 @@ class AgentExecutor:
             progress_callback: Optional callback for progress updates
             user_context: Optional user context for RAG security filtering
                          (user_id, org_id, scope)
+            use_lean_agent: If True, use LeanAgent instead of legacy Agent.
+                           LeanAgent uses native tool calling and PlannerTool.
         
         Returns:
             ExecutionResult with completion status and history
@@ -117,12 +121,15 @@ class AgentExecutor:
             profile=profile,
             session_id=session_id,
             has_user_context=user_context is not None,
+            use_lean_agent=use_lean_agent,
         )
 
         agent = None
         try:
             # Create agent with appropriate adapters
-            agent = await self._create_agent(profile, user_context=user_context)
+            agent = await self._create_agent(
+                profile, user_context=user_context, use_lean_agent=use_lean_agent
+            )
 
             # Store conversation history in state if provided
             if conversation_history:
@@ -173,6 +180,7 @@ class AgentExecutor:
         session_id: Optional[str] = None,
         conversation_history: Optional[List[Dict[str, Any]]] = None,
         user_context: Optional[Dict[str, Any]] = None,
+        use_lean_agent: bool = False,
     ) -> AsyncIterator[ProgressUpdate]:
         """Execute mission with streaming progress updates.
         
@@ -185,6 +193,7 @@ class AgentExecutor:
             session_id: Optional existing session to resume
             conversation_history: Optional conversation history for chat context
             user_context: Optional user context for RAG security filtering
+            use_lean_agent: If True, use LeanAgent instead of legacy Agent
             
         Yields:
             ProgressUpdate objects for each execution event
@@ -202,6 +211,7 @@ class AgentExecutor:
             profile=profile,
             session_id=session_id,
             has_user_context=user_context is not None,
+            use_lean_agent=use_lean_agent,
         )
 
         # Yield initial started event
@@ -209,13 +219,15 @@ class AgentExecutor:
             timestamp=datetime.now(),
             event_type="started",
             message=f"Starting mission: {mission[:80]}",
-            details={"session_id": session_id, "profile": profile},
+            details={"session_id": session_id, "profile": profile, "lean": use_lean_agent},
         )
 
         agent = None
         try:
             # Create agent
-            agent = await self._create_agent(profile, user_context=user_context)
+            agent = await self._create_agent(
+                profile, user_context=user_context, use_lean_agent=use_lean_agent
+            )
 
             # Store conversation history in state if provided
             if conversation_history:
@@ -253,25 +265,36 @@ class AgentExecutor:
                 await agent.close()
 
     async def _create_agent(
-        self, profile: str, user_context: Optional[Dict[str, Any]] = None
-    ) -> Agent:
+        self,
+        profile: str,
+        user_context: Optional[Dict[str, Any]] = None,
+        use_lean_agent: bool = False,
+    ) -> Agent | LeanAgent:
         """Create agent using factory.
         
-        Uses create_rag_agent when user_context is provided (for RAG profiles),
-        otherwise uses create_agent.
+        Creates either legacy Agent or LeanAgent based on parameters:
+        - use_lean_agent=True: Creates LeanAgent (native tool calling, PlannerTool)
+        - user_context provided: Creates RAG agent (legacy)
+        - Otherwise: Creates standard Agent (legacy)
         
         Args:
             profile: Configuration profile name
             user_context: Optional user context for RAG security filtering
+            use_lean_agent: If True, create LeanAgent instead of legacy Agent
             
         Returns:
-            Agent instance with injected dependencies
+            Agent or LeanAgent instance with injected dependencies
         """
         self.logger.debug(
             "creating_agent",
             profile=profile,
             has_user_context=user_context is not None,
+            use_lean_agent=use_lean_agent,
         )
+        
+        # LeanAgent takes priority if requested
+        if use_lean_agent:
+            return await self.factory.create_lean_agent(profile=profile)
         
         # Use RAG agent factory when user_context is provided
         if user_context:
@@ -283,7 +306,7 @@ class AgentExecutor:
 
     async def _execute_with_progress(
         self,
-        agent: Agent,
+        agent: Agent | LeanAgent,
         mission: str,
         session_id: str,
         progress_callback: Optional[Callable[[ProgressUpdate], None]],
@@ -328,7 +351,7 @@ class AgentExecutor:
         return result
 
     async def _execute_streaming(
-        self, agent: Agent, mission: str, session_id: str
+        self, agent: Agent | LeanAgent, mission: str, session_id: str
     ) -> AsyncIterator[ProgressUpdate]:
         """Execute agent with streaming progress updates.
         

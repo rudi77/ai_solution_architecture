@@ -23,12 +23,18 @@ def run_mission(
     debug: Optional[bool] = typer.Option(
         None, "--debug", help="Enable debug output (overrides global --debug)"
     ),
+    lean: bool = typer.Option(
+        False, "--lean", "-l", help="Use LeanAgent (native tool calling, PlannerTool)"
+    ),
 ):
     """Execute an agent mission.
     
     Examples:
         # Execute a simple mission
         taskforce run mission "Analyze data.csv"
+        
+        # Use LeanAgent (new simplified architecture)
+        taskforce run mission "Plan and execute" --lean
         
         # Resume a previous session
         taskforce run mission "Continue analysis" --session abc-123
@@ -66,6 +72,8 @@ def run_mission(
     if session_id:
         tf_console.print_system_message(f"Resuming session: {session_id}", "info")
     tf_console.print_system_message(f"Profile: {profile}", "info")
+    if lean:
+        tf_console.print_system_message("Using LeanAgent (native tool calling)", "info")
     tf_console.print_divider()
 
     executor = AgentExecutor()
@@ -90,6 +98,7 @@ def run_mission(
                 profile=profile,
                 session_id=session_id,
                 progress_callback=progress_callback,
+                use_lean_agent=lean,
             )
         )
 

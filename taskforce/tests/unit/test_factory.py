@@ -579,3 +579,99 @@ class TestAgentFactoryIntegration:
         assert agent1 is not agent2
         assert agent1.state_manager is not agent2.state_manager
 
+
+class TestLeanAgentFactory:
+    """Tests for LeanAgent factory creation (Story 5: CLI Integration)."""
+
+    @pytest.mark.asyncio
+    async def test_create_lean_agent_basic(self):
+        """Test creating a basic LeanAgent."""
+        from taskforce.core.domain.lean_agent import LeanAgent
+
+        factory = AgentFactory(config_dir="configs")
+        agent = await factory.create_lean_agent(profile="dev")
+
+        assert isinstance(agent, LeanAgent)
+        assert agent.state_manager is not None
+        assert agent.llm_provider is not None
+        assert len(agent.tools) > 0
+
+    @pytest.mark.asyncio
+    async def test_lean_agent_has_planner_tool(self):
+        """Test that LeanAgent has PlannerTool injected."""
+        from taskforce.core.tools.planner_tool import PlannerTool
+
+        factory = AgentFactory(config_dir="configs")
+        agent = await factory.create_lean_agent(profile="dev")
+
+        # PlannerTool should be present (injected by LeanAgent if not in tools)
+        assert "planner" in agent.tools
+        assert isinstance(agent.tools["planner"], PlannerTool)
+
+    @pytest.mark.asyncio
+    async def test_lean_agent_uses_lean_kernel_prompt(self):
+        """Test that LeanAgent uses LEAN_KERNEL_PROMPT."""
+        from taskforce.core.prompts.autonomous_prompts import LEAN_KERNEL_PROMPT
+
+        factory = AgentFactory(config_dir="configs")
+        agent = await factory.create_lean_agent(profile="dev")
+
+        # The system prompt should contain LEAN_KERNEL_PROMPT content
+        assert "Lean ReAct Agent" in agent.system_prompt
+
+    @pytest.mark.asyncio
+    async def test_lean_agent_with_specialist(self):
+        """Test creating LeanAgent with specialist profile."""
+        factory = AgentFactory(config_dir="configs")
+        agent = await factory.create_lean_agent(profile="dev", specialist="coding")
+
+        # Should have coding specialist content appended
+        assert "Coding Specialist" in agent.system_prompt or "Senior Software Engineer" in agent.system_prompt
+
+    @pytest.mark.asyncio
+    async def test_lean_agent_work_dir_override(self):
+        """Test LeanAgent with work_dir override."""
+        from taskforce.core.domain.lean_agent import LeanAgent
+
+        factory = AgentFactory(config_dir="configs")
+        agent = await factory.create_lean_agent(
+            profile="dev", work_dir=".lean_test_workdir"
+        )
+
+        assert isinstance(agent, LeanAgent)
+        # State manager should use the override work_dir
+        assert ".lean_test_workdir" in str(agent.state_manager.work_dir)
+
+    @pytest.mark.asyncio
+    async def test_assemble_lean_system_prompt_no_specialist(self):
+        """Test lean system prompt assembly without specialist."""
+        factory = AgentFactory(config_dir="configs")
+        
+        prompt = factory._assemble_lean_system_prompt(None, [])
+        
+        assert "Lean ReAct Agent" in prompt
+        # Should not have specialist-specific content
+        assert "Coding Specialist" not in prompt
+        assert "RAG Specialist" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_assemble_lean_system_prompt_with_coding(self):
+        """Test lean system prompt assembly with coding specialist."""
+        factory = AgentFactory(config_dir="configs")
+        
+        prompt = factory._assemble_lean_system_prompt("coding", [])
+        
+        assert "Lean ReAct Agent" in prompt
+        # Should have coding specialist content
+        assert "Senior Software Engineer" in prompt or "Coding Specialist" in prompt
+
+    @pytest.mark.asyncio
+    async def test_assemble_lean_system_prompt_with_rag(self):
+        """Test lean system prompt assembly with rag specialist."""
+        factory = AgentFactory(config_dir="configs")
+        
+        prompt = factory._assemble_lean_system_prompt("rag", [])
+        
+        assert "Lean ReAct Agent" in prompt
+        # Should have RAG specialist content
+        assert "RAG" in prompt

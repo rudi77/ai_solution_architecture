@@ -1,9 +1,19 @@
 # Epic 6: Transition zu "Lean ReAct" Architektur mit Planning-as-a-Tool
 
-**Status:** Draft
+**Status:** In Progress
 **Priorität:** Hoch
 **Owner:** Development Team
 **Geschätzter Aufwand:** M (Medium) - Reduktion der Codebasis um ca. 70-80%
+
+### Story Status Overview
+
+| Story | Title | Status | QA Gate |
+|-------|-------|--------|---------|
+| 1 | PlannerTool | ✅ Done | PASS |
+| 2 | LeanAgent Refactor | ✅ Done | PASS |
+| 3 | Native Tool Calling | ✅ Done | PASS |
+| 4 | Dynamic Context Injection | ✅ Done | PASS |
+| 5 | CLI Integration | 📝 Draft | - |
 
 ## 1. Executive Summary
 
@@ -81,6 +91,17 @@ Ein **Lean Agent** (< 250 Zeilen Core Logic), der auf einer einzigen Schleife ba
     * *Beispiel:* `Current Status:\n[x] Step 1\n[ ] Step 2...`
 * Dies stellt sicher, dass der Agent nie vergisst, wo er im Prozess steht.
 
+### Story 5: CLI Integration des LeanAgent
+
+**Ziel:** Den `LeanAgent` über die CLI nutzbar machen.
+
+* Erweitere `AgentFactory` um `create_lean_agent()` Methode.
+* `ApplicationExecutor` erhält `use_lean_agent` Parameter.
+* CLI bekommt optionales `--lean` Flag.
+* **Backward Compatibility:** Ohne Flag wird weiterhin der Legacy `Agent` verwendet.
+
+**Details:** [lean-react-story-5-cli-integration.md](../stories/lean-react-story-5-cli-integration.md)
+
 ## 5. Technische Spezifikation & Snippets
 
 ### 5.1 Das neue System-Prompt Template
@@ -143,6 +164,7 @@ while steps < MAX_STEPS:
 3. **Complex Planning:** Eine Multi-Step-Anfrage ("Recherchiere X, dann Y, dann vergleiche") führt dazu, dass der Agent selbstständig einen Plan erstellt und abarbeitet.
 4. **Resilience:** Wenn eine Suche fehlschlägt, stürzt der Agent nicht ab, sondern probiert eine Alternative.
 5. **Persistence:** Der Agent kann mitten im Plan gestoppt und später (durch Laden der Session) fortgesetzt werden, ohne den Plan zu vergessen.
+6. **CLI Integration:** Der `LeanAgent` ist via CLI nutzbar (`--lean` Flag), während Backward Compatibility zum Legacy Agent gewährleistet bleibt.
 
 ## 7. Risiken & Mitigation
 
@@ -154,9 +176,9 @@ while steps < MAX_STEPS:
 ## 8. Validation Checklist
 
 **Scope Validation:**
-- [x] Epic can be completed in 1-3 stories maximum (4 Stories defined)
+- [x] Epic can be completed in 1-5 stories maximum (5 Stories defined)
 - [x] No architectural documentation is required (Architecture is simplified, captured in Epic)
-- [x] Enhancement follows existing patterns (Tool Protocol)
+- [x] Enhancement follows existing patterns (Tool Protocol, Factory Pattern)
 - [x] Integration complexity is manageable
 
 **Risk Assessment:**
