@@ -28,6 +28,8 @@ class ExecuteMissionRequest(BaseModel):
     user_id: Optional[str] = None
     org_id: Optional[str] = None
     scope: Optional[str] = None
+    # LeanAgent flag (native tool calling, PlannerTool)
+    lean: bool = False
 
 
 class ExecuteMissionResponse(BaseModel):
@@ -39,7 +41,10 @@ class ExecuteMissionResponse(BaseModel):
 
 @router.post("/execute", response_model=ExecuteMissionResponse)
 async def execute_mission(request: ExecuteMissionRequest):
-    """Execute agent mission synchronously."""
+    """Execute agent mission synchronously.
+
+    Set `lean: true` to use LeanAgent with native tool calling.
+    """
     try:
         # Build user_context if any RAG parameters provided
         user_context = None
@@ -56,6 +61,7 @@ async def execute_mission(request: ExecuteMissionRequest):
             session_id=request.session_id,
             conversation_history=request.conversation_history,
             user_context=user_context,
+            use_lean_agent=request.lean,
         )
 
         return ExecuteMissionResponse(
@@ -69,7 +75,10 @@ async def execute_mission(request: ExecuteMissionRequest):
 
 @router.post("/execute/stream")
 async def execute_mission_stream(request: ExecuteMissionRequest):
-    """Execute agent mission with streaming progress via SSE."""
+    """Execute agent mission with streaming progress via SSE.
+
+    Set `lean: true` to use LeanAgent with native tool calling.
+    """
     # Build user_context if any RAG parameters provided
     user_context = None
     if request.user_id or request.org_id or request.scope:
@@ -86,6 +95,7 @@ async def execute_mission_stream(request: ExecuteMissionRequest):
             session_id=request.session_id,
             conversation_history=request.conversation_history,
             user_context=user_context,
+            use_lean_agent=request.lean,
         ):
             # Serialize dataclass to JSON, handling datetime
             data = json.dumps(asdict(update), default=str)
