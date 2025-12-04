@@ -6,7 +6,57 @@ These models represent the fundamental business entities and execution results.
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
+
+
+@dataclass
+class StreamEvent:
+    """
+    Event emitted during streaming agent execution.
+
+    StreamEvents enable real-time progress tracking during LeanAgent.execute_stream().
+    Each event represents a significant moment in the execution loop.
+
+    Event types:
+    - step_start: New loop iteration begins (step N of MAX_STEPS)
+    - llm_token: Token chunk from LLM response (real-time content)
+    - tool_call: Tool invocation starting (before execution)
+    - tool_result: Tool execution completed (after execution)
+    - plan_updated: PlannerTool modified the plan
+    - final_answer: Agent completed with final response
+    - error: Error occurred during execution
+
+    Attributes:
+        event_type: The type of event (see above)
+        data: Event-specific payload (varies by type)
+        timestamp: When the event occurred (auto-generated)
+    """
+
+    event_type: Literal[
+        "step_start",
+        "llm_token",
+        "tool_call",
+        "tool_result",
+        "plan_updated",
+        "final_answer",
+        "error",
+    ]
+    data: dict[str, Any]
+    timestamp: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Convert to dictionary for JSON serialization.
+
+        Returns:
+            Dictionary with event_type, data, and ISO-formatted timestamp.
+        """
+        return {
+            "event_type": self.event_type,
+            "data": self.data,
+            "timestamp": self.timestamp.isoformat(),
+        }
 
 
 @dataclass
