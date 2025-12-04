@@ -20,11 +20,12 @@ Key differences from legacy Agent:
 """
 
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import structlog
 
-from taskforce.core.domain.models import ExecutionResult
+from taskforce.core.domain.models import ExecutionResult, StreamEvent
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.core.interfaces.state import StateManagerProtocol
 from taskforce.core.interfaces.tools import ToolProtocol
@@ -287,6 +288,301 @@ class LeanAgent:
             final_message=final_message,
             execution_history=execution_history,
         )
+
+    async def execute_stream(
+        self,
+        mission: str,
+        session_id: str,
+    ) -> AsyncIterator[StreamEvent]:
+        """
+        Execute mission with streaming progress events.
+
+        Yields StreamEvent objects as execution progresses, enabling
+        real-time feedback to consumers. This is the streaming counterpart
+        to execute() - same functionality but with progressive events.
+
+        Workflow:
+        1. Load state (restore PlannerTool state if exists)
+        2. Build initial messages with system prompt and mission
+        3. Loop: Stream LLM with tools → yield events → handle tool_calls or final content
+        4. Persist state and yield final_answer event
+
+        Args:
+            mission: User's mission description
+            session_id: Unique session identifier for state persistence
+
+        Yields:
+            StreamEvent objects for each significant execution event:
+            - step_start: New loop iteration begins
+            - llm_token: Token chunk from LLM response
+            - tool_call: Tool invocation starting
+            - tool_result: Tool execution completed
+            - plan_updated: PlannerTool modified the plan
+            - final_answer: Agent completed with final response
+            - error: Error occurred during execution
+        """
+        self.logger.info("execute_stream_start", session_id=session_id)
+
+        # Check if provider supports streaming
+        if not hasattr(self.llm_provider, "complete_stream"):
+            # Fallback: Execute normally and emit events from result
+            self.logger.warning("llm_provider_no_streaming", fallback="execute")
+            result = await self.execute(mission, session_id)
+
+            # Emit events from execution history
+            for event in result.execution_history:
+                event_type = event.get("type", "unknown")
+                if event_type == "tool_call":
+                    yield StreamEvent(
+                        event_type="tool_call",
+                        data={
+                            "tool": event.get("tool", ""),
+                            "status": "completed",
+                        },
+                    )
+                    yield StreamEvent(
+                        event_type="tool_result",
+                        data={
+                            "tool": event.get("tool", ""),
+                            "success": event.get("result", {}).get("success", False),
+                            "output": self._truncate_output(
+                                event.get("result", {}).get("output", "")
+                            ),
+                        },
+                    )
+                elif event_type == "final_answer":
+                    yield StreamEvent(
+                        event_type="final_answer",
+                        data={"content": event.get("content", "")},
+                    )
+
+            # Emit final_answer if not already emitted
+            if not any(
+                e.get("type") == "final_answer" for e in result.execution_history
+            ):
+                yield StreamEvent(
+                    event_type="final_answer",
+                    data={"content": result.final_message},
+                )
+            return
+
+        # 1. Load or initialize state
+        state = await self.state_manager.load_state(session_id) or {}
+
+        # Restore PlannerTool state if available
+        if self._planner and state.get("planner_state"):
+            self._planner.set_state(state["planner_state"])
+
+        # 2. Build initial messages
+        messages = self._build_initial_messages(mission, state)
+
+        # 3. Streaming execution loop
+        step = 0
+        final_message = ""
+
+        while step < self.MAX_STEPS:
+            step += 1
+            self.logger.info("stream_loop_step", session_id=session_id, step=step)
+
+            # Emit step_start event
+            yield StreamEvent(
+                event_type="step_start",
+                data={"step": step, "max_steps": self.MAX_STEPS},
+            )
+
+            # Dynamic context injection: rebuild system prompt with current plan
+            current_system_prompt = self._build_system_prompt()
+            messages[0] = {"role": "system", "content": current_system_prompt}
+
+            # Stream LLM response
+            tool_calls_accumulated: list[dict[str, Any]] = {}
+            content_accumulated = ""
+
+            try:
+                async for chunk in self.llm_provider.complete_stream(
+                    messages=messages,
+                    model=self.model_alias,
+                    tools=self._openai_tools,
+                    tool_choice="auto",
+                    temperature=0.2,
+                ):
+                    chunk_type = chunk.get("type")
+
+                    if chunk_type == "token":
+                        # Yield token for real-time display
+                        token_content = chunk.get("content", "")
+                        if token_content:
+                            yield StreamEvent(
+                                event_type="llm_token",
+                                data={"content": token_content},
+                            )
+                            content_accumulated += token_content
+
+                    elif chunk_type == "tool_call_start":
+                        # Emit tool_call event when tool invocation begins
+                        tc_id = chunk.get("id", "")
+                        tc_name = chunk.get("name", "")
+                        tc_index = chunk.get("index", 0)
+
+                        tool_calls_accumulated[tc_index] = {
+                            "id": tc_id,
+                            "name": tc_name,
+                            "arguments": "",
+                        }
+
+                        yield StreamEvent(
+                            event_type="tool_call",
+                            data={
+                                "tool": tc_name,
+                                "id": tc_id,
+                                "status": "starting",
+                            },
+                        )
+
+                    elif chunk_type == "tool_call_delta":
+                        # Accumulate argument chunks
+                        tc_index = chunk.get("index", 0)
+                        if tc_index in tool_calls_accumulated:
+                            tool_calls_accumulated[tc_index]["arguments"] += chunk.get(
+                                "arguments_delta", ""
+                            )
+
+                    elif chunk_type == "tool_call_end":
+                        # Update accumulated tool call with final data
+                        tc_index = chunk.get("index", 0)
+                        if tc_index in tool_calls_accumulated:
+                            tool_calls_accumulated[tc_index]["arguments"] = chunk.get(
+                                "arguments", tool_calls_accumulated[tc_index]["arguments"]
+                            )
+
+                    elif chunk_type == "error":
+                        yield StreamEvent(
+                            event_type="error",
+                            data={"message": chunk.get("message", "Unknown error"), "step": step},
+                        )
+
+            except Exception as e:
+                self.logger.error("stream_error", error=str(e), step=step)
+                yield StreamEvent(
+                    event_type="error",
+                    data={"message": str(e), "step": step},
+                )
+                continue
+
+            # Process tool calls
+            if tool_calls_accumulated:
+                # Convert accumulated dict to list format for message
+                tool_calls_list = [
+                    {
+                        "id": tc_data["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc_data["name"],
+                            "arguments": tc_data["arguments"],
+                        },
+                    }
+                    for tc_data in tool_calls_accumulated.values()
+                ]
+
+                self.logger.info(
+                    "stream_tool_calls_received",
+                    step=step,
+                    count=len(tool_calls_list),
+                    tools=[tc["function"]["name"] for tc in tool_calls_list],
+                )
+
+                # Add assistant message with tool calls to history
+                messages.append(assistant_tool_calls_to_message(tool_calls_list))
+
+                for tool_call in tool_calls_list:
+                    tool_name = tool_call["function"]["name"]
+                    tool_call_id = tool_call["id"]
+
+                    # Parse arguments
+                    try:
+                        tool_args = json.loads(tool_call["function"]["arguments"])
+                    except json.JSONDecodeError:
+                        tool_args = {}
+                        self.logger.warning(
+                            "stream_tool_args_parse_failed",
+                            tool=tool_name,
+                            raw_args=tool_call["function"]["arguments"],
+                        )
+
+                    # Execute tool
+                    tool_result = await self._execute_tool(tool_name, tool_args)
+
+                    # Emit tool_result event
+                    yield StreamEvent(
+                        event_type="tool_result",
+                        data={
+                            "tool": tool_name,
+                            "id": tool_call_id,
+                            "success": tool_result.get("success", False),
+                            "output": self._truncate_output(
+                                tool_result.get("output", str(tool_result.get("error", "")))
+                            ),
+                        },
+                    )
+
+                    # Check if PlannerTool updated the plan
+                    if tool_name in ("planner", "manage_plan") and tool_result.get("success"):
+                        yield StreamEvent(
+                            event_type="plan_updated",
+                            data={"action": tool_args.get("action", "unknown")},
+                        )
+
+                    # Add tool result to messages
+                    messages.append(
+                        tool_result_to_message(tool_call_id, tool_name, tool_result)
+                    )
+
+            elif content_accumulated:
+                # No tool calls - this is the final answer
+                final_message = content_accumulated
+                self.logger.info("stream_final_answer", step=step)
+
+                yield StreamEvent(
+                    event_type="final_answer",
+                    data={"content": final_message},
+                )
+                break
+
+            else:
+                # Empty response - add prompt for LLM to continue
+                self.logger.warning("stream_empty_response", step=step)
+                messages.append({
+                    "role": "user",
+                    "content": "[System: Empty response. Please provide an answer or use a tool.]",
+                })
+
+        # Handle max steps exceeded
+        if step >= self.MAX_STEPS and not final_message:
+            final_message = f"Exceeded maximum steps ({self.MAX_STEPS})"
+            yield StreamEvent(
+                event_type="error",
+                data={"message": final_message, "step": step},
+            )
+
+        # Save state
+        await self._save_state(session_id, state)
+
+        self.logger.info("execute_stream_complete", session_id=session_id, steps=step)
+
+    def _truncate_output(self, output: str, max_length: int = 200) -> str:
+        """
+        Truncate output for streaming events.
+
+        Args:
+            output: The output string to truncate
+            max_length: Maximum length before truncation (default: 200)
+
+        Returns:
+            Truncated string with "..." suffix if truncated.
+        """
+        if len(output) <= max_length:
+            return output
+        return output[:max_length] + "..."
 
     def _build_initial_messages(
         self,
