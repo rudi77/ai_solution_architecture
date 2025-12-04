@@ -361,3 +361,20 @@ class LeanAgent:
             state["planner_state"] = self._planner.get_state()
         await self.state_manager.save_state(session_id, state)
 
+    async def close(self) -> None:
+        """
+        Clean up resources (MCP connections, etc).
+
+        Called by CLI/API to gracefully shut down agent.
+        For LeanAgent, this cleans up any MCP client contexts
+        stored by the factory.
+        """
+        # Clean up MCP client contexts if they were attached by factory
+        mcp_contexts = getattr(self, "_mcp_contexts", [])
+        for ctx in mcp_contexts:
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception:
+                pass  # Ignore cleanup errors
+        self.logger.debug("agent_closed")
+
