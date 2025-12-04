@@ -14,6 +14,7 @@ Key features:
 - Configurable retry logic with exponential backoff
 - Structured logging with provider-specific context
 - Azure-specific error parsing and troubleshooting guidance
+- Streaming support for real-time token delivery
 
 For Azure OpenAI setup instructions, see docs/azure-openai-setup.md
 """
@@ -23,10 +24,11 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # ============================================================================
 # CRITICAL: Suppress LiteLLM logging BEFORE importing litellm
@@ -58,7 +60,7 @@ class RetryPolicy:
     max_attempts: int = 3
     backoff_multiplier: float = 2.0
     timeout: int = 30
-    retry_on_errors: List[str] = field(default_factory=list)
+    retry_on_errors: list[str] = field(default_factory=list)
 
 
 class OpenAIService(LLMProviderProtocol):
@@ -105,7 +107,7 @@ class OpenAIService(LLMProviderProtocol):
         if not config_file.exists():
             raise FileNotFoundError(f"LLM config not found: {config_path}")
 
-        with open(config_file, "r", encoding="utf-8") as f:
+        with open(config_file, encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
         # Validate config structure
@@ -139,7 +141,7 @@ class OpenAIService(LLMProviderProtocol):
 
         # Provider configuration
         self.provider_config = config.get("providers", {})
-        
+
         # Validate Azure configuration if enabled
         self._validate_azure_config()
 
@@ -151,38 +153,38 @@ class OpenAIService(LLMProviderProtocol):
             ValueError: If Azure is enabled but required fields are missing
         """
         azure_config = self.provider_config.get("azure", {})
-        
+
         # Skip validation if Azure is not enabled or section doesn't exist
         if not azure_config or not azure_config.get("enabled", False):
             return
-        
+
         # Required fields when Azure is enabled
         required_fields = ["api_key_env", "endpoint_url_env", "api_version", "deployment_mapping"]
         missing_fields = []
-        
+
         for field in required_fields:
             if field not in azure_config or azure_config[field] is None:
                 missing_fields.append(field)
-        
+
         if missing_fields:
             raise ValueError(
                 f"Azure provider is enabled but missing required fields: {', '.join(missing_fields)}. "
                 "Please provide all required fields or set enabled: false."
             )
-        
+
         # Validate deployment_mapping is a dictionary
         if not isinstance(azure_config["deployment_mapping"], dict):
             raise ValueError(
                 "Azure deployment_mapping must be a dictionary mapping model aliases to deployment names"
             )
-        
+
         self.logger.info(
             "azure_config_validated",
             endpoint_env=azure_config["api_key_env"],
             api_version=azure_config["api_version"],
             deployment_count=len(azure_config["deployment_mapping"]),
         )
-    
+
     def _initialize_provider(self) -> None:
         """Initialize LLM provider with API keys from environment."""
         # Check if Azure is enabled
@@ -203,7 +205,7 @@ class OpenAIService(LLMProviderProtocol):
                     enabled=False,
                     reason="Azure provider is disabled in configuration",
                 )
-            
+
             # Default to OpenAI
             openai_config = self.provider_config.get("openai", {})
 
@@ -217,7 +219,7 @@ class OpenAIService(LLMProviderProtocol):
                     env_var=api_key_env,
                     hint="Set environment variable for API access",
                 )
-            
+
             self.logger.info("provider_selected", provider="openai")
 
     def _initialize_azure_provider(self) -> None:
@@ -263,16 +265,16 @@ class OpenAIService(LLMProviderProtocol):
             docs/azure-openai-setup.md for complete setup guide
         """
         azure_config = self.provider_config.get("azure", {})
-        
+
         # Get environment variable names from config
         api_key_env = azure_config.get("api_key_env", "AZURE_OPENAI_API_KEY")
         endpoint_env = azure_config.get("endpoint_url_env", "AZURE_OPENAI_ENDPOINT")
-        
+
         # Read from environment
         self.azure_api_key = os.getenv(api_key_env)
         self.azure_endpoint = os.getenv(endpoint_env)
         self.azure_api_version = azure_config.get("api_version")
-        
+
         # Warn if credentials are missing
         if not self.azure_api_key:
             self.logger.warning(
@@ -280,14 +282,14 @@ class OpenAIService(LLMProviderProtocol):
                 env_var=api_key_env,
                 hint="Set environment variable for Azure OpenAI API access",
             )
-        
+
         if not self.azure_endpoint:
             self.logger.warning(
                 "azure_endpoint_missing",
                 env_var=endpoint_env,
                 hint="Set environment variable for Azure OpenAI endpoint URL",
             )
-        
+
         # Validate endpoint URL format if provided
         if self.azure_endpoint:
             # Azure endpoint should be HTTPS and contain 'openai.azure.com'
@@ -295,29 +297,29 @@ class OpenAIService(LLMProviderProtocol):
                 raise ValueError(
                     f"Azure endpoint must use HTTPS protocol: {self.azure_endpoint}"
                 )
-            
+
             if "openai.azure.com" not in self.azure_endpoint and "api.cognitive.microsoft.com" not in self.azure_endpoint:
                 self.logger.warning(
                     "azure_endpoint_format_unusual",
                     endpoint=self.azure_endpoint,
                     hint="Expected endpoint to contain 'openai.azure.com' or 'api.cognitive.microsoft.com'",
                 )
-        
+
         # Set LiteLLM environment variables for Azure OpenAI
         # LiteLLM uses these for Azure OpenAI requests
         if self.azure_api_key:
             os.environ["AZURE_API_KEY"] = self.azure_api_key
-        
+
         if self.azure_endpoint:
             os.environ["AZURE_API_BASE"] = self.azure_endpoint
-        
+
         if self.azure_api_version:
             os.environ["AZURE_API_VERSION"] = self.azure_api_version
-        
+
         # Get deployment count for status logging
         deployment_count = len(azure_config.get("deployment_mapping", {}))
         configured_deployments = list(azure_config.get("deployment_mapping", {}).keys())
-        
+
         self.logger.info(
             "azure_provider_initialized",
             provider="azure",
@@ -329,7 +331,7 @@ class OpenAIService(LLMProviderProtocol):
             configured_deployments=configured_deployments,
         )
 
-    def _resolve_model(self, model_alias: Optional[str]) -> str:
+    def _resolve_model(self, model_alias: str | None) -> str:
         """
         Resolve model alias to actual model name or Azure deployment name.
         
@@ -352,22 +354,22 @@ class OpenAIService(LLMProviderProtocol):
         """
         if model_alias is None:
             model_alias = self.default_model
-        
+
         # Check if Azure is enabled
         azure_config = self.provider_config.get("azure", {})
         azure_enabled = azure_config.get("enabled", False)
-        
+
         if azure_enabled:
             # Azure provider: resolve through deployment_mapping
             deployment_mapping = azure_config.get("deployment_mapping", {})
-            
+
             # First, resolve alias to OpenAI model name
             openai_model = self.models.get(model_alias, model_alias)
-            
+
             # Check if deployment mapping exists for this alias
             if model_alias in deployment_mapping:
                 deployment_name = deployment_mapping[model_alias]
-                
+
                 self.logger.info(
                     "model_resolved",
                     provider="azure",
@@ -375,7 +377,7 @@ class OpenAIService(LLMProviderProtocol):
                     deployment_name=deployment_name,
                     openai_model=openai_model,
                 )
-                
+
                 return f"azure/{deployment_name}"
             else:
                 # No deployment mapping for this alias
@@ -389,17 +391,17 @@ class OpenAIService(LLMProviderProtocol):
         else:
             # OpenAI provider: traditional resolution
             resolved_model = self.models.get(model_alias, model_alias)
-            
+
             self.logger.info(
                 "model_resolved",
                 provider="openai",
                 model_alias=model_alias,
                 resolved_model=resolved_model,
             )
-            
+
             return resolved_model
 
-    def _parse_azure_error(self, error: Exception) -> Dict[str, Any]:
+    def _parse_azure_error(self, error: Exception) -> dict[str, Any]:
         """
         Parse Azure API error and extract actionable information.
         
@@ -437,16 +439,16 @@ class OpenAIService(LLMProviderProtocol):
             Dict with extracted error information and troubleshooting guidance
         """
         import re
-        
+
         error_msg = str(error)
         error_type = type(error).__name__
-        
+
         parsed_info = {
             "error_type": error_type,
             "error_message": error_msg,
             "provider": "azure" if "azure" in error_msg.lower() else "unknown",
         }
-        
+
         # Extract deployment name if present
         if "deployment" in error_msg.lower():
             # Try to extract deployment name from error message
@@ -457,7 +459,7 @@ class OpenAIService(LLMProviderProtocol):
                     f"Deployment '{deployment_match.group(1)}' not found. "
                     "Check Azure Portal → OpenAI Resource → Model deployments"
                 )
-        
+
         # Extract API version if present
         if "api" in error_msg.lower() and "version" in error_msg.lower():
             api_version_match = re.search(r"version\s+['\"]([0-9]{4}-[0-9]{2}-[0-9]{2}[a-z\-]*)['\"]", error_msg, re.IGNORECASE)
@@ -467,7 +469,7 @@ class OpenAIService(LLMProviderProtocol):
                     f"API version '{api_version_match.group(1)}' may not be supported. "
                     "Try '2024-02-15-preview' or check Azure OpenAI documentation"
                 )
-        
+
         # Extract endpoint if present
         if "endpoint" in error_msg.lower() or "https://" in error_msg:
             endpoint_match = re.search(r"https://[a-zA-Z0-9\-\.]+", error_msg)
@@ -477,7 +479,7 @@ class OpenAIService(LLMProviderProtocol):
                     f"Check endpoint URL '{endpoint_match.group(0)}' in Azure Portal → "
                     "OpenAI Resource → Keys and Endpoint"
                 )
-        
+
         # Authentication errors
         if any(keyword in error_msg.lower() for keyword in ["auth", "authentication", "api key", "unauthorized"]):
             azure_config = self.provider_config.get("azure", {})
@@ -486,17 +488,17 @@ class OpenAIService(LLMProviderProtocol):
                 f"Authentication failed. Check that environment variable '{api_key_env}' "
                 "is set with a valid Azure OpenAI API key"
             )
-        
+
         # Rate limit errors
         if any(keyword in error_msg.lower() for keyword in ["rate limit", "quota", "too many requests"]):
             parsed_info["hint"] = (
                 "Rate limit exceeded. Wait and retry, or increase deployment capacity "
                 "in Azure Portal → OpenAI Resource → Quotas"
             )
-        
+
         return parsed_info
 
-    async def test_azure_connection(self) -> Dict[str, Any]:
+    async def test_azure_connection(self) -> dict[str, Any]:
         """
         Test Azure OpenAI connection and validate configuration.
         
@@ -522,7 +524,7 @@ class OpenAIService(LLMProviderProtocol):
             ...     print("Try:", result["recommendations"])
         """
         azure_config = self.provider_config.get("azure", {})
-        
+
         # Check if Azure is enabled
         if not azure_config.get("enabled", False):
             return {
@@ -530,7 +532,7 @@ class OpenAIService(LLMProviderProtocol):
                 "error": "Azure provider is not enabled in configuration",
                 "recommendations": ["Set azure.enabled: true in llm_config.yaml"],
             }
-        
+
         result = {
             "success": True,
             "endpoint_reachable": False,
@@ -540,56 +542,56 @@ class OpenAIService(LLMProviderProtocol):
             "errors": [],
             "recommendations": [],
         }
-        
+
         # Check credentials
         if not self.azure_api_key:
             result["success"] = False
             result["errors"].append(f"Azure API key not found in environment variable '{azure_config.get('api_key_env')}'")
             result["recommendations"].append(f"Set environment variable {azure_config.get('api_key_env')} with your Azure OpenAI API key")
-        
+
         if not self.azure_endpoint:
             result["success"] = False
             result["errors"].append(f"Azure endpoint not found in environment variable '{azure_config.get('endpoint_url_env')}'")
             result["recommendations"].append(f"Set environment variable {azure_config.get('endpoint_url_env')} with your Azure OpenAI endpoint URL")
-        
+
         # If credentials missing, return early
         if not self.azure_api_key or not self.azure_endpoint:
             return result
-        
+
         # Test each configured deployment
         deployment_mapping = azure_config.get("deployment_mapping", {})
-        
+
         if not deployment_mapping:
             result["success"] = False
             result["errors"].append("No deployments configured in deployment_mapping")
             result["recommendations"].append("Add at least one deployment mapping in azure.deployment_mapping config")
             return result
-        
+
         # Test a simple completion with each deployment
         test_message = [{"role": "user", "content": "Hello"}]
-        
+
         for alias, deployment_name in deployment_mapping.items():
             result["deployments_tested"].append(alias)
-            
+
             try:
                 self.logger.info(
                     "testing_azure_deployment",
                     alias=alias,
                     deployment=deployment_name,
                 )
-                
+
                 # Attempt a minimal completion
                 test_result = await self.complete(
                     messages=test_message,
                     model=alias,
                     max_tokens=5,
                 )
-                
+
                 if test_result.get("success"):
                     result["deployments_available"].append(alias)
                     result["endpoint_reachable"] = True
                     result["authentication_valid"] = True
-                    
+
                     self.logger.info(
                         "azure_deployment_test_success",
                         alias=alias,
@@ -598,34 +600,34 @@ class OpenAIService(LLMProviderProtocol):
                 else:
                     error_msg = test_result.get("error", "Unknown error")
                     result["errors"].append(f"Deployment '{alias}' ({deployment_name}): {error_msg}")
-                    
+
                     # Parse error for guidance
                     parsed = self._parse_azure_error(Exception(error_msg))
                     if "hint" in parsed:
                         result["recommendations"].append(f"{alias}: {parsed['hint']}")
-                    
+
                     self.logger.warning(
                         "azure_deployment_test_failed",
                         alias=alias,
                         deployment=deployment_name,
                         error=error_msg[:200],
                     )
-            
+
             except Exception as e:
                 result["errors"].append(f"Deployment '{alias}' ({deployment_name}): {str(e)}")
-                
+
                 # Parse error for guidance
                 parsed = self._parse_azure_error(e)
                 if "hint" in parsed:
                     result["recommendations"].append(f"{alias}: {parsed['hint']}")
-                
+
                 self.logger.error(
                     "azure_deployment_test_exception",
                     alias=alias,
                     deployment=deployment_name,
                     error=str(e)[:200],
                 )
-        
+
         # Set overall success based on whether any deployments worked
         if not result["deployments_available"]:
             result["success"] = False
@@ -633,10 +635,10 @@ class OpenAIService(LLMProviderProtocol):
                 result["recommendations"].append(
                     "Check Azure Portal → OpenAI Resource → Model deployments to verify deployment names"
                 )
-        
+
         return result
 
-    def _get_model_parameters(self, model: str) -> Dict[str, Any]:
+    def _get_model_parameters(self, model: str) -> dict[str, Any]:
         """
         Get parameters for specific model.
 
@@ -659,8 +661,8 @@ class OpenAIService(LLMProviderProtocol):
         return self.default_params.copy()
 
     def _map_parameters_for_model(
-        self, model: str, params: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, model: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         Map parameters based on model family (GPT-4 vs GPT-5).
 
@@ -711,7 +713,7 @@ class OpenAIService(LLMProviderProtocol):
                 "response_format",
             ]
             filtered = {k: v for k, v in params.items() if k in allowed_params}
-            
+
             # Ensure response_format is properly formatted for LiteLLM
             # Azure requires response_format as a simple dict, not Pydantic model
             if "response_format" in filtered:
@@ -719,18 +721,18 @@ class OpenAIService(LLMProviderProtocol):
                 if isinstance(rf, dict):
                     # Ensure it's a clean dict (not a Pydantic model dump)
                     filtered["response_format"] = {"type": rf.get("type", "json_object")}
-            
+
             return filtered
 
     async def _trace_interaction(
         self,
-        messages: List[Dict[str, Any]],
-        response_content: Optional[str],
+        messages: list[dict[str, Any]],
+        response_content: str | None,
         model: str,
-        token_stats: Dict[str, int],
+        token_stats: dict[str, int],
         latency_ms: int,
         success: bool,
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         """
         Trace LLM interaction to configured destinations.
@@ -770,7 +772,7 @@ class OpenAIService(LLMProviderProtocol):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _trace_to_file(self, trace_data: Dict[str, Any]) -> None:
+    async def _trace_to_file(self, trace_data: dict[str, Any]) -> None:
         """Write trace data to JSONL file."""
         try:
             file_config = self.tracing_config.get("file_config", {})
@@ -787,7 +789,7 @@ class OpenAIService(LLMProviderProtocol):
         except Exception as e:
             self.logger.error("trace_file_write_failed", error=str(e))
 
-    async def _trace_to_phoenix(self, trace_data: Dict[str, Any]) -> None:
+    async def _trace_to_phoenix(self, trace_data: dict[str, Any]) -> None:
         """
         Send trace data to Arize Phoenix.
 
@@ -812,12 +814,12 @@ class OpenAIService(LLMProviderProtocol):
 
     async def complete(
         self,
-        messages: List[Dict[str, Any]],
-        model: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        tool_choice: Optional[str | Dict[str, Any]] = None,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Perform LLM completion with retry logic and native tool calling support.
 
@@ -855,11 +857,11 @@ class OpenAIService(LLMProviderProtocol):
 
         # Map parameters for model family
         final_params = self._map_parameters_for_model(actual_model, merged_params)
-        
+
         # Determine provider and display name for logging
         azure_config = self.provider_config.get("azure", {})
         is_azure = azure_config.get("enabled", False)
-        
+
         if is_azure and actual_model.startswith("azure/"):
             provider = "azure"
             deployment_name = actual_model.replace("azure/", "")
@@ -876,7 +878,7 @@ class OpenAIService(LLMProviderProtocol):
             "drop_params": True,
             **final_params,
         }
-        
+
         # Add tools if provided (native tool calling)
         if tools:
             litellm_kwargs["tools"] = tools
@@ -907,7 +909,7 @@ class OpenAIService(LLMProviderProtocol):
                 # Extract content, tool_calls and usage
                 message = response.choices[0].message
                 content = message.content
-                
+
                 # Extract tool_calls if present (native tool calling)
                 tool_calls_raw = getattr(message, "tool_calls", None)
                 tool_calls = None
@@ -922,7 +924,7 @@ class OpenAIService(LLMProviderProtocol):
                                 "arguments": tc.function.arguments,
                             },
                         })
-                
+
                 # For reasoning models (GPT-5, o1, o3), content might be in reasoning_content
                 if not content and not tool_calls:
                     reasoning_content = getattr(message, "reasoning_content", None)
@@ -930,7 +932,7 @@ class OpenAIService(LLMProviderProtocol):
                         content = reasoning_content
                     elif hasattr(message, "refusal") and message.refusal:
                         content = f"[Model refused: {message.refusal}]"
-                
+
                 usage = getattr(response, "usage", {})
 
                 # Handle both dict and object forms
@@ -944,7 +946,7 @@ class OpenAIService(LLMProviderProtocol):
                     }
 
                 latency_ms = int((time.time() - start_time) * 1000)
-                
+
                 # Warn if we have completion tokens but empty content (and no tool calls)
                 completion_tokens = token_stats.get("completion_tokens", 0)
                 if not content and not tool_calls and completion_tokens > 0:
@@ -1005,7 +1007,7 @@ class OpenAIService(LLMProviderProtocol):
 
                 if should_retry:
                     backoff_time = self.retry_policy.backoff_multiplier**attempt
-                    
+
                     log_context = {
                         "provider": provider,
                         "model": actual_model,
@@ -1014,11 +1016,11 @@ class OpenAIService(LLMProviderProtocol):
                         "attempt": attempt + 1,
                         "backoff_seconds": backoff_time,
                     }
-                    
+
                     # Add Azure-specific context if available
                     if parsed_error and "hint" in parsed_error:
                         log_context["hint"] = parsed_error["hint"]
-                    
+
                     self.logger.warning("llm_completion_retry", **log_context)
                     await asyncio.sleep(backoff_time)
                 else:
@@ -1030,7 +1032,7 @@ class OpenAIService(LLMProviderProtocol):
                         "error": error_msg[:200],
                         "attempts": attempt + 1,
                     }
-                    
+
                     # Add Azure-specific context for troubleshooting
                     if parsed_error:
                         if "deployment_name" in parsed_error:
@@ -1041,7 +1043,7 @@ class OpenAIService(LLMProviderProtocol):
                             log_context["azure_endpoint"] = parsed_error["endpoint_url"]
                         if "hint" in parsed_error:
                             log_context["troubleshooting_hint"] = parsed_error["hint"]
-                    
+
                     self.logger.error("llm_completion_failed", **log_context)
 
                     # Trace failure
@@ -1063,11 +1065,11 @@ class OpenAIService(LLMProviderProtocol):
                         "error_type": error_type,
                         "model": actual_model,
                     }
-                    
+
                     # Include parsed error details for Azure
                     if parsed_error:
                         error_result["parsed_error"] = parsed_error
-                    
+
                     return error_result
 
         # Should not reach here, but handle anyway
@@ -1080,10 +1082,10 @@ class OpenAIService(LLMProviderProtocol):
     async def generate(
         self,
         prompt: str,
-        context: Optional[Dict[str, Any]] = None,
-        model: Optional[str] = None,
+        context: dict[str, Any] | None = None,
+        model: str | None = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Generate text from a single prompt (convenience wrapper).
 
@@ -1123,4 +1125,238 @@ Task: {prompt}
             result["generated_text"] = result["content"]
 
         return result
+
+    async def complete_stream(
+        self,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        **kwargs,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """
+        Stream LLM completion with real-time token delivery.
+
+        Yields normalized events as chunks arrive from the LLM API.
+        Errors are yielded as events, NOT raised as exceptions.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            model: Model alias or None (uses default)
+            tools: Optional list of tool definitions
+            tool_choice: Optional tool choice strategy
+            **kwargs: Additional parameters (temperature, max_tokens, etc.)
+
+        Yields:
+            Event dictionaries:
+            - {"type": "token", "content": "..."} - Text chunk
+            - {"type": "tool_call_start", "id": "...", "name": "...", "index": N}
+            - {"type": "tool_call_delta", "id": "...", "arguments_delta": "...", "index": N}
+            - {"type": "tool_call_end", "id": "...", "name": "...", "arguments": "...", "index": N}
+            - {"type": "done", "usage": {...}} - Stream complete
+            - {"type": "error", "message": "..."} - Error occurred
+        """
+        # Resolve model and parameters
+        try:
+            actual_model = self._resolve_model(model)
+        except ValueError as e:
+            self.logger.error("stream_model_resolution_failed", error=str(e))
+            yield {"type": "error", "message": str(e)}
+            return
+
+        base_params = self._get_model_parameters(actual_model)
+        merged_params = {**base_params, **kwargs}
+        final_params = self._map_parameters_for_model(actual_model, merged_params)
+
+        # Determine provider for logging
+        azure_config = self.provider_config.get("azure", {})
+        is_azure = azure_config.get("enabled", False)
+
+        if is_azure and actual_model.startswith("azure/"):
+            provider = "azure"
+            display_name = actual_model.replace("azure/", "")
+        else:
+            provider = "openai"
+            display_name = actual_model
+
+        # Build LiteLLM call kwargs
+        litellm_kwargs = {
+            "model": actual_model,
+            "messages": messages,
+            "timeout": self.retry_policy.timeout,
+            "stream": True,
+            "drop_params": True,
+            **final_params,
+        }
+
+        # Add tools if provided
+        if tools:
+            litellm_kwargs["tools"] = tools
+            if tool_choice:
+                litellm_kwargs["tool_choice"] = tool_choice
+            else:
+                litellm_kwargs["tool_choice"] = "auto"
+
+        self.logger.debug(
+            "llm_stream_started",
+            provider=provider,
+            model=actual_model,
+            deployment=display_name if is_azure else None,
+            message_count=len(messages),
+            tools_count=len(tools) if tools else 0,
+        )
+
+        try:
+            # Call LiteLLM with streaming
+            response = await litellm.acompletion(**litellm_kwargs)
+
+            # Track tool calls across chunks
+            current_tool_calls: dict[int, dict[str, Any]] = {}
+            start_time = time.time()
+
+            async for chunk in response:
+                # Safety check for valid chunk structure
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason
+
+                # Handle content tokens
+                if hasattr(delta, "content") and delta.content:
+                    self.logger.debug(
+                        "llm_stream_token",
+                        content_length=len(delta.content),
+                    )
+                    yield {"type": "token", "content": delta.content}
+
+                # Handle tool calls
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+
+                        # New tool call starting
+                        if idx not in current_tool_calls:
+                            tool_id = getattr(tc, "id", None) or ""
+                            tool_name = ""
+                            if hasattr(tc, "function") and tc.function:
+                                tool_name = getattr(tc.function, "name", None) or ""
+
+                            current_tool_calls[idx] = {
+                                "id": tool_id,
+                                "name": tool_name,
+                                "arguments": "",
+                            }
+
+                            # Only emit start if we have meaningful data
+                            if tool_id or tool_name:
+                                self.logger.debug(
+                                    "llm_stream_tool_call_start",
+                                    tool_id=tool_id,
+                                    tool_name=tool_name,
+                                    index=idx,
+                                )
+                                yield {
+                                    "type": "tool_call_start",
+                                    "id": tool_id,
+                                    "name": tool_name,
+                                    "index": idx,
+                                }
+
+                        # Update tool call id/name if provided in later chunks
+                        if hasattr(tc, "id") and tc.id:
+                            current_tool_calls[idx]["id"] = tc.id
+                        if hasattr(tc, "function") and tc.function:
+                            if hasattr(tc.function, "name") and tc.function.name:
+                                current_tool_calls[idx]["name"] = tc.function.name
+
+                        # Argument delta
+                        if hasattr(tc, "function") and tc.function:
+                            args_delta = getattr(tc.function, "arguments", None)
+                            if args_delta:
+                                current_tool_calls[idx]["arguments"] += args_delta
+                                self.logger.debug(
+                                    "llm_stream_tool_call_delta",
+                                    tool_id=current_tool_calls[idx]["id"],
+                                    delta_length=len(args_delta),
+                                    index=idx,
+                                )
+                                yield {
+                                    "type": "tool_call_delta",
+                                    "id": current_tool_calls[idx]["id"],
+                                    "arguments_delta": args_delta,
+                                    "index": idx,
+                                }
+
+                # Check for finish
+                if finish_reason:
+                    # Emit tool_call_end for all accumulated tool calls
+                    for idx, tc_data in current_tool_calls.items():
+                        self.logger.debug(
+                            "llm_stream_tool_call_end",
+                            tool_id=tc_data["id"],
+                            tool_name=tc_data["name"],
+                            arguments_length=len(tc_data["arguments"]),
+                            index=idx,
+                        )
+                        yield {
+                            "type": "tool_call_end",
+                            "id": tc_data["id"],
+                            "name": tc_data["name"],
+                            "arguments": tc_data["arguments"],
+                            "index": idx,
+                        }
+
+            # Final done event
+            latency_ms = int((time.time() - start_time) * 1000)
+
+            # Try to get usage from the response object
+            # Note: Streaming responses may not always have usage data
+            usage: dict[str, Any] = {}
+            if hasattr(response, "usage") and response.usage:
+                raw_usage = response.usage
+                if isinstance(raw_usage, dict):
+                    usage = raw_usage
+                else:
+                    usage = {
+                        "total_tokens": getattr(raw_usage, "total_tokens", 0),
+                        "prompt_tokens": getattr(raw_usage, "prompt_tokens", 0),
+                        "completion_tokens": getattr(raw_usage, "completion_tokens", 0),
+                    }
+
+            self.logger.info(
+                "llm_stream_completed",
+                provider=provider,
+                model=actual_model,
+                deployment=display_name if is_azure else None,
+                latency_ms=latency_ms,
+                tool_calls_count=len(current_tool_calls),
+                usage=usage,
+            )
+
+            yield {"type": "done", "usage": usage}
+
+        except Exception as e:
+            error_msg = str(e)
+            error_type = type(e).__name__
+
+            # Parse Azure errors for actionable information
+            parsed_error = None
+            if is_azure:
+                parsed_error = self._parse_azure_error(e)
+
+            log_context = {
+                "provider": provider,
+                "model": actual_model,
+                "deployment": display_name if is_azure else None,
+                "error_type": error_type,
+                "error": error_msg[:200],
+            }
+
+            if parsed_error and "hint" in parsed_error:
+                log_context["troubleshooting_hint"] = parsed_error["hint"]
+
+            self.logger.error("llm_stream_failed", **log_context)
+
+            yield {"type": "error", "message": error_msg}
 
