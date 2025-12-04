@@ -1,8 +1,8 @@
 """
-Unit Tests for LeanAgent
+Unit Tests for LeanAgent with Native Tool Calling
 
 Tests the LeanAgent class using protocol mocks to verify the simplified
-ReAct loop without TodoListManager, QueryRouter, or ReplanStrategy.
+ReAct loop with native LLM tool calling (no JSON parsing).
 """
 
 import json
@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from taskforce.core.domain.lean_agent import LeanAgent
-from taskforce.core.domain.events import ActionType
 from taskforce.core.domain.models import ExecutionResult
 from taskforce.core.tools.planner_tool import PlannerTool
 
@@ -27,7 +26,7 @@ def mock_state_manager():
 
 @pytest.fixture
 def mock_llm_provider():
-    """Mock LLMProviderProtocol."""
+    """Mock LLMProviderProtocol with native tool calling support."""
     mock = AsyncMock()
     return mock
 
@@ -38,8 +37,41 @@ def mock_tool():
     tool = MagicMock()
     tool.name = "test_tool"
     tool.description = "A test tool for unit tests"
-    tool.parameters_schema = {"type": "object", "properties": {}}
-    tool.execute = AsyncMock(return_value={"success": True, "output": "test result"})
+    tool.parameters_schema = {
+        "type": "object",
+        "properties": {"param": {"type": "string"}},
+    }
+    tool.execute = AsyncMock(
+        return_value={"success": True, "output": "test result"}
+    )
+    return tool
+
+
+@pytest.fixture
+def calculator_tool():
+    """Mock Calculator tool for integration testing."""
+    tool = MagicMock()
+    tool.name = "calculator"
+    tool.description = "Perform mathematical calculations"
+    tool.parameters_schema = {
+        "type": "object",
+        "properties": {
+            "expression": {
+                "type": "string",
+                "description": "Mathematical expression to evaluate",
+            },
+        },
+        "required": ["expression"],
+    }
+
+    async def mock_execute(expression: str):
+        try:
+            result = eval(expression)
+            return {"success": True, "result": result}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    tool.execute = mock_execute
     return tool
 
 
@@ -60,6 +92,18 @@ def lean_agent(mock_state_manager, mock_llm_provider, mock_tool, planner_tool):
     )
 
 
+def make_tool_call(tool_name: str, args: dict, call_id: str = "call_1"):
+    """Helper to create a tool call response structure."""
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": tool_name,
+            "arguments": json.dumps(args),
+        },
+    }
+
+
 class TestLeanAgentInitialization:
     """Tests for LeanAgent initialization."""
 
@@ -71,7 +115,9 @@ class TestLeanAgentInitialization:
         assert "planner" in lean_agent.tools
         assert lean_agent.system_prompt == "You are a helpful assistant."
 
-    def test_creates_planner_if_not_provided(self, mock_state_manager, mock_llm_provider):
+    def test_creates_planner_if_not_provided(
+        self, mock_state_manager, mock_llm_provider
+    ):
         """Test that PlannerTool is created if not provided."""
         agent = LeanAgent(
             state_manager=mock_state_manager,
@@ -82,22 +128,33 @@ class TestLeanAgentInitialization:
         assert "planner" in agent.tools
         assert isinstance(agent._planner, PlannerTool)
 
+    def test_creates_openai_tools_format(self, lean_agent):
+        """Test that tools are converted to OpenAI format."""
+        assert lean_agent._openai_tools is not None
+        assert len(lean_agent._openai_tools) >= 2  # test_tool + planner
 
-class TestLeanAgentExecution:
-    """Tests for LeanAgent.execute() method."""
+        # Verify format
+        for tool in lean_agent._openai_tools:
+            assert tool["type"] == "function"
+            assert "function" in tool
+            assert "name" in tool["function"]
+            assert "description" in tool["function"]
+            assert "parameters" in tool["function"]
+
+
+class TestLeanAgentNativeToolCalling:
+    """Tests for native tool calling (no JSON parsing)."""
 
     @pytest.mark.asyncio
-    async def test_execute_simple_respond_action(
+    async def test_execute_with_content_response(
         self, lean_agent, mock_llm_provider, mock_state_manager
     ):
-        """Test that execute completes when LLM returns respond action."""
-        # Setup: LLM returns respond action immediately
+        """Test that execute completes when LLM returns content (no tool calls)."""
+        # Setup: LLM returns content immediately (final answer)
         mock_llm_provider.complete.return_value = {
             "success": True,
-            "content": json.dumps({
-                "action": "respond",
-                "summary": "Hello! How can I help you today?",
-            }),
+            "content": "Hello! How can I help you today?",
+            "tool_calls": None,
         }
 
         # Execute
@@ -117,23 +174,18 @@ class TestLeanAgentExecution:
     async def test_execute_tool_call_then_respond(
         self, lean_agent, mock_llm_provider, mock_tool
     ):
-        """Test tool execution followed by respond action."""
-        # Setup: First call returns tool_call, second returns respond
+        """Test tool execution via native tool calling followed by response."""
+        # Setup: First call returns tool_call, second returns content
         mock_llm_provider.complete.side_effect = [
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "tool_call",
-                    "tool": "test_tool",
-                    "tool_input": {"param": "value"},
-                }),
+                "content": None,
+                "tool_calls": [make_tool_call("test_tool", {"param": "value"})],
             },
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "respond",
-                    "summary": "Task completed successfully.",
-                }),
+                "content": "Task completed successfully.",
+                "tool_calls": None,
             },
         ]
 
@@ -149,49 +201,85 @@ class TestLeanAgentExecution:
         mock_tool.execute.assert_called_once_with(param="value")
 
     @pytest.mark.asyncio
+    async def test_execute_multiple_tool_calls_in_one_response(
+        self, mock_state_manager, mock_llm_provider, calculator_tool, planner_tool
+    ):
+        """Test handling multiple tool calls in a single LLM response."""
+        agent = LeanAgent(
+            state_manager=mock_state_manager,
+            llm_provider=mock_llm_provider,
+            tools=[calculator_tool, planner_tool],
+            system_prompt="Test",
+        )
+
+        # Setup: LLM calls two tools at once, then responds
+        mock_llm_provider.complete.side_effect = [
+            {
+                "success": True,
+                "content": None,
+                "tool_calls": [
+                    make_tool_call("calculator", {"expression": "2+2"}, "call_1"),
+                    make_tool_call("calculator", {"expression": "3*3"}, "call_2"),
+                ],
+            },
+            {
+                "success": True,
+                "content": "Calculations complete: 2+2=4, 3*3=9",
+                "tool_calls": None,
+            },
+        ]
+
+        result = await agent.execute(mission="Calculate", session_id="test")
+
+        assert result.status == "completed"
+        # Verify execution history contains both tool calls
+        tool_calls = [
+            h for h in result.execution_history if h["type"] == "tool_call"
+        ]
+        assert len(tool_calls) == 2
+
+    @pytest.mark.asyncio
     async def test_execute_with_planner_tool(
         self, lean_agent, mock_llm_provider, planner_tool
     ):
-        """Test execution with PlannerTool for plan management."""
+        """Test execution with PlannerTool via native tool calling."""
         # Setup: LLM creates plan, marks done, then responds
         mock_llm_provider.complete.side_effect = [
             # Step 1: Create plan
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "tool_call",
-                    "tool": "planner",
-                    "tool_input": {
-                        "action": "create_plan",
-                        "tasks": ["Step 1: Do X", "Step 2: Do Y"],
-                    },
-                }),
+                "content": None,
+                "tool_calls": [
+                    make_tool_call(
+                        "planner",
+                        {
+                            "action": "create_plan",
+                            "tasks": ["Step 1: Do X", "Step 2: Do Y"],
+                        },
+                    )
+                ],
             },
             # Step 2: Mark first step done
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "tool_call",
-                    "tool": "planner",
-                    "tool_input": {"action": "mark_done", "step_index": 1},
-                }),
+                "content": None,
+                "tool_calls": [
+                    make_tool_call("planner", {"action": "mark_done", "step_index": 1})
+                ],
             },
             # Step 3: Mark second step done
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "tool_call",
-                    "tool": "planner",
-                    "tool_input": {"action": "mark_done", "step_index": 2},
-                }),
+                "content": None,
+                "tool_calls": [
+                    make_tool_call("planner", {"action": "mark_done", "step_index": 2})
+                ],
             },
             # Step 4: Respond with summary
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "respond",
-                    "summary": "All steps completed!",
-                }),
+                "content": "All steps completed!",
+                "tool_calls": None,
             },
         ]
 
@@ -204,65 +292,35 @@ class TestLeanAgentExecution:
         # Verify
         assert result.status == "completed"
         assert result.final_message == "All steps completed!"
-        
+
         # Verify plan state after execution
         plan_result = planner_tool._read_plan()
         assert "[x] 1." in plan_result["output"]
         assert "[x] 2." in plan_result["output"]
 
-    @pytest.mark.asyncio
-    async def test_execute_ask_user_pauses_execution(
-        self, lean_agent, mock_llm_provider, mock_state_manager
-    ):
-        """Test that ask_user action pauses execution."""
-        # Setup: LLM asks user a question
-        mock_llm_provider.complete.return_value = {
-            "success": True,
-            "content": json.dumps({
-                "action": "ask_user",
-                "question": "What is your name?",
-                "answer_key": "user_name",
-            }),
-        }
 
-        # Execute
-        result = await lean_agent.execute(
-            mission="Get user name",
-            session_id="test-session",
-        )
-
-        # Verify
-        assert result.status == "paused"
-        assert result.final_message == "What is your name?"
-        assert result.pending_question is not None
-        assert result.pending_question["question"] == "What is your name?"
-        assert result.pending_question["answer_key"] == "user_name"
+class TestLeanAgentErrorHandling:
+    """Tests for error handling in native tool calling."""
 
     @pytest.mark.asyncio
-    async def test_execute_handles_tool_not_found(
-        self, lean_agent, mock_llm_provider
-    ):
+    async def test_handles_tool_not_found(self, lean_agent, mock_llm_provider):
         """Test graceful handling when tool is not found."""
         # Setup: LLM calls non-existent tool, then responds
         mock_llm_provider.complete.side_effect = [
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "tool_call",
-                    "tool": "nonexistent_tool",
-                    "tool_input": {},
-                }),
+                "content": None,
+                "tool_calls": [
+                    make_tool_call("nonexistent_tool", {})
+                ],
             },
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "respond",
-                    "summary": "Recovered from error.",
-                }),
+                "content": "Recovered from error.",
+                "tool_calls": None,
             },
         ]
 
-        # Execute
         result = await lean_agent.execute(
             mission="Use nonexistent tool",
             session_id="test-session",
@@ -270,32 +328,107 @@ class TestLeanAgentExecution:
 
         # Verify: Agent should continue and eventually respond
         assert result.status == "completed"
-        # Check execution history for error observation
-        error_obs = [
+        # Check execution history for error
+        error_calls = [
             h for h in result.execution_history
-            if h["type"] == "observation" and h["data"].get("error")
+            if h["type"] == "tool_call" and not h["result"].get("success")
         ]
-        assert len(error_obs) == 1
-        assert "Tool not found" in error_obs[0]["data"]["error"]
+        assert len(error_calls) == 1
+        assert "Tool not found" in error_calls[0]["result"]["error"]
 
     @pytest.mark.asyncio
-    async def test_execute_respects_max_steps(
+    async def test_handles_tool_exception(self, lean_agent, mock_llm_provider, mock_tool):
+        """Test handling of tool execution exception."""
+        # Setup: Tool raises exception
+        mock_tool.execute = AsyncMock(side_effect=RuntimeError("Tool crashed"))
+
+        mock_llm_provider.complete.side_effect = [
+            {
+                "success": True,
+                "content": None,
+                "tool_calls": [make_tool_call("test_tool", {})],
+            },
+            {
+                "success": True,
+                "content": "Handled the error.",
+                "tool_calls": None,
+            },
+        ]
+
+        result = await lean_agent.execute(mission="Test", session_id="test")
+
+        assert result.status == "completed"
+        # Error should be captured in history
+        error_calls = [
+            h for h in result.execution_history
+            if h["type"] == "tool_call" and not h["result"].get("success")
+        ]
+        assert len(error_calls) == 1
+        assert "Tool crashed" in error_calls[0]["result"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_handles_llm_failure(self, lean_agent, mock_llm_provider):
+        """Test handling of LLM API failure."""
+        # Setup: First call fails, second succeeds
+        mock_llm_provider.complete.side_effect = [
+            {"success": False, "error": "API rate limit"},
+            {
+                "success": True,
+                "content": "Recovered from API error.",
+                "tool_calls": None,
+            },
+        ]
+
+        result = await lean_agent.execute(mission="Test", session_id="test")
+
+        assert result.status == "completed"
+        assert result.final_message == "Recovered from API error."
+
+    @pytest.mark.asyncio
+    async def test_handles_invalid_tool_arguments(
         self, lean_agent, mock_llm_provider
     ):
+        """Test handling of malformed tool arguments JSON."""
+        # Setup: LLM returns invalid JSON in arguments
+        mock_llm_provider.complete.side_effect = [
+            {
+                "success": True,
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "test_tool",
+                            "arguments": "not valid json {{{",
+                        },
+                    }
+                ],
+            },
+            {
+                "success": True,
+                "content": "Done.",
+                "tool_calls": None,
+            },
+        ]
+
+        result = await lean_agent.execute(mission="Test", session_id="test")
+
+        # Should still complete (tool called with empty args)
+        assert result.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_respects_max_steps(self, lean_agent, mock_llm_provider, mock_tool):
         """Test that execution stops at MAX_STEPS."""
         lean_agent.MAX_STEPS = 3  # Set low for test
 
         # Setup: LLM always returns tool_call (never responds)
         mock_llm_provider.complete.return_value = {
             "success": True,
-            "content": json.dumps({
-                "action": "tool_call",
-                "tool": "test_tool",
-                "tool_input": {},
-            }),
+            "content": None,
+            "tool_calls": [make_tool_call("test_tool", {})],
         }
 
-        # Execute
         result = await lean_agent.execute(
             mission="Infinite loop test",
             session_id="test-session",
@@ -304,6 +437,28 @@ class TestLeanAgentExecution:
         # Verify: Should fail due to max steps
         assert result.status == "failed"
         assert "Exceeded maximum steps" in result.final_message
+
+    @pytest.mark.asyncio
+    async def test_handles_empty_response(self, lean_agent, mock_llm_provider):
+        """Test handling of empty LLM response (no content, no tool_calls)."""
+        mock_llm_provider.complete.side_effect = [
+            {
+                "success": True,
+                "content": None,  # Empty content
+                "tool_calls": None,  # No tool calls
+            },
+            {
+                "success": True,
+                "content": "Now I have a response.",
+                "tool_calls": None,
+            },
+        ]
+
+        result = await lean_agent.execute(mission="Test", session_id="test")
+
+        # Should recover and complete
+        assert result.status == "completed"
+        assert result.final_message == "Now I have a response."
 
 
 class TestLeanAgentStatePersistence:
@@ -318,25 +473,21 @@ class TestLeanAgentStatePersistence:
         mock_llm_provider.complete.side_effect = [
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "tool_call",
-                    "tool": "planner",
-                    "tool_input": {
-                        "action": "create_plan",
-                        "tasks": ["Task A", "Task B"],
-                    },
-                }),
+                "content": None,
+                "tool_calls": [
+                    make_tool_call(
+                        "planner",
+                        {"action": "create_plan", "tasks": ["Task A", "Task B"]},
+                    )
+                ],
             },
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "respond",
-                    "summary": "Plan created.",
-                }),
+                "content": "Plan created.",
+                "tool_calls": None,
             },
         ]
 
-        # Execute
         await lean_agent.execute(mission="Create plan", session_id="test-session")
 
         # Verify: State should include planner_state
@@ -364,22 +515,18 @@ class TestLeanAgentStatePersistence:
         mock_llm_provider.complete.side_effect = [
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "tool_call",
-                    "tool": "planner",
-                    "tool_input": {"action": "read_plan"},
-                }),
+                "content": None,
+                "tool_calls": [
+                    make_tool_call("planner", {"action": "read_plan"})
+                ],
             },
             {
                 "success": True,
-                "content": json.dumps({
-                    "action": "respond",
-                    "summary": "Found existing plan.",
-                }),
+                "content": "Found existing plan.",
+                "tool_calls": None,
             },
         ]
 
-        # Create agent and execute
         planner = PlannerTool()
         agent = LeanAgent(
             state_manager=mock_state_manager,
@@ -393,67 +540,6 @@ class TestLeanAgentStatePersistence:
         # Verify: Planner should have restored state
         result = planner._read_plan()
         assert "Existing task" in result["output"]
-
-
-class TestLeanAgentThoughtParsing:
-    """Tests for thought/action parsing from LLM responses."""
-
-    @pytest.mark.asyncio
-    async def test_parse_minimal_schema(self, lean_agent, mock_llm_provider):
-        """Test parsing of minimal schema response."""
-        mock_llm_provider.complete.return_value = {
-            "success": True,
-            "content": json.dumps({
-                "action": "respond",
-                "summary": "Test response",
-            }),
-        }
-
-        result = await lean_agent.execute(
-            mission="Test",
-            session_id="test-session",
-        )
-
-        assert result.status == "completed"
-        assert result.final_message == "Test response"
-
-    @pytest.mark.asyncio
-    async def test_parse_handles_invalid_json(self, lean_agent, mock_llm_provider):
-        """Test graceful handling of invalid JSON response."""
-        mock_llm_provider.complete.return_value = {
-            "success": True,
-            "content": "This is not valid JSON",
-        }
-
-        result = await lean_agent.execute(
-            mission="Test",
-            session_id="test-session",
-        )
-
-        # Should return with fallback respond action
-        assert result.status == "completed"
-        assert "Failed to parse" in result.final_message or "try again" in result.final_message.lower()
-
-    @pytest.mark.asyncio
-    async def test_parse_normalizes_legacy_finish_step(
-        self, lean_agent, mock_llm_provider
-    ):
-        """Test that legacy 'finish_step' is normalized to 'respond'."""
-        mock_llm_provider.complete.return_value = {
-            "success": True,
-            "content": json.dumps({
-                "action": "finish_step",  # Legacy action type
-                "summary": "Step finished",
-            }),
-        }
-
-        result = await lean_agent.execute(
-            mission="Test",
-            session_id="test-session",
-        )
-
-        assert result.status == "completed"
-        assert result.final_message == "Step finished"
 
 
 class TestLeanAgentNoLegacyDependencies:
@@ -478,3 +564,24 @@ class TestLeanAgentNoLegacyDependencies:
         """Verify LeanAgent has no _replan method."""
         assert not hasattr(lean_agent, "_replan")
 
+    def test_no_json_parsing_methods(self, lean_agent):
+        """Verify LeanAgent has no JSON parsing methods (native tool calling)."""
+        assert not hasattr(lean_agent, "_parse_thought")
+        assert not hasattr(lean_agent, "_generate_thought")
+
+
+class TestToolConverterIntegration:
+    """Tests for tool converter integration."""
+
+    def test_tools_converted_to_openai_format(self, lean_agent):
+        """Test that tools are properly converted to OpenAI format."""
+        openai_tools = lean_agent._openai_tools
+
+        # Find planner tool in the list
+        planner_tool_def = next(
+            (t for t in openai_tools if t["function"]["name"] == "planner"), None
+        )
+        assert planner_tool_def is not None
+        assert planner_tool_def["type"] == "function"
+        assert "description" in planner_tool_def["function"]
+        assert "parameters" in planner_tool_def["function"]
