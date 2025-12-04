@@ -141,10 +141,12 @@ Git Revert ist einfach, da keine Breaking Changes am Legacy-Pfad.
 
 | File | Status | Description |
 |------|--------|-------------|
-| `src/taskforce/application/factory.py` | ✅ Modified | Added `create_lean_agent()` and `_assemble_lean_system_prompt()` methods |
+| `src/taskforce/application/factory.py` | ✅ Modified | Added `create_lean_agent()` and `_assemble_lean_system_prompt()` methods, `user_context` support |
 | `src/taskforce/application/executor.py` | ✅ Modified | Added `use_lean_agent` parameter to `execute_mission()`, `execute_mission_streaming()`, `_create_agent()` |
 | `src/taskforce/api/cli/commands/run.py` | ✅ Modified | Added `--lean` / `-l` flag to `run_mission` command |
-| `src/taskforce/api/cli/commands/chat.py` | ✅ Modified | Added `--lean` / `-l` flag to `chat` command |
+| `src/taskforce/api/cli/commands/chat.py` | ✅ Modified | Added `--lean` / `-l` flag to `chat` command with RAG context support |
+| `src/taskforce/api/routes/execution.py` | ✅ Modified | Added `lean` field to `ExecuteMissionRequest` for API integration |
+| `src/taskforce/core/domain/lean_agent.py` | ✅ Modified | Added `conversation_history` support for multi-turn chat |
 | `tests/unit/test_factory.py` | ✅ Modified | Added `TestLeanAgentFactory` class with 8 tests |
 
 ### Debug Log References
@@ -157,6 +159,9 @@ Git Revert ist einfach, da keine Breaking Changes am Legacy-Pfad.
 - `LeanAgent` auto-injects `PlannerTool` if not present in tools list
 - Backward compatibility preserved: default behavior (no `--lean` flag) uses legacy `Agent`
 - Type hints use `Agent | LeanAgent` union for flexibility
+- **Multi-turn chat**: `LeanAgent` now loads `conversation_history` from state for context
+- **API integration**: `POST /execute` and `/execute/stream` accept `lean: true` parameter
+- **RAG + Lean**: `create_lean_agent()` accepts `user_context` for RAG tool security filtering
 
 ### Change Log
 | Date | Change |
