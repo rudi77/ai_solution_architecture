@@ -29,6 +29,9 @@ def chat(
     debug: Optional[bool] = typer.Option(
         None, "--debug", help="Enable debug output (overrides global --debug)"
     ),
+    lean: bool = typer.Option(
+        False, "--lean", "-l", help="Use LeanAgent (native tool calling, PlannerTool)"
+    ),
 ):
     """Start interactive chat session with agent.
 
@@ -38,6 +41,9 @@ def chat(
         # Standard chat
         taskforce --profile dev chat
 
+        # LeanAgent chat (new simplified architecture)
+        taskforce chat --lean
+        
         # RAG chat with user context
         taskforce --profile rag_dev chat --user-id ms-user --org-id MS-corp
         
@@ -85,6 +91,8 @@ def chat(
     session_id = str(uuid.uuid4())
     tf_console.print_session_info(session_id, profile, user_context)
     
+    if lean:
+        tf_console.print_system_message("Using LeanAgent (native tool calling)", "info")
     tf_console.print_system_message("Type 'exit', 'quit', or press Ctrl+C to end session", "info")
     tf_console.print_divider()
 
@@ -92,9 +100,27 @@ def chat(
         # Create agent once for the entire chat session
         factory = AgentFactory()
         
-        # If user context provided, create RAG agent with context
         agent = None
-        if user_context:
+        
+        # LeanAgent with optional RAG context
+        if lean:
+            try:
+                agent = await factory.create_lean_agent(
+                    profile=profile, user_context=user_context
+                )
+                if user_context:
+                    tf_console.print_system_message(
+                        "LeanAgent initialized with RAG context", "success"
+                    )
+                else:
+                    tf_console.print_system_message("LeanAgent initialized", "success")
+                tf_console.print_divider()
+            except Exception as e:
+                tf_console.print_warning(
+                    f"Could not create LeanAgent: {e}. Falling back to standard agent."
+                )
+        # Legacy RAG agent with user context
+        elif user_context:
             try:
                 agent = await factory.create_rag_agent(
                     profile=profile, user_context=user_context

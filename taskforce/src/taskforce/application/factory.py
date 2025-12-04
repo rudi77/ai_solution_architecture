@@ -23,6 +23,7 @@ import structlog
 import yaml
 
 from taskforce.core.domain.agent import Agent
+from taskforce.core.domain.lean_agent import LeanAgent
 from taskforce.core.domain.router import QueryRouter
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.infrastructure.cache.tool_cache import ToolResultCache
@@ -332,6 +333,149 @@ class AgentFactory:
         agent._mcp_contexts = mcp_contexts
         
         return agent
+
+    async def create_lean_agent(
+        self,
+        profile: str = "dev",
+        specialist: Optional[str] = None,
+        work_dir: Optional[str] = None,
+        user_context: Optional[dict[str, Any]] = None,
+    ) -> LeanAgent:
+        """
+        Create LeanAgent with simplified ReAct loop.
+
+        Creates a LeanAgent instance using native tool calling and PlannerTool
+        for dynamic plan management. This is the new simplified architecture
+        that replaces TodoListManager and custom JSON parsing.
+
+        Key differences from create_agent():
+        - Uses LeanAgent instead of legacy Agent
+        - No TodoListManager (replaced by PlannerTool)
+        - No QueryRouter/fast-path logic
+        - Uses LEAN_KERNEL_PROMPT by default
+        - Native tool calling (no JSON parsing)
+
+        Args:
+            profile: Configuration profile name (dev/staging/prod)
+            specialist: Specialist profile override. If None, uses LEAN_KERNEL_PROMPT.
+            work_dir: Optional override for work directory
+            user_context: Optional user context for RAG tools (user_id, org_id, scope)
+
+        Returns:
+            LeanAgent instance with injected dependencies
+
+        Raises:
+            FileNotFoundError: If profile YAML not found
+
+        Example:
+            >>> factory = AgentFactory()
+            >>> agent = await factory.create_lean_agent(profile="dev")
+            >>> result = await agent.execute("Do something", "session-123")
+        """
+        config = self._load_profile(profile)
+
+        # Override work_dir if provided
+        if work_dir:
+            config.setdefault("persistence", {})["work_dir"] = work_dir
+
+        # Determine specialist: parameter > config > default (None = lean kernel)
+        effective_specialist = specialist or config.get("specialist")
+
+        self.logger.info(
+            "creating_lean_agent",
+            profile=profile,
+            specialist=effective_specialist,
+            work_dir=config.get("persistence", {}).get("work_dir", ".taskforce"),
+            has_user_context=user_context is not None,
+        )
+
+        # Instantiate infrastructure adapters (reuse existing methods)
+        state_manager = self._create_state_manager(config)
+        llm_provider = self._create_llm_provider(config)
+
+        # Create tools - LeanAgent will add PlannerTool if not present
+        # Pass user_context for RAG tools if provided
+        tools_config = config.get("tools", [])
+        has_config_tools = bool(tools_config)
+
+        if has_config_tools:
+            tools = self._create_native_tools(config, llm_provider, user_context=user_context)
+            mcp_tools, _ = await self._create_mcp_tools(config)
+            tools.extend(mcp_tools)
+        else:
+            tools = self._create_default_tools(llm_provider)
+            mcp_tools, _ = await self._create_mcp_tools(config)
+            tools.extend(mcp_tools)
+
+        # Build system prompt - use LEAN_KERNEL_PROMPT or specialist variant
+        system_prompt = self._assemble_lean_system_prompt(effective_specialist, tools)
+
+        # Get model_alias from config
+        llm_config = config.get("llm", {})
+        model_alias = llm_config.get("default_model", "main")
+
+        self.logger.debug(
+            "lean_agent_created",
+            tools_count=len(tools),
+            tool_names=[t.name for t in tools],
+            model_alias=model_alias,
+        )
+
+        return LeanAgent(
+            state_manager=state_manager,
+            llm_provider=llm_provider,
+            tools=tools,
+            system_prompt=system_prompt,
+            model_alias=model_alias,
+        )
+
+    def _assemble_lean_system_prompt(
+        self, specialist: Optional[str], tools: list[ToolProtocol]
+    ) -> str:
+        """
+        Assemble system prompt for LeanAgent.
+
+        Uses LEAN_KERNEL_PROMPT as base, optionally adding specialist instructions.
+        The LEAN_KERNEL_PROMPT includes planning behavior rules that work with
+        the PlannerTool for dynamic context injection.
+
+        Args:
+            specialist: Optional specialist profile ("coding", "rag", None)
+            tools: List of available tools
+
+        Returns:
+            Assembled system prompt string
+        """
+        from taskforce.core.prompts.autonomous_prompts import (
+            CODING_SPECIALIST_PROMPT,
+            LEAN_KERNEL_PROMPT,
+            RAG_SPECIALIST_PROMPT,
+        )
+
+        # Start with LEAN_KERNEL_PROMPT
+        base_prompt = LEAN_KERNEL_PROMPT
+
+        # Optionally add specialist instructions
+        if specialist == "coding":
+            base_prompt += "\n\n" + CODING_SPECIALIST_PROMPT
+        elif specialist == "rag":
+            base_prompt += "\n\n" + RAG_SPECIALIST_PROMPT
+
+        # Format tools description and inject
+        tools_description = format_tools_description(tools) if tools else ""
+        system_prompt = build_system_prompt(
+            base_prompt=base_prompt,
+            tools_description=tools_description,
+        )
+
+        self.logger.debug(
+            "lean_system_prompt_assembled",
+            specialist=specialist,
+            tools_count=len(tools),
+            prompt_length=len(system_prompt),
+        )
+
+        return system_prompt
 
     def _load_profile(self, profile: str) -> dict:
         """
