@@ -10,8 +10,10 @@ Protocol implementations must handle:
 - Parameter mapping between model families (GPT-4 vs GPT-5)
 - Retry logic with exponential backoff
 - Structured logging with token usage tracking
+- Streaming support for real-time token delivery
 """
 
+from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 
@@ -180,3 +182,75 @@ class LLMProviderProtocol(Protocol):
             ```
         """
         ...
+
+    async def complete_stream(
+        self,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """
+        Stream LLM chat completion with real-time token delivery.
+
+        Unlike complete(), this method yields chunks as they arrive from
+        the LLM API, enabling real-time UI updates and progressive responses.
+
+        The implementation should:
+        1. Resolve model alias to actual model name/deployment
+        2. Merge default parameters with provided kwargs
+        3. Map parameters for model family (GPT-4 vs GPT-5)
+        4. Call LLM API with stream=True
+        5. Yield normalized events for each chunk
+        6. Handle tool calls as progressive events
+        7. Yield final done event with usage statistics
+
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys.
+                     Roles: "system", "user", "assistant", "tool"
+            model: Model alias (e.g., "main", "fast") or None for default.
+                  Resolved via configuration to actual model name.
+            tools: Optional list of tool definitions in OpenAI function calling format.
+            tool_choice: Optional tool choice strategy ("auto", "none", "required").
+            **kwargs: Additional parameters (temperature, max_tokens, etc.).
+
+        Yields:
+            Normalized event dictionaries:
+
+            - Token content:
+              {"type": "token", "content": "..."}
+
+            - Tool call starts:
+              {"type": "tool_call_start", "id": "...", "name": "...", "index": N}
+
+            - Tool call argument chunks:
+              {"type": "tool_call_delta", "id": "...", "arguments_delta": "...", "index": N}
+
+            - Tool call completes:
+              {"type": "tool_call_end", "id": "...", "name": "...", "arguments": "...", "index": N}
+
+            - Stream completes successfully:
+              {"type": "done", "usage": {...}}
+
+            - Error occurred:
+              {"type": "error", "message": "..."}
+
+        Note:
+            - Errors are yielded as events, NOT raised as exceptions
+            - No automatic retry logic for streaming (retry at consumer level)
+            - Tool calls arrive progressively: start → delta(s) → end
+            - done event always includes usage dict (may be empty if not available)
+
+        Example:
+            >>> async for event in llm_provider.complete_stream(
+            ...     messages=[{"role": "user", "content": "Hello"}],
+            ...     model="main"
+            ... ):
+            ...     if event["type"] == "token":
+            ...         print(event["content"], end="", flush=True)
+            ...     elif event["type"] == "done":
+            ...         print(f"\\nTokens used: {event['usage']}")
+        """
+        # Yield required for AsyncIterator type hint
+        yield {}  # pragma: no cover
