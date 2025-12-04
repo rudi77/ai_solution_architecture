@@ -814,20 +814,25 @@ class OpenAIService(LLMProviderProtocol):
         self,
         messages: List[Dict[str, Any]],
         model: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str | Dict[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
-        Perform LLM completion with retry logic.
+        Perform LLM completion with retry logic and native tool calling support.
 
         Args:
             messages: List of message dicts with 'role' and 'content'
             model: Model alias or None (uses default)
+            tools: Optional list of tool definitions in OpenAI function calling format
+            tool_choice: Optional tool choice strategy ("auto", "none", "required", or specific tool)
             **kwargs: Additional parameters (temperature, max_tokens, etc.)
 
         Returns:
             Dict with:
             - success: bool
-            - content: str (if successful)
+            - content: str | None (if no tool calls)
+            - tool_calls: list[dict] | None (if model invoked tools)
             - usage: Dict with token counts
             - error: str (if failed)
 
@@ -863,6 +868,24 @@ class OpenAIService(LLMProviderProtocol):
             provider = "openai"
             display_name = actual_model
 
+        # Build LiteLLM call kwargs
+        litellm_kwargs = {
+            "model": actual_model,
+            "messages": messages,
+            "timeout": self.retry_policy.timeout,
+            "drop_params": True,
+            **final_params,
+        }
+        
+        # Add tools if provided (native tool calling)
+        if tools:
+            litellm_kwargs["tools"] = tools
+            if tool_choice:
+                litellm_kwargs["tool_choice"] = tool_choice
+            elif tools:
+                # Default to "auto" when tools are provided
+                litellm_kwargs["tool_choice"] = "auto"
+
         # Retry logic
         for attempt in range(self.retry_policy.max_attempts):
             try:
@@ -875,30 +898,36 @@ class OpenAIService(LLMProviderProtocol):
                     deployment=display_name if is_azure else None,
                     attempt=attempt + 1,
                     message_count=len(messages),
+                    tools_count=len(tools) if tools else 0,
                 )
 
-                # Call LiteLLM with drop_params=True to auto-remove unsupported params
-                response = await litellm.acompletion(
-                    model=actual_model,
-                    messages=messages,
-                    timeout=self.retry_policy.timeout,
-                    drop_params=True,
-                    **final_params,
-                )
+                # Call LiteLLM
+                response = await litellm.acompletion(**litellm_kwargs)
 
-                # Extract content and usage
-                # Handle both regular and reasoning model response formats
+                # Extract content, tool_calls and usage
                 message = response.choices[0].message
                 content = message.content
                 
+                # Extract tool_calls if present (native tool calling)
+                tool_calls_raw = getattr(message, "tool_calls", None)
+                tool_calls = None
+                if tool_calls_raw:
+                    tool_calls = []
+                    for tc in tool_calls_raw:
+                        tool_calls.append({
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        })
+                
                 # For reasoning models (GPT-5, o1, o3), content might be in reasoning_content
-                # or the model might return content in a different format
-                if not content:
-                    # Try reasoning_content for reasoning models
+                if not content and not tool_calls:
                     reasoning_content = getattr(message, "reasoning_content", None)
                     if reasoning_content:
                         content = reasoning_content
-                    # Also check for refusal or other alternative fields
                     elif hasattr(message, "refusal") and message.refusal:
                         content = f"[Model refused: {message.refusal}]"
                 
@@ -916,10 +945,9 @@ class OpenAIService(LLMProviderProtocol):
 
                 latency_ms = int((time.time() - start_time) * 1000)
                 
-                # Warn if we have completion tokens but empty content
-                # This might indicate a response format issue with new model versions
+                # Warn if we have completion tokens but empty content (and no tool calls)
                 completion_tokens = token_stats.get("completion_tokens", 0)
-                if not content and completion_tokens > 0:
+                if not content and not tool_calls and completion_tokens > 0:
                     self.logger.warning(
                         "llm_empty_content_with_tokens",
                         model=actual_model,
@@ -936,6 +964,7 @@ class OpenAIService(LLMProviderProtocol):
                         deployment=display_name if is_azure else None,
                         tokens=token_stats.get("total_tokens", 0),
                         latency_ms=latency_ms,
+                        tool_calls_count=len(tool_calls) if tool_calls else 0,
                     )
 
                 # Trace interaction
@@ -953,6 +982,7 @@ class OpenAIService(LLMProviderProtocol):
                 return {
                     "success": True,
                     "content": content,
+                    "tool_calls": tool_calls,
                     "usage": token_stats,
                     "model": actual_model,
                     "latency_ms": latency_ms,
