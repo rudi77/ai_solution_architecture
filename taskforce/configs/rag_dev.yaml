@@ -97,3 +97,14 @@ tools:
     module: taskforce.infrastructure.tools.native.ask_user_tool
     params: {}
 
+# mcp_servers:
+#   - type: stdio
+#     command: npx
+#     args:
+#       - "-y"
+#       - "azure-devops-wiki-mcp"
+#     env:
+#       AZURE_DEVOPS_URL: "https://dev.azure.com/blumatix"
+#       AZURE_DEVOPS_PROJECT: "Rechnungserkennung"
+#       AZURE_DEVOPS_PAT: ""
+#       AZURE_DEVOPS_ORGANIZATION: "blumatix"
