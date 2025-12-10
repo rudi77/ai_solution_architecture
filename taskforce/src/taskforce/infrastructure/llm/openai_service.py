@@ -1212,6 +1212,7 @@ Task: {prompt}
 
             # Track tool calls across chunks
             current_tool_calls: dict[int, dict[str, Any]] = {}
+            content_accumulated = ""  # Accumulate content for tracing
             start_time = time.time()
 
             async for chunk in response:
@@ -1224,6 +1225,7 @@ Task: {prompt}
 
                 # Handle content tokens
                 if hasattr(delta, "content") and delta.content:
+                    content_accumulated += delta.content  # Accumulate for tracing
                     self.logger.debug(
                         "llm_stream_token",
                         content_length=len(delta.content),
@@ -1334,6 +1336,18 @@ Task: {prompt}
                 usage=usage,
             )
 
+            # Trace interaction (same as non-streaming complete)
+            asyncio.create_task(
+                self._trace_interaction(
+                    messages=messages,
+                    response_content=content_accumulated or None,
+                    model=actual_model,
+                    token_stats=usage,
+                    latency_ms=latency_ms,
+                    success=True,
+                )
+            )
+
             yield {"type": "done", "usage": usage}
 
         except Exception as e:
@@ -1357,6 +1371,19 @@ Task: {prompt}
                 log_context["troubleshooting_hint"] = parsed_error["hint"]
 
             self.logger.error("llm_stream_failed", **log_context)
+
+            # Trace failed interaction
+            asyncio.create_task(
+                self._trace_interaction(
+                    messages=messages,
+                    response_content=None,
+                    model=actual_model,
+                    token_stats={},
+                    latency_ms=0,
+                    success=False,
+                    error=error_msg,
+                )
+            )
 
             yield {"type": "error", "message": error_msg}
 
