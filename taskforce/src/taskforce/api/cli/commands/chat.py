@@ -11,6 +11,7 @@ from rich.text import Text
 from taskforce.api.cli.output_formatter import TaskforceConsole
 from taskforce.application.executor import AgentExecutor
 from taskforce.application.factory import AgentFactory
+from taskforce.infrastructure.tracing import init_tracing, shutdown_tracing
 
 app = typer.Typer(help="Interactive chat mode")
 
@@ -80,6 +81,9 @@ def chat(
         structlog.configure(
             wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
         )
+
+    # Initialize Phoenix OTEL tracing (auto-instruments LiteLLM calls)
+    init_tracing()
 
     # Initialize our fancy console
     tf_console = TaskforceConsole(debug=debug)
@@ -256,7 +260,11 @@ def chat(
                 await agent.close()
 
     # Run the async loop
-    asyncio.run(run_chat_loop())
+    try:
+        asyncio.run(run_chat_loop())
+    finally:
+        # Shutdown tracing and flush pending spans
+        shutdown_tracing()
 
 
 async def _execute_streaming_chat(
