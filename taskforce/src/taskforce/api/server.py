@@ -1,9 +1,30 @@
+import logging
+import os
 import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from taskforce.api.routes import execution, health, sessions
 from taskforce.infrastructure.tracing import init_tracing, shutdown_tracing
+
+# Configure logging based on LOGLEVEL environment variable
+loglevel = os.getenv("LOGLEVEL", "INFO").upper()
+log_level_map = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+log_level = log_level_map.get(loglevel, logging.INFO)
+
+# Configure Python logging
+logging.basicConfig(level=log_level, format="%(message)s")
+
+# Configure structlog with the same level
+structlog.configure(
+    wrapper_class=structlog.make_filtering_bound_logger(log_level),
+)
 
 logger = structlog.get_logger()
 

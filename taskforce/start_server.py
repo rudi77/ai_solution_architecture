@@ -13,6 +13,7 @@ if __name__ == "__main__":
     # Konfiguration aus Umgebungsvariablen oder Standardwerte
     host = os.getenv("TASKFORCE_HOST", "0.0.0.0")
     port = int(os.getenv("TASKFORCE_PORT", "8030"))
+    loglevel = os.getenv("LOGLEVEL", "info").lower()
     
     print(f"Starte Taskforce API Server auf http://{host}:{port}")
     print(f"API Dokumentation: http://localhost:{port}/docs")
@@ -22,6 +23,6 @@ if __name__ == "__main__":
         app,
         host=host,
         port=port,
-        log_level="info",
+        log_level=loglevel,
     )
 
