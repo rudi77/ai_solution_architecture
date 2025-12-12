@@ -531,6 +531,8 @@ class AgentFactory:
             ... )
         """
         # Load profile for infrastructure settings
+        # _load_profile() will handle fallback if profile doesn't exist
+        # (checks configs/custom/ as fallback)
         config = self._load_profile(profile)
 
         # Override work_dir if provided
@@ -691,25 +693,54 @@ class AgentFactory:
         """
         Load configuration profile from YAML file.
 
+        Searches in:
+        1. configs/{profile}.yaml (standard profiles)
+        2. configs/custom/{profile}.yaml (custom agents as fallback)
+
         Args:
-            profile: Profile name (dev/staging/prod)
+            profile: Profile name (dev/staging/prod) or custom agent ID
 
         Returns:
             Configuration dictionary
 
         Raises:
-            FileNotFoundError: If profile YAML not found
+            FileNotFoundError: If profile YAML not found in either location
         """
+        # First try standard profile location
         profile_path = self.config_dir / f"{profile}.yaml"
 
         if not profile_path.exists():
-            self.logger.error(
-                "profile_not_found",
-                profile=profile,
-                path=str(profile_path),
-                hint="Ensure profile YAML exists in configs directory",
-            )
-            raise FileNotFoundError(f"Profile not found: {profile_path}")
+            # Fallback: check if it's a custom agent
+            custom_path = self.config_dir / "custom" / f"{profile}.yaml"
+            if custom_path.exists():
+                self.logger.warning(
+                    "profile_fallback_to_custom",
+                    profile=profile,
+                    custom_path=str(custom_path),
+                    hint=(
+                        "Profile not found in configs/, but custom agent exists. "
+                        "Using 'dev' profile for infrastructure settings."
+                    ),
+                )
+                # Load custom agent but use 'dev' profile for infrastructure
+                # This allows custom agents to be referenced as profiles
+                profile_path = self.config_dir / "dev.yaml"
+                if not profile_path.exists():
+                    raise FileNotFoundError(
+                        "Profile 'dev' not found (required for custom agent "
+                        "infrastructure settings)"
+                    )
+            else:
+                self.logger.error(
+                    "profile_not_found",
+                    profile=profile,
+                    standard_path=str(profile_path),
+                    custom_path=str(custom_path),
+                    hint="Ensure profile YAML exists in configs/ or configs/custom/",
+                )
+                raise FileNotFoundError(
+                    f"Profile not found: {profile_path} or {custom_path}"
+                )
 
         with open(profile_path) as f:
             config = yaml.safe_load(f)
