@@ -24,6 +24,7 @@ from taskforce.api.schemas.agent_schemas import (
     CustomAgentUpdate,
     ProfileAgentResponse,
 )
+from taskforce.application.tool_catalog import get_tool_catalog
 from taskforce.infrastructure.persistence.file_agent_registry import (
     FileAgentRegistry,
 )
@@ -32,6 +33,50 @@ router = APIRouter()
 
 # Singleton registry instance
 _registry = FileAgentRegistry()
+
+
+def _validate_tool_allowlists(
+    tool_allowlist: list[str],
+    mcp_servers: list[dict],
+    mcp_tool_allowlist: list[str],
+) -> None:
+    """
+    Validate tool allowlists against the tool catalog.
+
+    Args:
+        tool_allowlist: List of native tool names
+        mcp_servers: List of MCP server configurations
+        mcp_tool_allowlist: List of MCP tool names
+
+    Raises:
+        HTTPException 400: If validation fails with details
+    """
+    catalog = get_tool_catalog()
+
+    # Validate native tools
+    if tool_allowlist:
+        is_valid, invalid_tools = catalog.validate_native_tools(
+            tool_allowlist
+        )
+        if not is_valid:
+            available_tools = sorted(catalog.get_native_tool_names())
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "invalid_tools",
+                    "message": "Unknown tool(s) in tool_allowlist",
+                    "invalid_tools": invalid_tools,
+                    "available_tools": available_tools,
+                },
+            )
+
+    # Validate MCP tools if MCP servers are configured
+    if mcp_servers and mcp_tool_allowlist:
+        # For MVP: Basic validation that mcp_tool_allowlist is provided
+        # Full MCP discovery validation would require MCP client
+        # initialization which is deferred to agent factory instantiation
+        # Story requirement: "graceful degradation" - we allow storing
+        pass
 
 
 @router.post(
@@ -53,8 +98,15 @@ def create_agent(agent_def: CustomAgentCreate) -> CustomAgentResponse:
 
     Raises:
         HTTPException 409: If agent_id already exists
-        HTTPException 400: If validation fails
+        HTTPException 400: If validation fails (including invalid tools)
     """
+    # Validate tool allowlists
+    _validate_tool_allowlists(
+        agent_def.tool_allowlist,
+        agent_def.mcp_servers,
+        agent_def.mcp_tool_allowlist,
+    )
+
     try:
         return _registry.create_agent(agent_def)
     except FileExistsError as e:
@@ -73,7 +125,10 @@ def create_agent(agent_def: CustomAgentCreate) -> CustomAgentResponse:
     "/agents",
     response_model=AgentListResponse,
     summary="List all agents",
-    description="List all agents (custom + profile). Corrupt YAML files are skipped.",
+    description=(
+        "List all agents (custom + profile). "
+        "Corrupt YAML files are skipped."
+    ),
 )
 def list_agents() -> AgentListResponse:
     """
@@ -142,8 +197,15 @@ def update_agent(
 
     Raises:
         HTTPException 404: If agent not found
-        HTTPException 400: If validation fails
+        HTTPException 400: If validation fails (including invalid tools)
     """
+    # Validate tool allowlists
+    _validate_tool_allowlists(
+        agent_def.tool_allowlist,
+        agent_def.mcp_servers,
+        agent_def.mcp_tool_allowlist,
+    )
+
     try:
         return _registry.update_agent(agent_id, agent_def)
     except FileNotFoundError as e:
