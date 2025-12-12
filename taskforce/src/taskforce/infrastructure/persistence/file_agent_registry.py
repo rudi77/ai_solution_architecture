@@ -28,6 +28,7 @@ from taskforce.api.schemas.agent_schemas import (
     CustomAgentUpdate,
     ProfileAgentResponse,
 )
+from taskforce.application.tool_mapper import get_tool_mapper
 
 logger = structlog.get_logger()
 
@@ -140,17 +141,31 @@ class FileAgentRegistry:
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
 
+            # Extract tool names from full tool definitions
+            tool_names = []
+            if "tools" in data:
+                tool_mapper = get_tool_mapper()
+                for tool_def in data["tools"]:
+                    tool_type = tool_def.get("type")
+                    tool_name = tool_mapper.get_tool_name(tool_type)
+                    if tool_name:
+                        tool_names.append(tool_name)
+            
+            # Support legacy format with tool_allowlist
+            if "tool_allowlist" in data:
+                tool_names = data["tool_allowlist"]
+
             # Validate and construct response
             return CustomAgentResponse(
-                agent_id=data["agent_id"],
-                name=data["name"],
-                description=data["description"],
-                system_prompt=data["system_prompt"],
-                tool_allowlist=data.get("tool_allowlist", []),
+                agent_id=data.get("agent_id", agent_id),
+                name=data.get("name", agent_id),
+                description=data.get("description", ""),
+                system_prompt=data.get("system_prompt", ""),
+                tool_allowlist=tool_names,
                 mcp_servers=data.get("mcp_servers", []),
                 mcp_tool_allowlist=data.get("mcp_tool_allowlist", []),
-                created_at=data["created_at"],
-                updated_at=data["updated_at"],
+                created_at=data.get("created_at", ""),
+                updated_at=data.get("updated_at", ""),
             )
 
         except Exception as e:
@@ -217,16 +232,59 @@ class FileAgentRegistry:
 
         # Add timestamps
         now = datetime.now(timezone.utc).isoformat()
+        
+        # Convert tool_allowlist to full tool definitions
+        tool_mapper = get_tool_mapper()
+        tools = tool_mapper.map_tools(agent_def.tool_allowlist)
+        
+        # Build profile-style YAML config
         data = {
+            # Profile metadata (for internal tracking)
             "agent_id": agent_def.agent_id,
             "name": agent_def.name,
             "description": agent_def.description,
-            "system_prompt": agent_def.system_prompt,
-            "tool_allowlist": agent_def.tool_allowlist,
-            "mcp_servers": agent_def.mcp_servers,
-            "mcp_tool_allowlist": agent_def.mcp_tool_allowlist,
             "created_at": now,
             "updated_at": now,
+            
+            # Profile config format
+            "profile": agent_def.agent_id,
+            "specialist": "generic",  # Default specialist
+            
+            # Agent configuration
+            "agent": {
+                "enable_fast_path": True,
+                "router": {
+                    "use_llm_classification": True,
+                    "max_follow_up_length": 100,
+                },
+            },
+            
+            # Persistence configuration
+            "persistence": {
+                "type": "file",
+                "work_dir": f".taskforce_{agent_def.agent_id}",
+            },
+            
+            # LLM configuration
+            "llm": {
+                "config_path": "configs/llm_config.yaml",
+                "default_model": "main",
+            },
+            
+            # Logging configuration
+            "logging": {
+                "level": "DEBUG",
+                "format": "console",
+            },
+            
+            # Tools (full definitions)
+            "tools": tools,
+            
+            # MCP servers
+            "mcp_servers": agent_def.mcp_servers,
+            
+            # System prompt (as comment at top of file)
+            "system_prompt": agent_def.system_prompt,
         }
 
         self._atomic_write_yaml(path, data)
@@ -235,7 +293,18 @@ class FileAgentRegistry:
             "agent.created", agent_id=agent_def.agent_id, path=str(path)
         )
 
-        return CustomAgentResponse(**data)
+        # Return API response format
+        return CustomAgentResponse(
+            agent_id=agent_def.agent_id,
+            name=agent_def.name,
+            description=agent_def.description,
+            system_prompt=agent_def.system_prompt,
+            tool_allowlist=agent_def.tool_allowlist,
+            mcp_servers=agent_def.mcp_servers,
+            mcp_tool_allowlist=agent_def.mcp_tool_allowlist,
+            created_at=now,
+            updated_at=now,
+        )
 
     def get_agent(
         self, agent_id: str
@@ -332,16 +401,59 @@ class FileAgentRegistry:
 
         # Update with new data
         now = datetime.now(timezone.utc).isoformat()
+        
+        # Convert tool_allowlist to full tool definitions
+        tool_mapper = get_tool_mapper()
+        tools = tool_mapper.map_tools(agent_def.tool_allowlist)
+        
+        # Build profile-style YAML config
         data = {
+            # Profile metadata (for internal tracking)
             "agent_id": agent_id,
             "name": agent_def.name,
             "description": agent_def.description,
-            "system_prompt": agent_def.system_prompt,
-            "tool_allowlist": agent_def.tool_allowlist,
-            "mcp_servers": agent_def.mcp_servers,
-            "mcp_tool_allowlist": agent_def.mcp_tool_allowlist,
             "created_at": existing.created_at,  # Preserve
             "updated_at": now,
+            
+            # Profile config format
+            "profile": agent_id,
+            "specialist": "generic",  # Default specialist
+            
+            # Agent configuration
+            "agent": {
+                "enable_fast_path": True,
+                "router": {
+                    "use_llm_classification": True,
+                    "max_follow_up_length": 100,
+                },
+            },
+            
+            # Persistence configuration
+            "persistence": {
+                "type": "file",
+                "work_dir": f".taskforce_{agent_id}",
+            },
+            
+            # LLM configuration
+            "llm": {
+                "config_path": "configs/llm_config.yaml",
+                "default_model": "main",
+            },
+            
+            # Logging configuration
+            "logging": {
+                "level": "DEBUG",
+                "format": "console",
+            },
+            
+            # Tools (full definitions)
+            "tools": tools,
+            
+            # MCP servers
+            "mcp_servers": agent_def.mcp_servers,
+            
+            # System prompt
+            "system_prompt": agent_def.system_prompt,
         }
 
         self._atomic_write_yaml(path, data)
@@ -350,7 +462,18 @@ class FileAgentRegistry:
             "agent.updated", agent_id=agent_id, path=str(path)
         )
 
-        return CustomAgentResponse(**data)
+        # Return API response format
+        return CustomAgentResponse(
+            agent_id=agent_id,
+            name=agent_def.name,
+            description=agent_def.description,
+            system_prompt=agent_def.system_prompt,
+            tool_allowlist=agent_def.tool_allowlist,
+            mcp_servers=agent_def.mcp_servers,
+            mcp_tool_allowlist=agent_def.mcp_tool_allowlist,
+            created_at=existing.created_at,
+            updated_at=now,
+        )
 
     def delete_agent(self, agent_id: str) -> None:
         """
