@@ -52,6 +52,9 @@ class LeanAgent:
     """
 
     MAX_STEPS = 30  # Safety limit to prevent infinite loops
+    # Message history management (inspired by agent_v2 MessageHistory)
+    MAX_MESSAGES = 50  # Hard limit on message count
+    SUMMARY_THRESHOLD = 20  # Compress when exceeding this message count
 
     def __init__(
         self,
@@ -172,6 +175,9 @@ class LeanAgent:
             # Dynamic context injection: rebuild system prompt with current plan
             current_system_prompt = self._build_system_prompt()
             messages[0] = {"role": "system", "content": current_system_prompt}
+
+            # Compress messages if exceeding threshold (async LLM-based)
+            messages = await self._compress_messages(messages)
 
             # Call LLM with tools
             result = await self.llm_provider.complete(
@@ -394,6 +400,9 @@ class LeanAgent:
             current_system_prompt = self._build_system_prompt()
             messages[0] = {"role": "system", "content": current_system_prompt}
 
+            # Compress messages if exceeding threshold (async LLM-based)
+            messages = await self._compress_messages(messages)
+
             # Stream LLM response
             tool_calls_accumulated: list[dict[str, Any]] = {}
             content_accumulated = ""
@@ -583,6 +592,112 @@ class LeanAgent:
         if len(output) <= max_length:
             return output
         return output[:max_length] + "..."
+
+    async def _compress_messages(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """
+        Compress message history using LLM-based summarization.
+
+        Inspired by agent_v2 MessageHistory.compress_history_async().
+
+        Strategy:
+        1. Trigger when message count > SUMMARY_THRESHOLD (20 messages)
+        2. Use LLM to summarize old messages (skip system prompt)
+        3. Replace old messages with summary + keep recent messages
+        4. Fallback: Simple truncation if LLM summarization fails
+
+        This preserves context better than simple deletion while
+        preventing token overflow.
+        """
+        message_count = len(messages)
+
+        # Check if compression needed
+        if message_count <= self.SUMMARY_THRESHOLD:
+            return messages
+
+        self.logger.warning(
+            "compressing_messages",
+            message_count=message_count,
+            threshold=self.SUMMARY_THRESHOLD,
+        )
+
+        # Extract old messages to summarize (skip system prompt)
+        old_messages = messages[1 : self.SUMMARY_THRESHOLD]
+
+        # Build summary prompt
+        summary_prompt = f"""Summarize this conversation history concisely:
+
+{json.dumps(old_messages, indent=2)}
+
+Provide a 2-3 paragraph summary of:
+- Key decisions made
+- Important tool results and findings
+- Context needed for understanding recent messages
+
+Keep it factual and concise."""
+
+        try:
+            # Use LLM to create summary
+            result = await self.llm_provider.complete(
+                messages=[{"role": "user", "content": summary_prompt}],
+                model=self.model_alias,
+                temperature=0,
+            )
+
+            if not result.get("success"):
+                self.logger.error(
+                    "compression_failed",
+                    error=result.get("error"),
+                )
+                # Fallback: Keep recent messages only
+                return self._fallback_compression(messages)
+
+            summary = result.get("content", "")
+
+            # Build compressed message list
+            compressed = [
+                messages[0],  # System prompt
+                {
+                    "role": "system",
+                    "content": f"[Previous Context Summary]\n{summary}",
+                },
+                *messages[self.SUMMARY_THRESHOLD :],  # Recent messages
+            ]
+
+            self.logger.info(
+                "messages_compressed_with_summary",
+                original_count=message_count,
+                compressed_count=len(compressed),
+                summary_length=len(summary),
+            )
+
+            return compressed
+
+        except Exception as e:
+            self.logger.error("compression_exception", error=str(e))
+            return self._fallback_compression(messages)
+
+    def _fallback_compression(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """
+        Fallback compression when LLM summarization fails.
+
+        Simply keeps system prompt + recent messages.
+        """
+        self.logger.warning("using_fallback_compression")
+
+        # Keep system prompt + last SUMMARY_THRESHOLD messages
+        compressed = [messages[0]] + messages[-self.SUMMARY_THRESHOLD :]
+
+        self.logger.info(
+            "fallback_compression_complete",
+            original_count=len(messages),
+            compressed_count=len(compressed),
+        )
+
+        return compressed
 
     def _build_initial_messages(
         self,
