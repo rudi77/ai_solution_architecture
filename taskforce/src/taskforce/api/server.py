@@ -4,7 +4,7 @@ import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from taskforce.api.routes import execution, health, sessions
+from taskforce.api.routes import agents, execution, health, sessions
 from taskforce.infrastructure.tracing import init_tracing, shutdown_tracing
 
 # Configure logging based on LOGLEVEL environment variable
@@ -77,6 +77,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         sessions.router, prefix="/api/v1", tags=["sessions"]
+    )
+    app.include_router(
+        agents.router, prefix="/api/v1", tags=["agents"]
     )
     app.include_router(health.router, tags=["health"])
 
