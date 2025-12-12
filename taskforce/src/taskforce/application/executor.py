@@ -80,6 +80,7 @@ class AgentExecutor:
         progress_callback: Callable[[ProgressUpdate], None] | None = None,
         user_context: dict[str, Any] | None = None,
         use_lean_agent: bool = False,
+        agent_id: str | None = None,
     ) -> ExecutionResult:
         """Execute agent mission with comprehensive orchestration.
 
@@ -103,6 +104,9 @@ class AgentExecutor:
                          (user_id, org_id, scope)
             use_lean_agent: If True, use LeanAgent instead of legacy Agent.
                            LeanAgent uses native tool calling and PlannerTool.
+            agent_id: Optional custom agent ID. If provided, loads agent
+                     definition from configs/custom/{agent_id}.yaml and
+                     creates LeanAgent (ignores use_lean_agent flag).
 
         Returns:
             ExecutionResult with completion status and history
@@ -123,13 +127,17 @@ class AgentExecutor:
             session_id=session_id,
             has_user_context=user_context is not None,
             use_lean_agent=use_lean_agent,
+            agent_id=agent_id,
         )
 
         agent = None
         try:
             # Create agent with appropriate adapters
             agent = await self._create_agent(
-                profile, user_context=user_context, use_lean_agent=use_lean_agent
+                profile,
+                user_context=user_context,
+                use_lean_agent=use_lean_agent,
+                agent_id=agent_id,
             )
 
             # Store conversation history in state if provided
@@ -153,6 +161,7 @@ class AgentExecutor:
                 session_id=session_id,
                 status=result.status,
                 duration_seconds=duration,
+                agent_id=agent_id,
             )
 
             return result
@@ -166,6 +175,7 @@ class AgentExecutor:
                 error=str(e),
                 error_type=type(e).__name__,
                 duration_seconds=duration,
+                agent_id=agent_id,
             )
             raise
 
@@ -182,6 +192,7 @@ class AgentExecutor:
         conversation_history: list[dict[str, Any]] | None = None,
         user_context: dict[str, Any] | None = None,
         use_lean_agent: bool = False,
+        agent_id: str | None = None,
     ) -> AsyncIterator[ProgressUpdate]:
         """Execute mission with streaming progress updates.
 
@@ -195,6 +206,8 @@ class AgentExecutor:
             conversation_history: Optional conversation history for chat context
             user_context: Optional user context for RAG security filtering
             use_lean_agent: If True, use LeanAgent instead of legacy Agent
+            agent_id: Optional custom agent ID. If provided, loads agent
+                     definition and creates LeanAgent (ignores use_lean_agent).
 
         Yields:
             ProgressUpdate objects for each execution event
@@ -213,6 +226,7 @@ class AgentExecutor:
             session_id=session_id,
             has_user_context=user_context is not None,
             use_lean_agent=use_lean_agent,
+            agent_id=agent_id,
         )
 
         # Yield initial started event
@@ -220,14 +234,22 @@ class AgentExecutor:
             timestamp=datetime.now(),
             event_type="started",
             message=f"Starting mission: {mission[:80]}",
-            details={"session_id": session_id, "profile": profile, "lean": use_lean_agent},
+            details={
+                "session_id": session_id,
+                "profile": profile,
+                "lean": use_lean_agent,
+                "agent_id": agent_id,
+            },
         )
 
         agent = None
         try:
             # Create agent
             agent = await self._create_agent(
-                profile, user_context=user_context, use_lean_agent=use_lean_agent
+                profile,
+                user_context=user_context,
+                use_lean_agent=use_lean_agent,
+                agent_id=agent_id,
             )
 
             # Store conversation history in state if provided
@@ -240,7 +262,9 @@ class AgentExecutor:
             async for update in self._execute_streaming(agent, mission, session_id):
                 yield update
 
-            self.logger.info("mission.streaming.completed", session_id=session_id)
+            self.logger.info(
+                "mission.streaming.completed", session_id=session_id, agent_id=agent_id
+            )
 
         except Exception as e:
             self.logger.error(
@@ -248,6 +272,7 @@ class AgentExecutor:
                 session_id=session_id,
                 error=str(e),
                 error_type=type(e).__name__,
+                agent_id=agent_id,
             )
 
             # Yield error event
@@ -270,10 +295,12 @@ class AgentExecutor:
         profile: str,
         user_context: dict[str, Any] | None = None,
         use_lean_agent: bool = False,
+        agent_id: str | None = None,
     ) -> Agent | LeanAgent:
         """Create agent using factory.
 
         Creates either legacy Agent or LeanAgent based on parameters:
+        - agent_id provided: Loads custom agent definition and creates LeanAgent
         - use_lean_agent=True: Creates LeanAgent (native tool calling, PlannerTool)
         - user_context provided: Creates RAG agent (legacy)
         - Otherwise: Creates standard Agent (legacy)
@@ -282,16 +309,61 @@ class AgentExecutor:
             profile: Configuration profile name
             user_context: Optional user context for RAG security filtering
             use_lean_agent: If True, create LeanAgent instead of legacy Agent
+            agent_id: Optional custom agent ID to load from registry
 
         Returns:
             Agent or LeanAgent instance with injected dependencies
+
+        Raises:
+            FileNotFoundError: If agent_id provided but not found (404)
+            ValueError: If agent definition is invalid/corrupt (400)
         """
         self.logger.debug(
             "creating_agent",
             profile=profile,
             has_user_context=user_context is not None,
             use_lean_agent=use_lean_agent,
+            agent_id=agent_id,
         )
+
+        # agent_id takes highest priority - load custom agent definition
+        if agent_id:
+            from taskforce.infrastructure.persistence.file_agent_registry import (
+                FileAgentRegistry,
+            )
+
+            registry = FileAgentRegistry()
+            agent_response = registry.get_agent(agent_id)
+
+            if not agent_response:
+                raise FileNotFoundError(f"Agent '{agent_id}' not found")
+
+            # Only custom agents can be used for execution (not profile agents)
+            if agent_response.source != "custom":
+                raise ValueError(
+                    f"Agent '{agent_id}' is a profile agent, not a custom agent. "
+                    "Use 'profile' parameter for profile agents."
+                )
+
+            # Convert response to definition dict
+            agent_definition = {
+                "system_prompt": agent_response.system_prompt,
+                "tool_allowlist": agent_response.tool_allowlist,
+                "mcp_servers": agent_response.mcp_servers,
+                "mcp_tool_allowlist": agent_response.mcp_tool_allowlist,
+            }
+
+            self.logger.info(
+                "loading_custom_agent",
+                agent_id=agent_id,
+                agent_name=agent_response.name,
+                tool_count=len(agent_response.tool_allowlist),
+            )
+
+            return await self.factory.create_lean_agent_from_definition(
+                agent_definition=agent_definition,
+                profile=profile,
+            )
 
         # LeanAgent takes priority if requested (with optional user_context for RAG)
         if use_lean_agent:

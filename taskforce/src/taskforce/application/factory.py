@@ -483,6 +483,210 @@ class AgentFactory:
 
         return system_prompt
 
+    async def create_lean_agent_from_definition(
+        self,
+        agent_definition: dict[str, Any],
+        profile: str = "dev",
+        work_dir: Optional[str] = None,
+    ) -> LeanAgent:
+        """
+        Create LeanAgent from custom agent definition.
+
+        This method is used by Story 8.3 to create agents from stored
+        custom agent definitions (loaded from configs/custom/{agent_id}.yaml).
+
+        The agent_definition provides:
+        - system_prompt: Custom prompt for the agent
+        - tool_allowlist: List of allowed native tool names
+        - mcp_servers: Optional MCP server configurations
+        - mcp_tool_allowlist: Optional list of allowed MCP tool names
+
+        The profile parameter controls infrastructure settings:
+        - LLM config, logging, persistence work_dir
+        - Does NOT override the custom agent's prompt/toolset
+
+        Args:
+            agent_definition: Agent definition dict with system_prompt,
+                            tool_allowlist, mcp_servers, mcp_tool_allowlist
+            profile: Configuration profile for infrastructure settings
+            work_dir: Optional override for work directory
+
+        Returns:
+            LeanAgent instance configured from definition
+
+        Raises:
+            FileNotFoundError: If profile YAML not found
+            ValueError: If agent_definition is invalid
+
+        Example:
+            >>> factory = AgentFactory()
+            >>> definition = {
+            ...     "system_prompt": "You are a helpful assistant",
+            ...     "tool_allowlist": ["web_search", "python"],
+            ...     "mcp_servers": [],
+            ...     "mcp_tool_allowlist": []
+            ... }
+            >>> agent = await factory.create_lean_agent_from_definition(
+            ...     definition, profile="dev"
+            ... )
+        """
+        # Load profile for infrastructure settings
+        config = self._load_profile(profile)
+
+        # Override work_dir if provided
+        if work_dir:
+            config.setdefault("persistence", {})["work_dir"] = work_dir
+
+        self.logger.info(
+            "creating_lean_agent_from_definition",
+            profile=profile,
+            work_dir=config.get("persistence", {}).get("work_dir", ".taskforce"),
+            tool_allowlist=agent_definition.get("tool_allowlist", []),
+            has_mcp_servers=bool(agent_definition.get("mcp_servers", [])),
+        )
+
+        # Instantiate infrastructure adapters
+        state_manager = self._create_state_manager(config)
+        llm_provider = self._create_llm_provider(config)
+
+        # Create tools filtered by allowlist
+        tools = await self._create_tools_from_allowlist(
+            tool_allowlist=agent_definition.get("tool_allowlist", []),
+            mcp_servers=agent_definition.get("mcp_servers", []),
+            mcp_tool_allowlist=agent_definition.get("mcp_tool_allowlist", []),
+            llm_provider=llm_provider,
+        )
+
+        # Use custom system prompt from definition
+        system_prompt = agent_definition.get("system_prompt", "")
+        if not system_prompt:
+            raise ValueError("agent_definition must include 'system_prompt'")
+
+        # Get model_alias from config
+        llm_config = config.get("llm", {})
+        model_alias = llm_config.get("default_model", "main")
+
+        self.logger.debug(
+            "lean_agent_from_definition_created",
+            tools_count=len(tools),
+            tool_names=[t.name for t in tools],
+            model_alias=model_alias,
+            prompt_length=len(system_prompt),
+        )
+
+        agent = LeanAgent(
+            state_manager=state_manager,
+            llm_provider=llm_provider,
+            tools=tools,
+            system_prompt=system_prompt,
+            model_alias=model_alias,
+        )
+
+        # Store MCP contexts on agent for lifecycle management
+        # (contexts are stored in tools list, no separate tracking needed)
+        agent._mcp_contexts = []
+
+        return agent
+
+    async def _create_tools_from_allowlist(
+        self,
+        tool_allowlist: list[str],
+        mcp_servers: list[dict[str, Any]],
+        mcp_tool_allowlist: list[str],
+        llm_provider: LLMProviderProtocol,
+    ) -> list[ToolProtocol]:
+        """
+        Create tools filtered by allowlist.
+
+        Creates native tools and MCP tools, filtering by their respective allowlists.
+
+        Args:
+            tool_allowlist: List of allowed native tool names
+            mcp_servers: MCP server configurations
+            mcp_tool_allowlist: List of allowed MCP tool names (empty = all allowed)
+            llm_provider: LLM provider for tools that need it
+
+        Returns:
+            List of tool instances matching allowlists
+        """
+        tools = []
+
+        # Create native tools filtered by allowlist
+        if tool_allowlist:
+            available_native_tools = self._get_all_native_tools(llm_provider)
+            for tool in available_native_tools:
+                if tool.name in tool_allowlist:
+                    tools.append(tool)
+                    self.logger.debug(
+                        "native_tool_added",
+                        tool_name=tool.name,
+                        reason="in_tool_allowlist",
+                    )
+
+        # Create MCP tools if configured
+        if mcp_servers:
+            # Temporarily inject mcp_servers into a config dict
+            temp_config = {"mcp_servers": mcp_servers}
+            mcp_tools, mcp_contexts = await self._create_mcp_tools(temp_config)
+
+            # Filter MCP tools by allowlist if specified
+            if mcp_tool_allowlist:
+                filtered_mcp_tools = [
+                    t for t in mcp_tools if t.name in mcp_tool_allowlist
+                ]
+                self.logger.debug(
+                    "mcp_tools_filtered",
+                    original_count=len(mcp_tools),
+                    filtered_count=len(filtered_mcp_tools),
+                    allowlist=mcp_tool_allowlist,
+                )
+                tools.extend(filtered_mcp_tools)
+            else:
+                # No allowlist = all MCP tools allowed
+                tools.extend(mcp_tools)
+
+        return tools
+
+    def _get_all_native_tools(
+        self, llm_provider: LLMProviderProtocol
+    ) -> list[ToolProtocol]:
+        """
+        Get all available native tools.
+
+        Returns the complete set of native tools that can be filtered
+        by allowlist.
+
+        Args:
+            llm_provider: LLM provider (unused but kept for consistency)
+
+        Returns:
+            List of all native tool instances
+        """
+        from taskforce.infrastructure.tools.native.ask_user_tool import AskUserTool
+        from taskforce.infrastructure.tools.native.file_tools import (
+            FileReadTool,
+            FileWriteTool,
+        )
+        from taskforce.infrastructure.tools.native.git_tools import GitHubTool, GitTool
+        from taskforce.infrastructure.tools.native.python_tool import PythonTool
+        from taskforce.infrastructure.tools.native.shell_tool import PowerShellTool
+        from taskforce.infrastructure.tools.native.web_tools import (
+            WebFetchTool,
+            WebSearchTool,
+        )
+
+        return [
+            WebSearchTool(),
+            WebFetchTool(),
+            PythonTool(),
+            GitHubTool(),
+            GitTool(),
+            FileReadTool(),
+            FileWriteTool(),
+            PowerShellTool(),
+            AskUserTool(),
+        ]
+
     def _load_profile(self, profile: str) -> dict:
         """
         Load configuration profile from YAML file.

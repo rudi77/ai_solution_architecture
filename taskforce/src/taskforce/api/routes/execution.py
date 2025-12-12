@@ -17,6 +17,7 @@ Both endpoints support:
 
 import json
 from dataclasses import asdict
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -100,6 +101,10 @@ class ExecuteMissionRequest(BaseModel):
         default=False,
         description="Use LeanAgent (native tool calling) instead of legacy."
     )
+    agent_id: Optional[str] = Field(
+        default=None,
+        description="Custom agent ID to use (forces LeanAgent). If provided, loads agent from configs/custom/{agent_id}.yaml"
+    )
 
 
 class ExecuteMissionResponse(BaseModel):
@@ -181,6 +186,7 @@ async def execute_mission(request: ExecuteMissionRequest):
             conversation_history=request.conversation_history,
             user_context=user_context,
             use_lean_agent=request.lean,
+            agent_id=request.agent_id,
         )
 
         return ExecuteMissionResponse(
@@ -188,7 +194,14 @@ async def execute_mission(request: ExecuteMissionRequest):
             status=result.status,
             message=result.final_message
         )
+    except FileNotFoundError as e:
+        # agent_id not found -> 404
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        # Invalid agent definition -> 400
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        # Other errors -> 500
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -462,17 +475,46 @@ async def execute_mission_stream(request: ExecuteMissionRequest):
         }
 
     async def event_generator():
-        async for update in executor.execute_mission_streaming(
-            mission=request.mission,
-            profile=request.profile,
-            session_id=request.session_id,
-            conversation_history=request.conversation_history,
-            user_context=user_context,
-            use_lean_agent=request.lean,
-        ):
-            # Serialize dataclass to JSON, handling datetime
-            data = json.dumps(asdict(update), default=str)
-            yield f"data: {data}\n\n"
+        try:
+            async for update in executor.execute_mission_streaming(
+                mission=request.mission,
+                profile=request.profile,
+                session_id=request.session_id,
+                conversation_history=request.conversation_history,
+                user_context=user_context,
+                use_lean_agent=request.lean,
+                agent_id=request.agent_id,
+            ):
+                # Serialize dataclass to JSON, handling datetime
+                data = json.dumps(asdict(update), default=str)
+                yield f"data: {data}\n\n"
+        except FileNotFoundError as e:
+            # agent_id not found -> send error event
+            error_data = json.dumps({
+                "timestamp": datetime.now().isoformat(),
+                "event_type": "error",
+                "message": f"Agent not found: {str(e)}",
+                "details": {"error": str(e), "error_type": "FileNotFoundError", "status_code": 404}
+            })
+            yield f"data: {error_data}\n\n"
+        except ValueError as e:
+            # Invalid agent definition -> send error event
+            error_data = json.dumps({
+                "timestamp": datetime.now().isoformat(),
+                "event_type": "error",
+                "message": f"Invalid agent definition: {str(e)}",
+                "details": {"error": str(e), "error_type": "ValueError", "status_code": 400}
+            })
+            yield f"data: {error_data}\n\n"
+        except Exception as e:
+            # Other errors -> send error event
+            error_data = json.dumps({
+                "timestamp": datetime.now().isoformat(),
+                "event_type": "error",
+                "message": f"Execution failed: {str(e)}",
+                "details": {"error": str(e), "error_type": type(e).__name__, "status_code": 500}
+            })
+            yield f"data: {error_data}\n\n"
 
     return StreamingResponse(
         event_generator(),
