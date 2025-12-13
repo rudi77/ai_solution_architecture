@@ -2,7 +2,7 @@
 # This configuration creates an agent specialized for natural language to SQL conversion
 # Connects to remote MCP server for database operations
 
-profile: text2sql_dev
+profile: text2sql_agent
 agent_type: text2sql  # Use specialized Text2SQL system prompt
 
 # Agent configuration

@@ -1,7 +1,7 @@
 # RAG Agent Development Configuration
 # This configuration creates an agent specialized for document retrieval and semantic search
 
-profile: rag_dev
+profile: rag_agent
 specialist: rag
 
 # Persistence configuration
