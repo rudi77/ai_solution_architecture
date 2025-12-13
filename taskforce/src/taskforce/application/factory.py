@@ -23,6 +23,7 @@ import structlog
 import yaml
 
 from taskforce.core.domain.agent import Agent
+from taskforce.core.domain.context_policy import ContextPolicy
 from taskforce.core.domain.lean_agent import LeanAgent
 from taskforce.core.domain.router import QueryRouter
 from taskforce.core.interfaces.llm import LLMProviderProtocol
@@ -415,11 +416,15 @@ class AgentFactory:
         llm_config = config.get("llm", {})
         model_alias = llm_config.get("default_model", "main")
 
+        # Create ContextPolicy from config (Story 9.2)
+        context_policy = self._create_context_policy(config)
+
         self.logger.debug(
             "lean_agent_created",
             tools_count=len(tools),
             tool_names=[t.name for t in tools],
             model_alias=model_alias,
+            context_policy_max_items=context_policy.max_items,
         )
 
         agent = LeanAgent(
@@ -428,6 +433,7 @@ class AgentFactory:
             tools=tools,
             system_prompt=system_prompt,
             model_alias=model_alias,
+            context_policy=context_policy,
         )
 
         # Store MCP contexts on agent for lifecycle management
@@ -568,12 +574,16 @@ class AgentFactory:
         llm_config = config.get("llm", {})
         model_alias = llm_config.get("default_model", "main")
 
+        # Create ContextPolicy from config (Story 9.2)
+        context_policy = self._create_context_policy(config)
+
         self.logger.debug(
             "lean_agent_from_definition_created",
             tools_count=len(tools),
             tool_names=[t.name for t in tools],
             model_alias=model_alias,
             prompt_length=len(system_prompt),
+            context_policy_max_items=context_policy.max_items,
         )
 
         agent = LeanAgent(
@@ -582,6 +592,7 @@ class AgentFactory:
             tools=tools,
             system_prompt=system_prompt,
             model_alias=model_alias,
+            context_policy=context_policy,
         )
 
         # Store MCP contexts on agent for lifecycle management
@@ -747,6 +758,29 @@ class AgentFactory:
 
         self.logger.debug("profile_loaded", profile=profile, config_keys=list(config.keys()))
         return config
+
+    def _create_context_policy(self, config: dict) -> ContextPolicy:
+        """
+        Create ContextPolicy from configuration.
+
+        Reads context_policy section from config YAML and creates a
+        ContextPolicy instance. Falls back to conservative default if
+        no policy is configured.
+
+        Args:
+            config: Configuration dictionary
+
+        Returns:
+            ContextPolicy instance
+        """
+        context_config = config.get("context_policy")
+
+        if context_config:
+            self.logger.debug("creating_context_policy_from_config", config=context_config)
+            return ContextPolicy.from_dict(context_config)
+        else:
+            self.logger.debug("using_conservative_default_context_policy")
+            return ContextPolicy.conservative_default()
 
     def _create_state_manager(self, config: dict) -> StateManagerProtocol:
         """

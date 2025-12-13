@@ -25,6 +25,8 @@ from typing import Any
 
 import structlog
 
+from taskforce.core.domain.context_builder import ContextBuilder
+from taskforce.core.domain.context_policy import ContextPolicy
 from taskforce.core.domain.models import ExecutionResult, StreamEvent
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.core.interfaces.state import StateManagerProtocol
@@ -69,6 +71,7 @@ class LeanAgent:
         system_prompt: str | None = None,
         model_alias: str = "main",
         tool_result_store: ToolResultStoreProtocol | None = None,
+        context_policy: ContextPolicy | None = None,
     ):
         """
         Initialize LeanAgent with injected dependencies.
@@ -81,6 +84,8 @@ class LeanAgent:
                           (defaults to LEAN_KERNEL_PROMPT if not provided)
             model_alias: Model alias for LLM calls (default: "main")
             tool_result_store: Optional store for large tool results (enables handle-based storage)
+            context_policy: Optional policy for context pack budgeting
+                          (defaults to conservative policy if not provided)
         """
         self.state_manager = state_manager
         self.llm_provider = llm_provider
@@ -88,6 +93,10 @@ class LeanAgent:
         self.model_alias = model_alias
         self.tool_result_store = tool_result_store
         self.logger = structlog.get_logger().bind(component="lean_agent")
+
+        # Context pack configuration (Story 9.2)
+        self.context_policy = context_policy or ContextPolicy.conservative_default()
+        self.context_builder = ContextBuilder(self.context_policy)
 
         # Build tools dict, ensure PlannerTool exists
         self.tools: dict[str, ToolProtocol] = {}
@@ -111,16 +120,26 @@ class LeanAgent:
         """Return base system prompt (backward compatibility)."""
         return self._base_system_prompt
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(
+        self,
+        mission: str | None = None,
+        state: dict[str, Any] | None = None,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> str:
         """
-        Build system prompt with dynamic plan context injection.
+        Build system prompt with dynamic plan and context pack injection.
 
         Reads current plan from PlannerTool and injects it into the system
-        prompt. This ensures the LLM always has visibility into plan state
-        on every loop iteration.
+        prompt. Also builds and injects a budgeted context pack with recent
+        tool results and other relevant context (Story 9.2).
+
+        Args:
+            mission: Optional mission description for context pack
+            state: Optional session state for context pack
+            messages: Optional message history for context pack
 
         Returns:
-            Complete system prompt with plan context (if plan exists).
+            Complete system prompt with plan context and context pack.
         """
         prompt = self._base_system_prompt
 
@@ -139,6 +158,18 @@ class LeanAgent:
                 )
                 prompt += plan_section
                 self.logger.debug("plan_injected", plan_steps=plan_output.count("\n") + 1)
+
+        # Build and inject context pack (Story 9.2)
+        context_pack = self.context_builder.build_context_pack(
+            mission=mission, state=state, messages=messages
+        )
+        if context_pack:
+            prompt += f"\n\n{context_pack}"
+            self.logger.debug(
+                "context_pack_injected",
+                pack_length=len(context_pack),
+                policy_max=self.context_policy.max_total_chars,
+            )
 
         return prompt
 
@@ -180,8 +211,10 @@ class LeanAgent:
             step += 1
             self.logger.info("loop_step", session_id=session_id, step=step)
 
-            # Dynamic context injection: rebuild system prompt with current plan
-            current_system_prompt = self._build_system_prompt()
+            # Dynamic context injection: rebuild system prompt with current plan and context pack
+            current_system_prompt = self._build_system_prompt(
+                mission=mission, state=state, messages=messages
+            )
             messages[0] = {"role": "system", "content": current_system_prompt}
 
             # Compress messages if exceeding threshold (async LLM-based)
@@ -405,8 +438,10 @@ class LeanAgent:
                 data={"step": step, "max_steps": self.MAX_STEPS},
             )
 
-            # Dynamic context injection: rebuild system prompt with current plan
-            current_system_prompt = self._build_system_prompt()
+            # Dynamic context injection: rebuild system prompt with current plan and context pack
+            current_system_prompt = self._build_system_prompt(
+                mission=mission, state=state, messages=messages
+            )
             messages[0] = {"role": "system", "content": current_system_prompt}
 
             # Compress messages if exceeding threshold (async LLM-based)
@@ -633,7 +668,7 @@ class LeanAgent:
         )
 
         # Extract old messages to summarize (skip system prompt)
-        old_messages = messages[1 : self.SUMMARY_THRESHOLD]
+        old_messages = messages[1:self.SUMMARY_THRESHOLD]
 
         # Build summary prompt
         summary_prompt = f"""Summarize this conversation history concisely:
@@ -672,7 +707,7 @@ Keep it factual and concise."""
                     "role": "system",
                     "content": f"[Previous Context Summary]\n{summary}",
                 },
-                *messages[self.SUMMARY_THRESHOLD :],  # Recent messages
+                *messages[self.SUMMARY_THRESHOLD:],  # Recent messages
             ]
 
             self.logger.info(
@@ -699,7 +734,7 @@ Keep it factual and concise."""
         self.logger.warning("using_fallback_compression")
 
         # Keep system prompt + last SUMMARY_THRESHOLD messages
-        compressed = [messages[0]] + messages[-self.SUMMARY_THRESHOLD :]
+        compressed = [messages[0]] + messages[-self.SUMMARY_THRESHOLD:]
 
         self.logger.info(
             "fallback_compression_complete",
@@ -861,4 +896,3 @@ Keep it factual and concise."""
             except Exception:
                 pass  # Ignore cleanup errors
         self.logger.debug("agent_closed")
-
