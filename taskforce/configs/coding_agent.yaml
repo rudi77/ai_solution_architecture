@@ -1,7 +1,7 @@
 # Coding Agent Development Configuration
 # Specialized agent for software development tasks
 
-profile: coding_dev
+profile: coding_agent
 specialist: coding  # Determines system prompt (Kernel + Coding Specialist)
 
 # Persistence configuration
@@ -55,7 +55,7 @@ tools:
   - type: GitTool
     module: taskforce.infrastructure.tools.native.git_tools
     params: {}
-  #
-  # - type: PythonTool
-  #   module: taskforce.infrastructure.tools.native.python_tool
-  #   params: {}
+  
+  - type: PythonTool
+    module: taskforce.infrastructure.tools.native.python_tool
+    params: {}
