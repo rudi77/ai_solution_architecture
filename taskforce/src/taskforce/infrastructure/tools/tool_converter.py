@@ -3,11 +3,18 @@ Tool Converter - OpenAI function calling format conversion.
 
 This module provides utilities for converting internal tool definitions
 to the format required by OpenAI's native function calling API.
+
+It also provides functions for creating lightweight handle+preview pairs
+from large tool results to keep message history small.
 """
 
 import json
 from typing import Any
 
+from taskforce.core.interfaces.tool_result_store import (
+    ToolResultHandle,
+    ToolResultPreview,
+)
 from taskforce.core.interfaces.tools import ToolProtocol
 
 
@@ -185,4 +192,114 @@ def assistant_tool_calls_to_message(
         "role": "assistant",
         "content": None,
         "tool_calls": tool_calls,
+    }
+
+
+def create_tool_result_preview(
+    handle: ToolResultHandle,
+    result: dict[str, Any],
+    max_preview_chars: int = 500,
+) -> ToolResultPreview:
+    """
+    Create a preview of a tool result for message history.
+
+    Extracts a short preview from the tool result to give the LLM context
+    without overwhelming the prompt. The preview focuses on the most
+    important fields (output, error, success status).
+
+    Args:
+        handle: Handle to the stored full result
+        result: Full tool result dictionary
+        max_preview_chars: Maximum characters for preview text (default: 500)
+
+    Returns:
+        ToolResultPreview with handle and short preview text
+
+    Example:
+        >>> result = {"success": True, "output": "..." * 10000}
+        >>> preview = create_tool_result_preview(handle, result)
+        >>> print(len(preview.preview_text))  # <= 500
+        >>> print(preview.truncated)  # True
+    """
+    # Build preview from key fields
+    preview_parts = []
+
+    # Success status
+    success = result.get("success", False)
+    preview_parts.append(f"Success: {success}")
+
+    # Error message if present
+    if not success and "error" in result:
+        error_msg = str(result["error"])[:200]
+        preview_parts.append(f"Error: {error_msg}")
+
+    # Output preview
+    if "output" in result:
+        output = str(result["output"])
+        if len(output) > max_preview_chars - 100:  # Reserve space for other fields
+            output_preview = output[: max_preview_chars - 100] + "..."
+            truncated = True
+        else:
+            output_preview = output
+            truncated = len(output) > max_preview_chars - 100
+
+        preview_parts.append(f"Output: {output_preview}")
+    else:
+        truncated = False
+
+    # Join parts
+    preview_text = " | ".join(preview_parts)
+
+    # Final truncation if still too long
+    if len(preview_text) > max_preview_chars:
+        preview_text = preview_text[:max_preview_chars] + "..."
+        truncated = True
+
+    return ToolResultPreview(
+        handle=handle,
+        preview_text=preview_text,
+        truncated=truncated,
+    )
+
+
+def tool_result_preview_to_message(
+    tool_call_id: str,
+    tool_name: str,
+    preview: ToolResultPreview,
+) -> dict[str, Any]:
+    """
+    Convert a tool result preview to an OpenAI tool message format.
+
+    This is the handle-based alternative to tool_result_to_message().
+    Instead of including the full result, it includes only the handle
+    and preview, keeping message history small.
+
+    Args:
+        tool_call_id: The unique ID from the tool_call request
+        tool_name: Name of the executed tool
+        preview: Preview with handle and short text
+
+    Returns:
+        Message dict in OpenAI tool response format:
+        {
+            "role": "tool",
+            "tool_call_id": "...",
+            "name": "tool_name",
+            "content": "JSON string with handle and preview"
+        }
+
+    Example:
+        >>> preview = create_tool_result_preview(handle, result)
+        >>> msg = tool_result_preview_to_message("call_abc", "file_read", preview)
+        >>> print(msg["role"])
+        'tool'
+    """
+    # Serialize preview to JSON string for message content
+    content = json.dumps(preview.to_dict(), ensure_ascii=False, default=str)
+
+    return {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "name": tool_name,
+        "content": content,
     }

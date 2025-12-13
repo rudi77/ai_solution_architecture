@@ -28,11 +28,14 @@ import structlog
 from taskforce.core.domain.models import ExecutionResult, StreamEvent
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.core.interfaces.state import StateManagerProtocol
+from taskforce.core.interfaces.tool_result_store import ToolResultStoreProtocol
 from taskforce.core.interfaces.tools import ToolProtocol
 from taskforce.core.prompts.autonomous_prompts import LEAN_KERNEL_PROMPT
 from taskforce.core.tools.planner_tool import PlannerTool
 from taskforce.infrastructure.tools.tool_converter import (
     assistant_tool_calls_to_message,
+    create_tool_result_preview,
+    tool_result_preview_to_message,
     tool_result_to_message,
     tools_to_openai_format,
 )
@@ -55,6 +58,8 @@ class LeanAgent:
     # Message history management (inspired by agent_v2 MessageHistory)
     MAX_MESSAGES = 50  # Hard limit on message count
     SUMMARY_THRESHOLD = 20  # Compress when exceeding this message count
+    # Tool result storage thresholds
+    TOOL_RESULT_STORE_THRESHOLD = 5000  # Store results larger than 5000 chars
 
     def __init__(
         self,
@@ -63,6 +68,7 @@ class LeanAgent:
         tools: list[ToolProtocol],
         system_prompt: str | None = None,
         model_alias: str = "main",
+        tool_result_store: ToolResultStoreProtocol | None = None,
     ):
         """
         Initialize LeanAgent with injected dependencies.
@@ -74,11 +80,13 @@ class LeanAgent:
             system_prompt: Base system prompt for LLM interactions
                           (defaults to LEAN_KERNEL_PROMPT if not provided)
             model_alias: Model alias for LLM calls (default: "main")
+            tool_result_store: Optional store for large tool results (enables handle-based storage)
         """
         self.state_manager = state_manager
         self.llm_provider = llm_provider
         self._base_system_prompt = system_prompt or LEAN_KERNEL_PROMPT
         self.model_alias = model_alias
+        self.tool_result_store = tool_result_store
         self.logger = structlog.get_logger().bind(component="lean_agent")
 
         # Build tools dict, ensure PlannerTool exists
@@ -240,10 +248,11 @@ class LeanAgent:
                         "result": tool_result,
                     })
 
-                    # Add tool result to messages
-                    messages.append(
-                        tool_result_to_message(tool_call_id, tool_name, tool_result)
+                    # Add tool result to messages (handle-based if store available and result is large)
+                    tool_message = await self._create_tool_message(
+                        tool_call_id, tool_name, tool_result, session_id, step
                     )
+                    messages.append(tool_message)
 
                     # Handle tool errors - LLM can see them and react
                     if not tool_result.get("success"):
@@ -541,10 +550,11 @@ class LeanAgent:
                             data={"action": tool_args.get("action", "unknown")},
                         )
 
-                    # Add tool result to messages
-                    messages.append(
-                        tool_result_to_message(tool_call_id, tool_name, tool_result)
+                    # Add tool result to messages (handle-based if store available and result is large)
+                    tool_message = await self._create_tool_message(
+                        tool_call_id, tool_name, tool_result, session_id, step
                     )
+                    messages.append(tool_message)
 
             elif content_accumulated:
                 # No tool calls - this is the final answer
@@ -765,6 +775,69 @@ Keep it factual and concise."""
         except Exception as e:
             self.logger.error("tool_exception", tool=tool_name, error=str(e))
             return {"success": False, "error": str(e)}
+
+    async def _create_tool_message(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        tool_result: dict[str, Any],
+        session_id: str,
+        step: int,
+    ) -> dict[str, Any]:
+        """
+        Create a tool message for message history.
+
+        If tool_result_store is available and the result is large, stores the
+        result and returns a handle+preview message. Otherwise, returns a
+        standard message with the full result (truncated).
+
+        Args:
+            tool_call_id: Tool call ID from LLM
+            tool_name: Name of the executed tool
+            tool_result: Full tool result dictionary
+            session_id: Current session ID
+            step: Current execution step
+
+        Returns:
+            Message dictionary for message history
+        """
+        # Calculate result size
+        result_json = json.dumps(tool_result, ensure_ascii=False, default=str)
+        result_size = len(result_json)
+
+        # Use handle-based storage if store available and result is large
+        if (
+            self.tool_result_store
+            and result_size > self.TOOL_RESULT_STORE_THRESHOLD
+        ):
+            # Store result and get handle
+            handle = await self.tool_result_store.put(
+                tool_name=tool_name,
+                result=tool_result,
+                session_id=session_id,
+                metadata={
+                    "step": step,
+                    "success": tool_result.get("success", False),
+                },
+            )
+
+            # Create preview
+            preview = create_tool_result_preview(handle, tool_result)
+
+            # Log handle usage
+            self.logger.info(
+                "tool_result_stored_with_handle",
+                tool=tool_name,
+                handle_id=handle.id,
+                size_chars=result_size,
+                preview_length=len(preview.preview_text),
+            )
+
+            # Return handle+preview message
+            return tool_result_preview_to_message(tool_call_id, tool_name, preview)
+        else:
+            # Use standard message with truncation
+            return tool_result_to_message(tool_call_id, tool_name, tool_result)
 
     async def _save_state(self, session_id: str, state: dict[str, Any]) -> None:
         """Save state including PlannerTool state."""
