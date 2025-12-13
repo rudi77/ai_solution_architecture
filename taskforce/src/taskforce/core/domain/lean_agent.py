@@ -28,6 +28,7 @@ import structlog
 from taskforce.core.domain.context_builder import ContextBuilder
 from taskforce.core.domain.context_policy import ContextPolicy
 from taskforce.core.domain.models import ExecutionResult, StreamEvent
+from taskforce.core.domain.token_budgeter import TokenBudgeter
 from taskforce.core.interfaces.llm import LLMProviderProtocol
 from taskforce.core.interfaces.state import StateManagerProtocol
 from taskforce.core.interfaces.tool_result_store import ToolResultStoreProtocol
@@ -56,12 +57,16 @@ class LeanAgent:
     tool calling capabilities of modern LLMs.
     """
 
-    MAX_STEPS = 30  # Safety limit to prevent infinite loops
+    # Default limits (can be overridden per agent type)
+    DEFAULT_MAX_STEPS = 30  # Conservative default for simple agents
     # Message history management (inspired by agent_v2 MessageHistory)
     MAX_MESSAGES = 50  # Hard limit on message count
-    SUMMARY_THRESHOLD = 20  # Compress when exceeding this message count
+    SUMMARY_THRESHOLD = 20  # Compress when exceeding this message count (legacy fallback)
     # Tool result storage thresholds
     TOOL_RESULT_STORE_THRESHOLD = 5000  # Store results larger than 5000 chars
+    # Token budget defaults
+    DEFAULT_MAX_INPUT_TOKENS = 100000  # ~100k tokens for input
+    DEFAULT_COMPRESSION_TRIGGER = 80000  # Trigger compression at 80% of max
 
     def __init__(
         self,
@@ -72,6 +77,9 @@ class LeanAgent:
         model_alias: str = "main",
         tool_result_store: ToolResultStoreProtocol | None = None,
         context_policy: ContextPolicy | None = None,
+        max_input_tokens: int | None = None,
+        compression_trigger: int | None = None,
+        max_steps: int | None = None,
     ):
         """
         Initialize LeanAgent with injected dependencies.
@@ -86,6 +94,10 @@ class LeanAgent:
             tool_result_store: Optional store for large tool results (enables handle-based storage)
             context_policy: Optional policy for context pack budgeting
                           (defaults to conservative policy if not provided)
+            max_input_tokens: Maximum input tokens allowed (default: 100k)
+            compression_trigger: Token count to trigger compression (default: 80k)
+            max_steps: Maximum execution steps allowed (default: 30 for simple agents,
+                      should be higher for RAG/document agents ~50-100)
         """
         self.state_manager = state_manager
         self.llm_provider = llm_provider
@@ -94,9 +106,18 @@ class LeanAgent:
         self.tool_result_store = tool_result_store
         self.logger = structlog.get_logger().bind(component="lean_agent")
 
+        # Execution limits configuration
+        self.max_steps = max_steps or self.DEFAULT_MAX_STEPS
+
         # Context pack configuration (Story 9.2)
         self.context_policy = context_policy or ContextPolicy.conservative_default()
         self.context_builder = ContextBuilder(self.context_policy)
+
+        # Token budget configuration (Story 9.3)
+        self.token_budgeter = TokenBudgeter(
+            max_input_tokens=max_input_tokens or self.DEFAULT_MAX_INPUT_TOKENS,
+            compression_trigger=compression_trigger or self.DEFAULT_COMPRESSION_TRIGGER,
+        )
 
         # Build tools dict, ensure PlannerTool exists
         self.tools: dict[str, ToolProtocol] = {}
@@ -204,12 +225,19 @@ class LeanAgent:
         messages = self._build_initial_messages(mission, state)
 
         # 3. Native tool calling loop
-        step = 0
+        step = 0  # Counts meaningful progress steps (tool calls or final answer)
+        loop_iterations = 0  # Counts all loop iterations (for debugging)
         final_message = ""
 
-        while step < self.MAX_STEPS:
-            step += 1
-            self.logger.info("loop_step", session_id=session_id, step=step)
+        while step < self.max_steps:
+            loop_iterations += 1
+            self.logger.debug(
+                "loop_iteration",
+                session_id=session_id,
+                iteration=loop_iterations,
+                progress_steps=step,
+                max_steps=self.max_steps,
+            )
 
             # Dynamic context injection: rebuild system prompt with current plan and context pack
             current_system_prompt = self._build_system_prompt(
@@ -219,6 +247,9 @@ class LeanAgent:
 
             # Compress messages if exceeding threshold (async LLM-based)
             messages = await self._compress_messages(messages)
+
+            # Preflight budget check (Story 9.3)
+            messages = await self._preflight_budget_check(messages)
 
             # Call LLM with tools
             result = await self.llm_provider.complete(
@@ -230,22 +261,32 @@ class LeanAgent:
             )
 
             if not result.get("success"):
-                self.logger.error("llm_call_failed", error=result.get("error"))
+                self.logger.error(
+                    "llm_call_failed",
+                    error=result.get("error"),
+                    iteration=loop_iterations,
+                    step=step,
+                )
                 # Add error to history and continue (LLM can recover)
-                messages.append({
-                    "role": "user",
-                    "content": f"[System Error: {result.get('error')}. Please try again.]",
-                })
+                # NOTE: This does NOT count as a progress step
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"[System Error: {result.get('error')}. Please try again.]",
+                    }
+                )
                 continue
 
             # Check for tool calls (native tool calling)
             tool_calls = result.get("tool_calls")
 
             if tool_calls:
-                # LLM wants to call tools
+                # LLM wants to call tools - this counts as a progress step
+                step += 1
                 self.logger.info(
                     "tool_calls_received",
                     step=step,
+                    iteration=loop_iterations,
                     count=len(tool_calls),
                     tools=[tc["function"]["name"] for tc in tool_calls],
                 )
@@ -273,13 +314,15 @@ class LeanAgent:
                     tool_result = await self._execute_tool(tool_name, tool_args)
 
                     # Record in execution history
-                    execution_history.append({
-                        "type": "tool_call",
-                        "step": step,
-                        "tool": tool_name,
-                        "args": tool_args,
-                        "result": tool_result,
-                    })
+                    execution_history.append(
+                        {
+                            "type": "tool_call",
+                            "step": step,
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "result": tool_result,
+                        }
+                    )
 
                     # Add tool result to messages (handle-based if store available and result is large)
                     tool_message = await self._create_tool_message(
@@ -301,34 +344,57 @@ class LeanAgent:
                 content = result.get("content", "")
 
                 if content:
-                    self.logger.info("final_answer_received", step=step)
+                    # Final answer - this counts as a progress step
+                    step += 1
+                    self.logger.info(
+                        "final_answer_received",
+                        step=step,
+                        iteration=loop_iterations,
+                        total_iterations=loop_iterations,
+                    )
                     final_message = content
 
-                    execution_history.append({
-                        "type": "final_answer",
-                        "step": step,
-                        "content": content,
-                    })
+                    execution_history.append(
+                        {
+                            "type": "final_answer",
+                            "step": step,
+                            "content": content,
+                        }
+                    )
                     break
                 else:
                     # Empty response - unusual, but handle it
-                    self.logger.warning("empty_response", step=step)
-                    messages.append({
-                        "role": "user",
-                        "content": "[System: Your response was empty. Please provide an answer or use a tool.]",
-                    })
+                    # NOTE: This does NOT count as a progress step
+                    self.logger.warning(
+                        "empty_response",
+                        step=step,
+                        iteration=loop_iterations,
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "[System: Your response was empty. Please provide an answer or use a tool.]",
+                        }
+                    )
 
         # 4. Determine final status
-        if step >= self.MAX_STEPS and not final_message:
+        if step >= self.max_steps and not final_message:
             status = "failed"
-            final_message = f"Exceeded maximum steps ({self.MAX_STEPS})"
+            final_message = f"Exceeded maximum steps ({self.max_steps})"
         else:
             status = "completed"
 
         # 5. Persist state
         await self._save_state(session_id, state)
 
-        self.logger.info("execute_complete", session_id=session_id, status=status)
+        self.logger.info(
+            "execute_complete",
+            session_id=session_id,
+            status=status,
+            progress_steps=step,
+            total_iterations=loop_iterations,
+            overhead_iterations=loop_iterations - step,
+        )
 
         return ExecutionResult(
             session_id=session_id,
@@ -405,9 +471,7 @@ class LeanAgent:
                     )
 
             # Emit final_answer if not already emitted
-            if not any(
-                e.get("type") == "final_answer" for e in result.execution_history
-            ):
+            if not any(e.get("type") == "final_answer" for e in result.execution_history):
                 yield StreamEvent(
                     event_type="final_answer",
                     data={"content": result.final_message},
@@ -425,17 +489,24 @@ class LeanAgent:
         messages = self._build_initial_messages(mission, state)
 
         # 3. Streaming execution loop
-        step = 0
+        step = 0  # Counts meaningful progress steps (tool calls or final answer)
+        loop_iterations = 0  # Counts all loop iterations (for debugging)
         final_message = ""
 
-        while step < self.MAX_STEPS:
-            step += 1
-            self.logger.info("stream_loop_step", session_id=session_id, step=step)
+        while step < self.max_steps:
+            loop_iterations += 1
+            self.logger.debug(
+                "stream_loop_iteration",
+                session_id=session_id,
+                iteration=loop_iterations,
+                progress_steps=step,
+                max_steps=self.max_steps,
+            )
 
-            # Emit step_start event
+            # Emit step_start event (with current progress step count)
             yield StreamEvent(
                 event_type="step_start",
-                data={"step": step, "max_steps": self.MAX_STEPS},
+                data={"step": step, "max_steps": self.max_steps, "iteration": loop_iterations},
             )
 
             # Dynamic context injection: rebuild system prompt with current plan and context pack
@@ -446,6 +517,9 @@ class LeanAgent:
 
             # Compress messages if exceeding threshold (async LLM-based)
             messages = await self._compress_messages(messages)
+
+            # Preflight budget check (Story 9.3)
+            messages = await self._preflight_budget_check(messages)
 
             # Stream LLM response
             tool_calls_accumulated: list[dict[str, Any]] = {}
@@ -524,6 +598,9 @@ class LeanAgent:
 
             # Process tool calls
             if tool_calls_accumulated:
+                # Tool calls received - this counts as a progress step
+                step += 1
+
                 # Convert accumulated dict to list format for message
                 tool_calls_list = [
                     {
@@ -540,6 +617,7 @@ class LeanAgent:
                 self.logger.info(
                     "stream_tool_calls_received",
                     step=step,
+                    iteration=loop_iterations,
                     count=len(tool_calls_list),
                     tools=[tc["function"]["name"] for tc in tool_calls_list],
                 )
@@ -593,8 +671,15 @@ class LeanAgent:
 
             elif content_accumulated:
                 # No tool calls - this is the final answer
+                # Final answer - this counts as a progress step
+                step += 1
                 final_message = content_accumulated
-                self.logger.info("stream_final_answer", step=step)
+                self.logger.info(
+                    "stream_final_answer",
+                    step=step,
+                    iteration=loop_iterations,
+                    total_iterations=loop_iterations,
+                )
 
                 yield StreamEvent(
                     event_type="final_answer",
@@ -604,15 +689,22 @@ class LeanAgent:
 
             else:
                 # Empty response - add prompt for LLM to continue
-                self.logger.warning("stream_empty_response", step=step)
-                messages.append({
-                    "role": "user",
-                    "content": "[System: Empty response. Please provide an answer or use a tool.]",
-                })
+                # NOTE: This does NOT count as a progress step
+                self.logger.warning(
+                    "stream_empty_response",
+                    step=step,
+                    iteration=loop_iterations,
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "[System: Empty response. Please provide an answer or use a tool.]",
+                    }
+                )
 
         # Handle max steps exceeded
-        if step >= self.MAX_STEPS and not final_message:
-            final_message = f"Exceeded maximum steps ({self.MAX_STEPS})"
+        if step >= self.max_steps and not final_message:
+            final_message = f"Exceeded maximum steps ({self.max_steps})"
             yield StreamEvent(
                 event_type="error",
                 data={"message": final_message, "step": step},
@@ -620,6 +712,15 @@ class LeanAgent:
 
         # Save state
         await self._save_state(session_id, state)
+
+        # Log execution summary
+        self.logger.info(
+            "execute_stream_complete",
+            session_id=session_id,
+            progress_steps=step,
+            total_iterations=loop_iterations,
+            overhead_iterations=loop_iterations - step,
+        )
 
         self.logger.info("execute_stream_complete", session_id=session_id, steps=step)
 
@@ -638,42 +739,64 @@ class LeanAgent:
             return output
         return output[:max_length] + "..."
 
-    async def _compress_messages(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    async def _compress_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
-        Compress message history using LLM-based summarization.
+        Compress message history using safe LLM-based summarization.
 
-        Inspired by agent_v2 MessageHistory.compress_history_async().
+        Strategy (Story 9.3 - Safe Compression):
+        1. Trigger based on token budget (primary) or message count (fallback)
+        2. Build safe summary input from sanitized message previews (NO raw dumps)
+        3. Use LLM to summarize old messages (skip system prompt)
+        4. Replace old messages with summary + keep recent messages
+        5. Fallback: Simple truncation if LLM summarization fails
 
-        Strategy:
-        1. Trigger when message count > SUMMARY_THRESHOLD (20 messages)
-        2. Use LLM to summarize old messages (skip system prompt)
-        3. Replace old messages with summary + keep recent messages
-        4. Fallback: Simple truncation if LLM summarization fails
-
-        This preserves context better than simple deletion while
-        preventing token overflow.
+        This prevents token overflow while preserving context.
         """
         message_count = len(messages)
 
+        # Budget-based trigger (primary)
+        should_compress_budget = self.token_budgeter.should_compress(
+            messages=messages,
+            tools=self._openai_tools,
+        )
+
+        # Message count trigger (fallback for backward compatibility)
+        should_compress_count = message_count > self.SUMMARY_THRESHOLD
+
         # Check if compression needed
-        if message_count <= self.SUMMARY_THRESHOLD:
+        if not (should_compress_budget or should_compress_count):
             return messages
 
         self.logger.warning(
             "compressing_messages",
             message_count=message_count,
             threshold=self.SUMMARY_THRESHOLD,
+            budget_trigger=should_compress_budget,
+            count_trigger=should_compress_count,
         )
 
         # Extract old messages to summarize (skip system prompt)
-        old_messages = messages[1:self.SUMMARY_THRESHOLD]
+        # CRITICAL: Limit to prevent explosion even in compression
+        max_messages_to_summarize = min(self.SUMMARY_THRESHOLD - 1, 15)  # Cap at 15
+        old_messages = messages[1 : 1 + max_messages_to_summarize]
+
+        # Build safe summary input (NO raw JSON dumps)
+        summary_input = self._build_safe_summary_input(old_messages)
+
+        # EMERGENCY GUARD: Check if summary input itself is too large
+        # If summary input > 50k chars (~12.5k tokens), use deterministic fallback
+        if len(summary_input) > 50000:
+            self.logger.error(
+                "compression_input_too_large",
+                input_length=len(summary_input),
+                action="using_deterministic_fallback",
+            )
+            return self._deterministic_compression(messages)
 
         # Build summary prompt
         summary_prompt = f"""Summarize this conversation history concisely:
 
-{json.dumps(old_messages, indent=2)}
+{summary_input}
 
 Provide a 2-3 paragraph summary of:
 - Key decisions made
@@ -682,21 +805,44 @@ Provide a 2-3 paragraph summary of:
 
 Keep it factual and concise."""
 
+        # CRITICAL: Budget-check the compression prompt itself
+        compression_messages = [{"role": "user", "content": summary_prompt}]
+        compression_estimated = self.token_budgeter.estimate_tokens(compression_messages)
+
+        if compression_estimated > self.token_budgeter.max_input_tokens:
+            self.logger.error(
+                "compression_prompt_over_budget",
+                estimated_tokens=compression_estimated,
+                max_tokens=self.token_budgeter.max_input_tokens,
+                action="using_deterministic_fallback",
+            )
+            return self._deterministic_compression(messages)
+
         try:
             # Use LLM to create summary
             result = await self.llm_provider.complete(
-                messages=[{"role": "user", "content": summary_prompt}],
+                messages=compression_messages,
                 model=self.model_alias,
                 temperature=0,
             )
 
+            # Check for context length exceeded error specifically
+            error = result.get("error", "")
+            if "context length" in error.lower() or "token limit" in error.lower():
+                self.logger.error(
+                    "compression_context_length_exceeded",
+                    error=error,
+                    action="using_deterministic_fallback",
+                )
+                return self._deterministic_compression(messages)
+
             if not result.get("success"):
                 self.logger.error(
                     "compression_failed",
-                    error=result.get("error"),
+                    error=error,
                 )
-                # Fallback: Keep recent messages only
-                return self._fallback_compression(messages)
+                # Fallback: Deterministic compression
+                return self._deterministic_compression(messages)
 
             summary = result.get("content", "")
 
@@ -707,7 +853,7 @@ Keep it factual and concise."""
                     "role": "system",
                     "content": f"[Previous Context Summary]\n{summary}",
                 },
-                *messages[self.SUMMARY_THRESHOLD:],  # Recent messages
+                *messages[self.SUMMARY_THRESHOLD :],  # Recent messages
             ]
 
             self.logger.info(
@@ -721,28 +867,126 @@ Keep it factual and concise."""
 
         except Exception as e:
             self.logger.error("compression_exception", error=str(e))
-            return self._fallback_compression(messages)
+            return self._deterministic_compression(messages)
 
-    def _fallback_compression(
-        self, messages: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
+    def _deterministic_compression(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
-        Fallback compression when LLM summarization fails.
+        Deterministic compression without LLM (emergency fallback).
 
-        Simply keeps system prompt + recent messages.
+        This is used when:
+        - Compression prompt itself is too large
+        - LLM compression fails
+        - Context length exceeded errors
+
+        Strategy:
+        - Keep system prompt
+        - Keep last 10 messages (hard cap)
+        - Add a simple text summary of what was dropped
+
+        This NEVER calls LLM and NEVER explodes.
         """
-        self.logger.warning("using_fallback_compression")
+        self.logger.warning(
+            "using_deterministic_compression",
+            original_count=len(messages),
+        )
 
-        # Keep system prompt + last SUMMARY_THRESHOLD messages
-        compressed = [messages[0]] + messages[-self.SUMMARY_THRESHOLD:]
+        # Keep system prompt
+        system_prompt = messages[0] if messages else {"role": "system", "content": ""}
+
+        # Keep last 10 messages (excluding system prompt)
+        recent_messages = messages[-10:] if len(messages) > 10 else messages[1:]
+
+        # Create simple summary of dropped content
+        dropped_count = len(messages) - len(recent_messages) - 1  # -1 for system
+        if dropped_count > 0:
+            summary_text = (
+                f"[{dropped_count} earlier messages compressed for token budget. "
+                f"Continuing from recent context.]"
+            )
+            compressed = [
+                system_prompt,
+                {"role": "system", "content": summary_text},
+                *recent_messages,
+            ]
+        else:
+            compressed = [system_prompt, *recent_messages]
 
         self.logger.info(
-            "fallback_compression_complete",
+            "deterministic_compression_complete",
             original_count=len(messages),
             compressed_count=len(compressed),
+            dropped_count=dropped_count,
         )
 
         return compressed
+
+    def _build_safe_summary_input(self, messages: list[dict[str, Any]]) -> str:
+        """
+        Build safe summary input from messages without raw JSON dumps.
+
+        Extracts only essential information from messages:
+        - Role and content (sanitized)
+        - Tool call names (not full arguments)
+        - Tool result previews (not raw outputs)
+
+        Args:
+            messages: List of messages to summarize
+
+        Returns:
+            Safe text representation for summary prompt
+        """
+        summary_parts = []
+
+        for idx, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            parts = [f"[Message {idx + 1} - {role}]"]
+
+            # Tool results (preview only, not raw output)
+            if role == "tool":
+                tool_name = msg.get("name", "unknown")
+                parts.append(f"Tool: {tool_name}")
+
+                # Try to parse content as JSON to extract preview
+                try:
+                    content_str = msg.get("content", "")
+                    if content_str:
+                        result_data = json.loads(content_str)
+                        preview = self.token_budgeter.extract_tool_output_preview(result_data)
+                        parts.append(f"Result: {preview}")
+                except (json.JSONDecodeError, TypeError):
+                    # If not JSON, just truncate content
+                    content_str = str(msg.get("content", ""))[:500]
+                    parts.append(f"Result: {content_str}")
+            else:
+                # Content (sanitized) - only for non-tool messages
+                content = msg.get("content")
+                if content:
+                    # Sanitize content to prevent overflow
+                    sanitized_msg = self.token_budgeter.sanitize_message(msg)
+                    sanitized_content = sanitized_msg.get("content", "")
+                    if sanitized_content:
+                        parts.append(f"Content: {sanitized_content[:1000]}")
+
+                # Tool calls (names only, not full arguments)
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    tool_names = [
+                        tc.get("function", {}).get("name", "unknown") for tc in tool_calls
+                    ]
+                    parts.append(f"Tools called: {', '.join(tool_names)}")
+
+            summary_parts.append("\n".join(parts))
+
+        return "\n\n".join(summary_parts)
+
+    def _fallback_compression(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Fallback compression when LLM summarization fails.
+
+        DEPRECATED: Now redirects to _deterministic_compression for consistency.
+        """
+        self.logger.warning("fallback_compression_redirecting_to_deterministic")
+        return self._deterministic_compression(messages)
 
     def _build_initial_messages(
         self,
@@ -781,8 +1025,7 @@ Keep it factual and concise."""
         answers_text = ""
         if user_answers:
             answers_text = (
-                f"\n\n## User Provided Information\n"
-                f"{json.dumps(user_answers, indent=2)}"
+                f"\n\n## User Provided Information\n" f"{json.dumps(user_answers, indent=2)}"
             )
 
         user_message = f"{mission}{answers_text}"
@@ -841,10 +1084,7 @@ Keep it factual and concise."""
         result_size = len(result_json)
 
         # Use handle-based storage if store available and result is large
-        if (
-            self.tool_result_store
-            and result_size > self.TOOL_RESULT_STORE_THRESHOLD
-        ):
+        if self.tool_result_store and result_size > self.TOOL_RESULT_STORE_THRESHOLD:
             # Store result and get handle
             handle = await self.tool_result_store.put(
                 tool_name=tool_name,
@@ -873,6 +1113,59 @@ Keep it factual and concise."""
         else:
             # Use standard message with truncation
             return tool_result_to_message(tool_call_id, tool_name, tool_result)
+
+    async def _preflight_budget_check(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Preflight budget check before LLM call.
+
+        If messages exceed budget even after compression, apply emergency
+        sanitization and truncation to prevent token overflow errors.
+
+        Args:
+            messages: Message list to check
+
+        Returns:
+            Sanitized/truncated message list if needed, otherwise original
+        """
+        # Check if over budget
+        if not self.token_budgeter.is_over_budget(
+            messages=messages,
+            tools=self._openai_tools,
+        ):
+            return messages
+
+        # Emergency: Still over budget after compression
+        self.logger.error(
+            "emergency_budget_enforcement",
+            message_count=len(messages),
+            action="sanitize_and_truncate",
+        )
+
+        # Step 1: Sanitize all messages (hard caps on content)
+        sanitized = self.token_budgeter.sanitize_messages(messages)
+
+        # Step 2: If still over budget, keep only system + recent messages
+        if self.token_budgeter.is_over_budget(
+            messages=sanitized,
+            tools=self._openai_tools,
+        ):
+            self.logger.error(
+                "emergency_truncation",
+                original_count=len(sanitized),
+                action="keep_recent_only",
+            )
+
+            # Keep system prompt + last 10 messages (aggressive truncation)
+            emergency_truncated = [sanitized[0]] + sanitized[-10:]
+
+            self.logger.warning(
+                "emergency_truncation_complete",
+                final_count=len(emergency_truncated),
+            )
+
+            return emergency_truncated
+
+        return sanitized
 
     async def _save_state(self, session_id: str, state: dict[str, Any]) -> None:
         """Save state including PlannerTool state."""

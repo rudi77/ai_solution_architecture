@@ -141,7 +141,16 @@ def _truncate_tool_result(
     truncated = result.copy()
 
     # Fields that commonly contain large outputs
-    large_fields = ["output", "result", "content", "stdout", "stderr", "data"]
+    # NOTE: RAG tools often return large payloads under "results" (list of chunks).
+    large_fields = [
+        "output",
+        "result",
+        "content",
+        "stdout",
+        "stderr",
+        "data",
+        "results",
+    ]
 
     for field in large_fields:
         if field in truncated:
@@ -149,19 +158,15 @@ def _truncate_tool_result(
             if isinstance(value, str) and len(value) > max_chars:
                 overflow = len(value) - max_chars
                 truncated[field] = (
-                    value[:max_chars]
-                    + f"\n\n[... TRUNCATED - {overflow} more chars ...]"
+                    value[:max_chars] + f"\n\n[... TRUNCATED - {overflow} more chars ...]"
                 )
             elif isinstance(value, (list, dict)):
                 # For structured data, convert to string and check size
-                value_str = json.dumps(
-                    value, ensure_ascii=False, default=str
-                )
+                value_str = json.dumps(value, ensure_ascii=False, default=str)
                 if len(value_str) > max_chars:
                     overflow = len(value_str) - max_chars
                     truncated[field] = (
-                        value_str[:max_chars]
-                        + f"\n\n[... TRUNCATED - {overflow} more chars ...]"
+                        value_str[:max_chars] + f"\n\n[... TRUNCATED - {overflow} more chars ...]"
                     )
 
     return truncated

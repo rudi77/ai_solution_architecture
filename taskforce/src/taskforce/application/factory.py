@@ -419,12 +419,17 @@ class AgentFactory:
         # Create ContextPolicy from config (Story 9.2)
         context_policy = self._create_context_policy(config)
 
+        # Get max_steps from config (defaults to LeanAgent.DEFAULT_MAX_STEPS if not specified)
+        agent_config = config.get("agent", {})
+        max_steps = agent_config.get("max_steps")  # None means use agent default
+
         self.logger.debug(
             "lean_agent_created",
             tools_count=len(tools),
             tool_names=[t.name for t in tools],
             model_alias=model_alias,
             context_policy_max_items=context_policy.max_items,
+            max_steps=max_steps or "default",
         )
 
         agent = LeanAgent(
@@ -434,6 +439,7 @@ class AgentFactory:
             system_prompt=system_prompt,
             model_alias=model_alias,
             context_policy=context_policy,
+            max_steps=max_steps,
         )
 
         # Store MCP contexts on agent for lifecycle management
@@ -577,6 +583,10 @@ class AgentFactory:
         # Create ContextPolicy from config (Story 9.2)
         context_policy = self._create_context_policy(config)
 
+        # Get max_steps from config (defaults to LeanAgent.DEFAULT_MAX_STEPS if not specified)
+        agent_config = config.get("agent", {})
+        max_steps = agent_config.get("max_steps")  # None means use agent default
+
         self.logger.debug(
             "lean_agent_from_definition_created",
             tools_count=len(tools),
@@ -584,6 +594,7 @@ class AgentFactory:
             model_alias=model_alias,
             prompt_length=len(system_prompt),
             context_policy_max_items=context_policy.max_items,
+            max_steps=max_steps or "default",
         )
 
         agent = LeanAgent(
@@ -593,6 +604,7 @@ class AgentFactory:
             system_prompt=system_prompt,
             model_alias=model_alias,
             context_policy=context_policy,
+            max_steps=max_steps,
         )
 
         # Store MCP contexts on agent for lifecycle management

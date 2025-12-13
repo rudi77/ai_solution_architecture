@@ -119,13 +119,14 @@ async def test_compression_fallback_on_llm_failure(
 
     result = await lean_agent._compress_messages(messages)
 
-    # Should use fallback compression
+    # Should use deterministic fallback compression
     assert len(result) < len(messages)
     assert result[0]["role"] == "system"  # System prompt preserved
 
-    # Fallback keeps: system + last SUMMARY_THRESHOLD messages
-    expected_count = 1 + lean_agent.SUMMARY_THRESHOLD
-    assert len(result) == expected_count
+    # Deterministic compression keeps: system + summary message + last 10 messages
+    # (changed from old behavior which kept SUMMARY_THRESHOLD=20)
+    assert len(result) <= 12  # system + summary + 10 recent messages
+    assert len(result) > 10  # At least some messages kept
 
 
 @pytest.mark.asyncio
@@ -143,13 +144,13 @@ async def test_compression_fallback_on_exception(lean_agent, mock_llm_provider):
 
     result = await lean_agent._compress_messages(messages)
 
-    # Should use fallback compression
+    # Should use deterministic fallback compression
     assert len(result) < len(messages)
     assert result[0]["role"] == "system"
 
-    # Fallback keeps: system + last SUMMARY_THRESHOLD messages
-    expected_count = 1 + lean_agent.SUMMARY_THRESHOLD
-    assert len(result) == expected_count
+    # Deterministic compression keeps: system + summary message + last 10 messages
+    assert len(result) <= 12  # system + summary + 10 recent messages
+    assert len(result) > 10  # At least some messages kept
 
 
 @pytest.mark.asyncio
@@ -163,11 +164,15 @@ async def test_fallback_compression_directly(lean_agent):
 
     result = lean_agent._fallback_compression(messages)
 
-    # Should keep system + last SUMMARY_THRESHOLD
-    expected_count = 1 + lean_agent.SUMMARY_THRESHOLD
-    assert len(result) == expected_count
+    # Now redirects to deterministic compression
+    # Keeps: system + summary message + last 10 messages
+    assert len(result) <= 12  # system + summary + 10 recent messages
+    assert len(result) > 10  # At least some messages kept
     assert result[0] == messages[0]  # System prompt
-    assert result[1:] == messages[-lean_agent.SUMMARY_THRESHOLD :]  # Recent
+    # Second message should be the summary
+    assert "compressed for token budget" in result[1]["content"]
+    # Rest should be recent messages
+    assert result[-1] == messages[-1]  # Last message preserved
 
 
 @pytest.mark.asyncio
@@ -219,9 +224,12 @@ async def test_compression_summary_prompt_format(
     assert "Important tool results" in prompt
     assert "Context needed" in prompt
 
-    # Verify JSON of old messages is included
-    old_messages = messages[1 : lean_agent.SUMMARY_THRESHOLD]
-    assert json.dumps(old_messages, indent=2) in prompt
+    # Verify safe summary format is used (NOT raw JSON dumps)
+    # Story 9.3: Safe compression should use [Message N - role] format
+    assert "[Message" in prompt
+    assert "Content:" in prompt
+    # Should NOT contain raw JSON array format
+    assert json.dumps(messages[1 : lean_agent.SUMMARY_THRESHOLD], indent=2) not in prompt
 
 
 @pytest.mark.asyncio
