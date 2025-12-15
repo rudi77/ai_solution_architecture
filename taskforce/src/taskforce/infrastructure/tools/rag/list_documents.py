@@ -8,7 +8,7 @@ from taskforce.core.interfaces.tools import ToolProtocol, ApprovalRiskLevel
 from taskforce.infrastructure.tools.rag.azure_search_base import AzureSearchBase
 
 
-class ListDocumentsTool:
+class ListDocumentsTool(ToolProtocol):
     """
     List available documents from the content-blocks index.
     

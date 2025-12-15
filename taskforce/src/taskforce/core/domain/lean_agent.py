@@ -216,7 +216,7 @@ class LeanAgent:
         # 1. Load or initialize state
         state = await self.state_manager.load_state(session_id) or {}
         execution_history: list[dict[str, Any]] = []
-
+    
         # Restore PlannerTool state if available
         if self._planner and state.get("planner_state"):
             self._planner.set_state(state["planner_state"])
@@ -246,10 +246,10 @@ class LeanAgent:
             messages[0] = {"role": "system", "content": current_system_prompt}
 
             # Compress messages if exceeding threshold (async LLM-based)
-            messages = await self._compress_messages(messages)
+            #messages = await self._compress_messages(messages)
 
             # Preflight budget check (Story 9.3)
-            messages = await self._preflight_budget_check(messages)
+            #messages = await self._preflight_budget_check(messages)
 
             # Call LLM with tools
             result = await self.llm_provider.complete(

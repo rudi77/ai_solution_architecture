@@ -6,7 +6,7 @@ that integrate with Azure AI Search.
 """
 
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents.aio import SearchClient
 
@@ -161,3 +161,46 @@ class AzureSearchBase:
         # No cleanup needed for SearchClient (handled per-use)
         pass
 
+
+@dataclass
+class LocationMetadata:
+    """
+    The location metadata for a chunk of content.
+    """
+    pageNumber: int
+    boundingPolygons: str
+
+
+@dataclass
+class Chunk:
+    """
+    A chunk of content from a document.
+    """
+    content_id: str
+    document_id: str
+    document_title: str
+    image_document_id: str
+    content_text: str
+    content_embedding: Optional[List[float]] = None 
+    org_id: str
+    user_id: str
+    scope: str
+    conversation_id: str
+    document_type: str
+    document_id: str
+    content_path: str
+    locationMetadata: LocationMetadata
+    hash: str
+
+@dataclass
+class Document:
+    """
+    A document from the database.
+    """
+    document_id: str
+    document_title: str
+    document_type: str
+    org_id: str
+    user_id: str
+    scope: str
+    chunks: Optional[List[Chunk]] = None

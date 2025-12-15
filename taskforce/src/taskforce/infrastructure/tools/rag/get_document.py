@@ -200,6 +200,17 @@ class GetDocumentTool:
 
                 async for chunk in search_results:
                     chunk_data = dict(chunk)
+                    
+                    # Remove polygons from locationMetadata
+                    location_metadata = chunk_data.get("locationMetadata")
+                    if location_metadata and isinstance(location_metadata, dict):
+                        # Create a copy without polygon data
+                        cleaned_metadata = {
+                            k: v for k, v in location_metadata.items()
+                            if k not in ["polygon", "polygons", "boundingRegions"]
+                        }
+                        chunk_data["locationMetadata"] = cleaned_metadata
+                    
                     chunks.append(chunk_data)
                     chunk_ids.append(chunk_data.get("content_id"))
 
@@ -221,7 +232,6 @@ class GetDocumentTool:
                         has_images = True
 
                     # Extract max page number from locationMetadata
-                    location_metadata = chunk_data.get("locationMetadata")
                     if (location_metadata and
                             isinstance(location_metadata, dict)):
                         page_num = location_metadata.get("pageNumber")
