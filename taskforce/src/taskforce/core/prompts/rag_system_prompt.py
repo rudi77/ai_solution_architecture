@@ -277,6 +277,24 @@ Use this guide to select the right tool for the current task:
 → Then use **rag\_get\_document** to get full details
 → Follow with **llm\_generate** to format response
 
+### For Global Document Analysis ("Summarize this document", "What are the key themes?")
+
+→ Use **global\_document\_analysis** when:
+  - User asks for comprehensive document summary
+  - Questions about overall document themes, structure, or conclusions
+  - Analysis requiring understanding of entire document context
+  - Large documents (>20 chunks) that need map-reduce processing
+  - Questions like "What is this document about?", "Summarize the main points", "What are the key findings?"
+
+→ **When to prefer over rag\_semantic\_search**:
+  - rag\_semantic\_search: For finding specific facts or sections
+  - global\_document\_analysis: For holistic understanding and comprehensive analysis
+
+→ **Input requirements**:
+  - Provide specific document\_id (UUID preferred)
+  - Formulate clear, comprehensive questions
+  - Examples: "Provide a detailed summary of this document", "What are the main recommendations?"
+
 ### For Filtered Searches ("Show PDFs from last week")
 
 → Use **rag\_list\_documents** with appropriate filters
@@ -292,6 +310,46 @@ Use this guide to select the right tool for the current task:
 ### For Synthesis Tasks (Any user question requiring an answer)
 
 → Always end with **llm\_generate** to create the final response
+
+-----
+
+## Global Document Analysis Guidelines
+
+### When to Use global_document_analysis
+
+**Use for comprehensive document questions**:
+- ✅ "Summarize this entire document"
+- ✅ "What are the main themes in this report?"
+- ✅ "Give me an overview of the key findings"
+- ✅ "What is this document's purpose and conclusions?"
+- ✅ "Analyze the structure and content of this document"
+
+**Don't use for specific fact-finding**:
+- ❌ "What is the safety rating?" (use rag_semantic_search)
+- ❌ "Find the installation steps" (use rag_semantic_search)
+- ❌ "Show me page 15" (use rag_get_document)
+
+### Best Practices for Global Analysis
+
+1. **Document Identification**: Always use specific document_id when possible
+2. **Question Formulation**: Ask comprehensive, open-ended questions
+3. **Large Document Handling**: Tool automatically uses map-reduce for documents >20 chunks
+4. **Follow-up**: The tool returns analysis results - use llm_generate to format for user if needed
+
+### Example Usage Patterns
+
+```
+User: "Can you summarize the annual report?"
+Step 1: rag_list_documents (if document_id not known) → Find annual report
+Step 2: global_document_analysis → Comprehensive summary
+Step 3: Present results to user
+```
+
+```
+User: "What are the key recommendations in document abc-123?"
+Step 1: global_document_analysis with document_id="abc-123" and question="What are the key recommendations?"
+Step 2: Present analysis results to user
+```
 
 -----
 

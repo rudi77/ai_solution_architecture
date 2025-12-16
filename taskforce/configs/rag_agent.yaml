@@ -71,6 +71,14 @@ tools:
         user_id: "default_user"
         org_id: "default_org"
         scope: "shared"
+
+  - type: GlobalDocumentAnalysisTool
+    module: taskforce.infrastructure.tools.rag.global_document_analysis
+    params:
+      user_context:
+        user_id: "default_user"
+        org_id: "default_org"
+        scope: "shared"
   
   # Standard tools
   - type: LLMTool
