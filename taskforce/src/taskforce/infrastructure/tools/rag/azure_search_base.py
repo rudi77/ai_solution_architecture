@@ -358,24 +358,10 @@ class Document:
             chunks = []
             
             for chunk_item in chunks_data:
+                # Use from_azure_search_result to handle @search.* fields properly
+                chunks.append(Chunk.from_azure_search_result(chunk_item))
                 # Handle cases where chunk might be a string or unexpected format
-                if isinstance(chunk_item, str):
-                    # Skip string chunks - they're likely content references, not full chunk objects
-                    continue
-                elif isinstance(chunk_item, dict):
-                    try:
-                        # Use from_azure_search_result to handle @search.* fields properly
-                        chunks.append(Chunk.from_azure_search_result(chunk_item))
-                    except Exception as chunk_error:
-                        # Log the error but continue processing other chunks
-                        import structlog
-                        logger = structlog.get_logger()
-                        logger.warning("Skipping invalid chunk", chunk_item=chunk_item, error=str(chunk_error))
-                        continue
-                else:
-                    # Unknown chunk format, skip it
-                    continue
-                    
+                                    
             return Document(
                 document_id=data["document_id"],
                 document_title=data["document_title"],
